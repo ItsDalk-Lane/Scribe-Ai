@@ -3,7 +3,7 @@
   "name": "Scribe Ai",
   "version": "0.1.0",
   "minAppVersion": "1.11.4",
-  "isDesktopOnly": false,
+  "isDesktopOnly": true,
   "description": "Model settings for your vault.",
   "author": "ItsDalk-Lane",
   "authorUrl": "https://github.com/ItsDalk-Lane"

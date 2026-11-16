@@ -1,10 +1,13 @@
+import { uiText } from '../uiText';
+
 /** 任务入口：接收用户指令与补充信息，提交给编排层 */
 export default function TaskInput() {
+	const text = uiText();
 	return (
 		<div className="scribe-panel scribe-task-input">
-			<textarea className="scribe-input" placeholder="描述要完成的任务" rows={3} />
+			<textarea className="scribe-input" placeholder={text.taskPlaceholder} rows={3} />
 			<button className="scribe-button" type="button">
-				提交
+				{text.submit}
 			</button>
 		</div>
 	);

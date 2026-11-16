@@ -1,3 +1,10 @@
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	CredentialStore as PiCredentialStore,
+	ThinkingLevel,
+	Usage,
+} from '@earendil-works/pi-ai';
 import type { App } from 'obsidian';
 
 /** 占位骨架期各层尚未实现的统一信号 */
@@ -21,6 +28,10 @@ export interface Message {
 	content: string;
 	/** role 为 tool 时对应的工具调用 id */
 	toolCallId?: string;
+	toolName?: string;
+	isError?: boolean;
+	/** assistant 消息中由模型发起的工具调用 */
+	toolCalls?: ToolCall[];
 }
 
 export interface NoteRef {
@@ -86,14 +97,31 @@ export interface ModelRequest {
 	system?: string;
 	messages: Message[];
 	tools: ToolSpec[];
+	signal?: AbortSignal;
+	maxTokens?: number;
+	temperature?: number;
+	reasoning?: ThinkingLevel;
+	sessionId?: string;
+	maxRetries?: number;
 }
 
 export type StopReason = 'end' | 'tool-calls' | 'limit';
 
 export interface ModelResponse {
 	content: string;
+	thinking?: string;
 	toolCalls: ToolCall[];
 	stopReason: StopReason;
+	usage?: Usage;
+	/** pi-ai 已归一化的完整响应，供需要思考、用量与服务商元数据的调用方使用 */
+	raw: AssistantMessage;
+}
+
+export type ModelStreamEvent = AssistantMessageEvent;
+
+export interface ModelStream extends AsyncIterable<ModelStreamEvent> {
+	result(): Promise<ModelResponse>;
+	cancel(reason?: unknown): void;
 }
 
 /* ───────────── 运行状态 ───────────── */
@@ -118,22 +146,33 @@ export interface ModelProviderInfo {
 
 export interface ModelService {
 	providers(): ModelProviderInfo[];
+	refresh(providerId?: string): Promise<void>;
 	send(request: ModelRequest): Promise<ModelResponse>;
+	stream(request: ModelRequest): ModelStream;
+}
+
+export type ConnectionPhase = 'connecting' | 'streaming' | 'done' | 'error';
+
+export interface CommunicationLogEntry {
+	requestId: string;
+	phase: ConnectionPhase;
+	at: number;
+	method?: string;
+	origin?: string;
+	path?: string;
+	status?: number;
+	error?: string;
+	proxy?: 'direct' | 'configured' | 'environment' | 'system';
 }
 
 export interface Transport {
-	postJson(
-		url: string,
-		body: unknown,
-		headers: Record<string, string>,
-	): Promise<unknown>;
+	fetch: typeof fetch;
+	configure(settings: CommunicationSettings): void;
+	onStatus(listener: (entry: CommunicationLogEntry) => void): () => void;
+	logs(): CommunicationLogEntry[];
 }
 
-export interface CredentialStore {
-	get(providerId: string): string | undefined;
-	set(providerId: string, secret: string): Promise<void>;
-	clear(providerId: string): Promise<void>;
-}
+export type CredentialStore = PiCredentialStore;
 
 export interface CommunicationLayer {
 	models: ModelService;
@@ -268,11 +307,18 @@ export interface RuntimeLayer {
 
 /* ───────────── 跨层汇总 ───────────── */
 
+export interface CommunicationSettings {
+	/** SecretStorage 条目的 ID；条目的值才是凭据，不保存到这里 */
+	credentialIds: Record<string, string>;
+	proxyUrl: string;
+}
+
 export interface ScribeSettings {
 	enabled: boolean;
 	providerId: string;
 	model: string;
 	run: RunPolicy;
+	communication: CommunicationSettings;
 }
 
 export interface ScribeServices {

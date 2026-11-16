@@ -1,9 +1,15 @@
-import { notImplemented } from '../types';
-import type { Transport } from '../types';
+import type { CommunicationSettings, Transport } from '../types';
+import { diagnostics } from './diagnostics';
+import { nodeFetch } from './nodeFetch';
+import { configureProxy } from './proxy';
 
-/** 模型请求的网络传输：连接状态与通信异常在此处理 */
-export function createTransport(): Transport {
+/** 模型请求的唯一网络出口；SDK 与 Google 适配器均使用标准 fetch 契约。 */
+export function createTransport(settings: CommunicationSettings): Transport {
+	configureProxy({ proxyUrl: settings.proxyUrl });
 	return {
-		postJson: () => notImplemented('模型请求传输'),
+		fetch: nodeFetch,
+		configure: (next) => configureProxy({ proxyUrl: next.proxyUrl }),
+		onStatus: (listener) => diagnostics.subscribe(listener),
+		logs: () => diagnostics.list(),
 	};
 }

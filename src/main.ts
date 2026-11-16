@@ -2,6 +2,7 @@ import { Plugin, WorkspaceLeaf } from 'obsidian';
 import { CHAT_VIEW_TYPE } from './constants';
 import { ChatView } from './interaction/ChatView';
 import { ScribeAiSettingTab } from './interaction/SettingsTab';
+import { uiText } from './interaction/uiText';
 import { normalizeSettings } from './orchestration/settings/defaults';
 import { createServices } from './services';
 import type { ScribeServices, ScribeSettings } from './types';
@@ -17,7 +18,7 @@ export default class ScribeAiPlugin extends Plugin {
 
 		this.addCommand({
 			id: 'open-chat',
-			name: 'Open agent chat',
+			name: uiText().openChatCommand,
 			callback: () => void this.activateChatView(),
 		});
 

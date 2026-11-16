@@ -29,10 +29,12 @@ export function createServices(app: App, settings: ScribeSettings): ScribeServic
 	const tools = createToolLayer();
 
 	// 第五层：通信层（仅负责模型服务接入）
+	const credentials = createCredentialStore(app, settings.communication);
+	const transport = createTransport(settings.communication);
 	const communication: CommunicationLayer = {
-		models: createModelService(),
-		transport: createTransport(),
-		credentials: createCredentialStore(),
+		models: createModelService(credentials, transport),
+		transport,
+		credentials,
 	};
 
 	// 第二层：编排层（会话、任务、上下文、授权、持久化）
