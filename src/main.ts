@@ -1,21 +1,24 @@
-import { Notice, Plugin } from 'obsidian';
-import {
-	DEFAULT_SETTINGS,
-	ScribeAiSettings,
-	ScribeAiSettingTab,
-} from './settings';
+import { Plugin, WorkspaceLeaf } from 'obsidian';
+import { CHAT_VIEW_TYPE } from './constants';
+import { ChatView } from './interaction/ChatView';
+import { ScribeAiSettingTab } from './interaction/SettingsTab';
+import { normalizeSettings } from './orchestration/settings/defaults';
+import { createServices } from './services';
+import type { ScribeServices, ScribeSettings } from './types';
 
 export default class ScribeAiPlugin extends Plugin {
-	settings!: ScribeAiSettings;
+	services!: ScribeServices;
 
 	async onload() {
-		await this.loadSettings();
+		const settings = normalizeSettings((await this.loadData()) as Partial<ScribeSettings> | null);
+		this.services = createServices(this.app, settings);
 
-		// shortcut: placeholder command, replace it with the first real feature
+		this.registerView(CHAT_VIEW_TYPE, (leaf) => new ChatView(leaf, this));
+
 		this.addCommand({
-			id: 'placeholder',
-			name: 'Placeholder',
-			callback: () => new Notice('Scribe AI has no feature wired up yet.'),
+			id: 'open-chat',
+			name: 'Open agent chat',
+			callback: () => void this.activateChatView(),
 		});
 
 		this.addSettingTab(new ScribeAiSettingTab(this.app, this));
@@ -23,15 +26,14 @@ export default class ScribeAiPlugin extends Plugin {
 
 	onunload() {}
 
-	async loadSettings() {
-		this.settings = Object.assign(
-			{},
-			DEFAULT_SETTINGS,
-			(await this.loadData()) as Partial<ScribeAiSettings>,
-		);
+	async activateChatView() {
+		const leaf: WorkspaceLeaf | null = this.app.workspace.getRightLeaf(false);
+		if (!leaf) return;
+		await leaf.setViewState({ type: CHAT_VIEW_TYPE, active: true });
+		await this.app.workspace.revealLeaf(leaf);
 	}
 
 	async saveSettings() {
-		await this.saveData(this.settings);
+		await this.saveData(this.services.settings);
 	}
 }

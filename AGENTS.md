@@ -300,3 +300,8 @@ Take the first option that fully works:
 Never cut: validation at trust boundaries, error handling that prevents data loss, security, accessibility, the calibration real hardware needs, anything the user asked for.
 
 (Yes, this file also applies to agents working on the ponytail repo itself. Especially to them.)
+
+## 构建与测试库同步
+
+- `npm run build` 会在类型检查与打包成功后，把 `main.js`、`manifest.json`、`styles.css`（存在时）复制到测试库 `~/Desktop/Scribe/.obsidian/plugins/scribe-ai/`；`data.json` 不会被改动。
+- 编码 Agent 完成任务后必须重新构建一次（Pi 里由 `.pi/extensions/rebuild-after-task.ts` 在每轮结束时自动执行）。

@@ -1,0 +1,32 @@
+.scribe-app {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	padding: 12px;
+	height: 100%;
+	overflow-y: auto;
+}
+
+.scribe-panel {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	padding: 8px;
+	color: var(--text-muted);
+}
+
+.scribe-task-input {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-top: auto;
+}
+
+.scribe-input {
+	width: 100%;
+	resize: vertical;
+	font-family: inherit;
+}
+
+.scribe-button {
+	align-self: flex-end;
+}

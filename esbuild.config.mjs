@@ -33,6 +33,7 @@ const context = await esbuild.context({
 		...builtinModules,
 	],
 	format: 'cjs',
+	jsx: 'automatic',
 	target: 'es2021',
 	logLevel: 'info',
 	sourcemap: prod ? false : 'inline',
