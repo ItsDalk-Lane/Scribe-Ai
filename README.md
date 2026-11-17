@@ -30,9 +30,9 @@ The communication layer pins `@earendil-works/pi-ai@1.5.2` and exposes its built
 
 Credentials are managed by **Obsidian SecretStorage**, never by `data.json`:
 
-1. Create a secret in Obsidian. For automatic lookup, use the ID `scribe-ai-<providerId>` (for example, `scribe-ai-openai`) and store the raw API key as its value.
-2. In **Settings → Scribe Ai**, set the provider ID and select the secret with **Provider credential**. The setting stores only the secret ID.
-3. Set a model ID from the selected provider's pi-ai catalog.
+1. Open **Settings → Scribe Ai → Models** and select **Add provider** or edit an existing provider.
+2. Link an existing Obsidian secret or create one with your API key. The plugin stores only the secret ID. If you previously relied on a `scribe-ai-<providerId>` name alone, link that secret explicitly.
+3. Add the models you need and save. Unlinking a secret or removing a provider leaves the secret in Obsidian for other configurations that may use it.
 
 OAuth token refreshes are serialized and written back to the same secret. Secrets, request bodies, response bodies, and query strings are excluded from communication logs.
 

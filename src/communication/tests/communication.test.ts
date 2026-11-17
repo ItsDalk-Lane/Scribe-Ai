@@ -12,6 +12,10 @@ import { createCredentialStore } from '../credentials';
 import { diagnostics } from '../diagnostics';
 import { createNodeFetch, nodeFetch } from '../nodeFetch';
 import { createModelService } from '../providers';
+import { providerCategory } from '../../interaction/providerCategories';
+import { groupProviders } from '../../interaction/providerGroups';
+import { providerIcon } from '../../interaction/providerIcons';
+import { applyModelDraft } from '../../interaction/modelDraft';
 import { configureProxy } from '../proxy';
 import type { CommunicationSettings, Transport } from '../../types';
 
@@ -19,6 +23,8 @@ let baseUrl = '';
 let proxyUrl = '';
 let openAIBody: Record<string, unknown> = {};
 let openAIAuthorization = '';
+let mirroredPath = '';
+let mirroredAuthorization = '';
 const server = http.createServer((request, response) => {
 	void (async () => {
 		const chunks: Buffer[] = [];
@@ -65,6 +71,16 @@ const server = http.createServer((request, response) => {
 			return;
 		}
 		if (url === '/abort') return;
+		if (url.startsWith('/anthropic/')) {
+			response.writeHead(200, { 'content-type': 'text/event-stream' });
+			response.write('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}\n\n');
+			response.write('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n');
+			response.write('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OAuth OK"}}\n\n');
+			response.write('event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n');
+			response.write('event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}\n\n');
+			response.end('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+			return;
+		}
 		if (url === '/openai/chat/completions') {
 			openAIBody = JSON.parse(body) as Record<string, unknown>;
 			openAIAuthorization = String(request.headers.authorization ?? '');
@@ -72,6 +88,27 @@ const server = http.createServer((request, response) => {
 			response.write(`data: ${JSON.stringify({ id: 'chat-test', object: 'chat.completion.chunk', created: 1, model: 'test-model', choices: [{ index: 0, delta: { role: 'assistant', content: 'Checking' }, finish_reason: null }] })}\n\n`);
 			response.write(`data: ${JSON.stringify({ id: 'chat-test', object: 'chat.completion.chunk', created: 1, model: 'test-model', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'weather', arguments: '{"city":"Shenzhen"}' } }] }, finish_reason: null }] })}\n\n`);
 			response.end(`data: ${JSON.stringify({ id: 'chat-test', object: 'chat.completion.chunk', created: 1, model: 'test-model', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\ndata: [DONE]\n\n`);
+			return;
+		}
+		if (url === '/scan/models') {
+			response.writeHead(200, { 'content-type': 'application/json' });
+			response.end(JSON.stringify({ data: [{ id: 'scanned-1' }, { id: 'scanned-2' }] }));
+			return;
+		}
+		if (url === '/protected/v1/models') {
+			if (request.headers.authorization !== 'Bearer test-key') {
+				response.writeHead(401).end();
+				return;
+			}
+			response.setHeader('content-type', 'application/json').end(JSON.stringify({ data: [{ id: 'local-model' }] }));
+			return;
+		}
+		if (url === '/mirror/chat/completions' || url === '/protected/v1/chat/completions') {
+			mirroredPath = url;
+			mirroredAuthorization = String(request.headers.authorization ?? '');
+			response.writeHead(200, { 'content-type': 'text/event-stream' });
+			response.write(`data: ${JSON.stringify({ id: 'chat-mirror', object: 'chat.completion.chunk', created: 1, model: 'test-model', choices: [{ index: 0, delta: { role: 'assistant', content: 'Mirrored' }, finish_reason: null }] })}\n\n`);
+			response.end(`data: ${JSON.stringify({ id: 'chat-mirror', object: 'chat.completion.chunk', created: 1, model: 'test-model', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`);
 			return;
 		}
 		if (url.startsWith('/v1beta/models/test-model:streamGenerateContent')) {
@@ -161,7 +198,9 @@ void test('SecretStorage credentials preserve raw keys and serialize OAuth updat
 			listSecrets: () => [...values.keys()],
 		},
 	} as unknown as App;
-	const settings: CommunicationSettings = { credentialIds: {}, proxyUrl: '' };
+	const settings: CommunicationSettings = {
+		credentialIds: { openai: 'scribe-ai-openai' }, proxyUrl: '', providerNames: {}, baseUrls: {}, protocols: {},
+	};
 	const store = createCredentialStore(app, settings);
 	assert.deepEqual(await store.read('openai'), { type: 'api_key', key: 'sk-test' });
 	values.set('scribe-ai-openai', JSON.stringify({ type: 'oauth', refresh: 'r', access: 'a', expires: 0 }));
@@ -176,6 +215,14 @@ void test('SecretStorage credentials preserve raw keys and serialize OAuth updat
 		}),
 	]);
 	assert.equal((await store.read('openai'))?.type, 'oauth');
+	values.set('new-link', 'different-key');
+	const earlier = store.modify('openai', () => {
+		settings.credentialIds.openai = 'new-link';
+		return Promise.resolve({ type: 'api_key', key: 'must-not-be-written' });
+	});
+	const queued = store.modify('openai', () => assert.fail('A queued refresh must not see a replacement credential'));
+	await Promise.all([earlier, queued].map((pending) => assert.rejects(pending, /Credential link is missing or changed/)));
+	assert.equal(values.get('new-link'), 'different-key');
 	assert.equal(JSON.stringify(settings).includes('sk-test'), false);
 });
 
@@ -205,8 +252,56 @@ function testProvider(api: 'openai-completions' | 'google-generative-ai'): Provi
 	});
 }
 
+void test('OAuth login persists credentials and exposes subscription metadata', async () => {
+	const values = new Map([['shared-key', 'shared-api-key']]);
+	const app = { secretStorage: {
+		getSecret: (id: string) => values.get(id) ?? null,
+		setSecret: (id: string, value: string) => values.set(id, value),
+	} } as unknown as App;
+	const settings: CommunicationSettings = {
+		credentialIds: { 'test-oauth': 'shared-key' }, proxyUrl: '', providerNames: {}, baseUrls: {}, protocols: {},
+	};
+	const store = createCredentialStore(app, { ...settings, credentialIds: { 'test-oauth': 'new-oauth-slot' } });
+	const provider = createProvider({
+		id: 'test-oauth',
+		name: 'Test OAuth',
+		baseUrl: `${baseUrl}/openai`,
+		auth: {
+			oauth: {
+				name: 'Test subscription',
+				isSubscription: true,
+				login: async () => ({ type: 'oauth', access: 'access', refresh: 'refresh', expires: Date.now() + 60_000 }),
+				refresh: async (credential) => credential,
+				toAuth: async (credential) => ({ apiKey: credential.access }),
+			},
+		},
+		models: [{ id: 'test-model', name: 'Test model', provider: 'test-oauth', baseUrl: `${baseUrl}/openai`, api: 'openai-completions', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 }],
+		api: openAI,
+	});
+	const service = createModelService(store, transport, { additionalProviders: [provider] });
+	const credential = await service.login('test-oauth', { prompt: async () => '', notify: () => {} });
+	assert.equal(credential.type, 'oauth');
+	assert.deepEqual(await store.read('test-oauth'), credential);
+	assert.deepEqual(await createCredentialStore(app, settings).read('test-oauth'), { type: 'api_key', key: 'shared-api-key' });
+	assert.deepEqual(service.providers().find((entry) => entry.id === 'test-oauth')?.oauth, { subscription: true });
+});
+
+void test('Bundled OAuth flows derive Anthropic request auth without import.meta.url', async () => {
+	const store: CredentialStore = {
+		read: async () => ({ type: 'oauth', access: 'access', refresh: 'refresh', expires: Date.now() + 3_600_000 }),
+		list: async () => [],
+		modify: async () => { throw new Error('Unexpected token refresh'); },
+		delete: async () => {},
+	};
+	const service = createModelService(store, transport, { baseUrls: () => ({ anthropic: `${baseUrl}/anthropic` }) });
+	const model = service.providers().find((provider) => provider.id === 'anthropic')?.models[0];
+	assert.ok(model);
+	const response = await service.send({ providerId: 'anthropic', model: model.id, messages: [{ role: 'user', content: 'hi' }], tools: [] });
+	assert.equal(response.content, 'OAuth OK');
+});
+
 void test('OpenAI SDK uses the unified transport and normalizes tool calls', async () => {
-	const service = createModelService(credentials, transport, [testProvider('openai-completions')]);
+	const service = createModelService(credentials, transport, { additionalProviders: [testProvider('openai-completions')] });
 	const stream = service.stream({
 		providerId: 'test-openai', model: 'test-model', messages: [{ role: 'user', content: 'Check weather' }],
 		tools: [{ name: 'weather', description: 'Check weather', inputSchema: { type: 'object' } }],
@@ -224,8 +319,40 @@ void test('OpenAI SDK uses the unified transport and normalizes tool calls', asy
 	assert.equal(eventTypes.at(-1), 'done');
 });
 
+void test('Base URL override is used for every model of the provider', async () => {
+	const service = createModelService(credentials, transport, {
+		additionalProviders: [testProvider('openai-completions')],
+		baseUrls: () => ({ 'test-openai': `${baseUrl}/mirror` }),
+	});
+	const result = await service.send({
+		providerId: 'test-openai', model: 'test-model', messages: [{ role: 'user', content: 'hi' }], tools: [],
+	});
+	assert.equal(result.content, 'Mirrored');
+	assert.equal(mirroredPath, '/mirror/chat/completions');
+});
+
+void test('Provider catalog reports its built-in protocol', () => {
+	const service = createModelService(credentials, transport, { additionalProviders: [testProvider('openai-completions')] });
+	const provider = service.providers().find((entry) => entry.id === 'test-openai');
+	assert.equal(provider?.protocol, 'openai-completions');
+	assert.ok(provider?.protocols.includes('openai-completions'));
+	assert.ok((provider?.protocols.length ?? 0) > 1);
+});
+
+void test('Protocol override switches the adapter for every model of the provider', async () => {
+	// test-google 自带 google-generative-ai；切成 openai-completions 后请求打到 /chat/completions（服务器没有该路径）
+	const service = createModelService(credentials, transport, {
+		additionalProviders: [testProvider('google-generative-ai')],
+		protocols: () => ({ 'test-google': 'openai-completions' }),
+	});
+	// 自带 google-generative-ai，切成 openai-completions 后请求路径变成 /chat/completions（服务器没有该路径）
+	await assert.rejects(async () => {
+		await service.send({ providerId: 'test-google', model: 'test-model', messages: [{ role: 'user', content: 'hi' }], tools: [] });
+	}, /404/);
+});
+
 void test('Google SDK uses Node fetch without touching global fetch', async () => {
-	const service = createModelService(credentials, transport, [testProvider('google-generative-ai')]);
+	const service = createModelService(credentials, transport, { additionalProviders: [testProvider('google-generative-ai')] });
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = () => Promise.reject(new Error('Global fetch was used'));
 	try {
@@ -234,4 +361,223 @@ void test('Google SDK uses Node fetch without touching global fetch', async () =
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
+});
+
+void test('Model override base URL wins over the provider base URL', async () => {
+	const service = createModelService(credentials, transport, {
+		additionalProviders: [testProvider('openai-completions')],
+		baseUrls: () => ({ 'test-openai': `${baseUrl}/provider` }),
+		modelOverrides: () => ({ 'test-openai': { 'test-model': { baseUrl: `${baseUrl}/mirror` } } }),
+	});
+	const result = await service.send({
+		providerId: 'test-openai', model: 'test-model', messages: [{ role: 'user', content: 'hi' }], tools: [],
+	});
+	assert.equal(result.content, 'Mirrored');
+	assert.equal(mirroredPath, '/mirror/chat/completions');
+});
+
+void test('Model override protocol switches only through the model api', async () => {
+	const service = createModelService(credentials, transport, {
+		additionalProviders: [testProvider('google-generative-ai')],
+		modelOverrides: () => ({ 'test-google': { 'test-model': { protocol: 'openai-completions' } } }),
+	});
+	await assert.rejects(async () => {
+		await service.send({ providerId: 'test-google', model: 'test-model', messages: [{ role: 'user', content: 'hi' }], tools: [] });
+	}, /404/);
+});
+
+void test('Custom providers register themselves with fallback metadata', () => {
+	const service = createModelService(credentials, transport, {
+		customProviders: () => [{
+			id: 'custom-1', label: 'My endpoint', baseUrl: 'http://127.0.0.1:11434/v1', protocol: 'openai-completions', models: ['my-model'],
+		}],
+	});
+	const provider = service.providers().find((entry) => entry.id === 'custom-1');
+	assert.ok(provider);
+	assert.equal(provider?.label, 'My endpoint');
+	assert.equal(provider?.models.length, 1);
+	assert.equal(provider?.models[0]?.contextWindow, 128000);
+	assert.equal(provider?.models[0]?.maxTokens, 8000);
+	assert.deepEqual(provider?.models[0]?.input, ['text']);
+	assert.equal(provider?.models[0]?.reasoning, false);
+	assert.deepEqual(provider?.models[0]?.thinkingLevels, []);
+});
+
+void test('Bailian Token Plan and pay-as-you-go register with catalog metadata', () => {
+	const service = createModelService(credentials, transport, {});
+	const tokenPlan = service.providers().find((entry) => entry.id === 'bailian-token-plan');
+	const payg = service.providers().find((entry) => entry.id === 'bailian-payg');
+	assert.ok(tokenPlan && payg);
+	// Token Plan 默认仅包含个人版/团队版共同支持的模型，并补上官方预览模型
+	assert.equal(tokenPlan?.models.length, 9);
+	assert.ok(!tokenPlan?.models.some((model) => model.id === 'kimi-k2.5'));
+	assert.ok(!tokenPlan?.models.some((model) => model.id === 'qwen3.6-plus'));
+	const deepseek = tokenPlan?.models.find((model) => model.id === 'deepseek-v4-pro');
+	assert.equal(deepseek?.contextWindow, 1000000);
+	assert.equal(deepseek?.maxTokens, 384000);
+	const preview = tokenPlan?.models.find((model) => model.id === 'qwen4-max-preview');
+	assert.equal(preview?.contextWindow, 1000000);
+	assert.equal(preview?.maxTokens, 393216);
+	assert.deepEqual(preview?.thinkingLevels, ['low', 'medium', 'xhigh']);
+	assert.ok(!tokenPlan?.models.some((model) => model.id === 'qwen4-max'));
+	// 按量付费限定了模型子集，不包含 Token Plan 独有的会员模型
+	assert.equal(payg?.models.length, 13);
+	assert.ok(payg?.models.some((model) => model.id === 'qwen3.8-max'));
+	assert.ok(!payg?.models.some((model) => model.id === 'kimi-k2.5'));
+	const qwen4 = payg?.models.find((model) => model.id === 'qwen4-max');
+	assert.equal(qwen4?.contextWindow, 1000000);
+	assert.equal(qwen4?.maxTokens, 262144);
+	assert.deepEqual(qwen4?.input, ['text', 'image']);
+	assert.deepEqual(qwen4?.thinkingLevels, ['low', 'medium', 'high', 'xhigh']);
+	// Coding Plan 只能用它自己的 6 个精确模型，且模型列表不能通过接口查询
+	const coding = service.providers().find((entry) => entry.id === 'bailian-coding-plan');
+	assert.equal(coding?.models.length, 6);
+	const qwen35 = coding?.models.find((model) => model.id === 'qwen3.5-plus');
+	assert.equal(qwen35?.contextWindow, 1000000);
+	assert.equal(qwen35?.maxTokens, 65536);
+	assert.deepEqual(qwen35?.input, ['text', 'image']);
+	assert.ok(!coding?.models.some((model) => model.id === 'qwen3.8-max'));
+});
+
+void test('Explicit Bailian models keep Qwen request compatibility', async () => {
+	const service = createModelService(credentials, transport, {
+		baseUrls: () => ({ 'bailian-payg': `${baseUrl}/openai` }),
+	});
+	await service.send({
+		providerId: 'bailian-payg', model: 'qwen4-max', reasoning: 'low',
+		messages: [{ role: 'user', content: 'hi' }], tools: [],
+	});
+	assert.equal(openAIBody.enable_thinking, true);
+	assert.equal(openAIBody.reasoning_effort, 'low');
+});
+
+void test('Volcengine providers register with full pi catalog metadata', () => {
+	const service = createModelService(credentials, transport, {});
+	const ids = ['volcengine-agent-plan', 'volcengine-coding-plan', 'volcengine-doubao'];
+	const providers = ids.map((id) => service.providers().find((entry) => entry.id === id));
+	for (const provider of providers) {
+		assert.ok(provider, 'missing volcengine provider');
+		assert.equal(provider?.protocol, 'openai-completions');
+		assert.ok(provider?.models.length);
+	}
+	const doubao = providers[2]?.models[0];
+	assert.equal(doubao?.id, 'doubao-seed-2-1-pro-260915');
+	assert.equal(doubao?.contextWindow, 128000);
+	// 兜底是 8K；这里必须保留目录给出的 16K
+	assert.equal(doubao?.maxTokens, 16384);
+	assert.deepEqual(doubao?.input, ['text', 'image']);
+	assert.equal(doubao?.reasoning, false);
+	const plan = providers[0]?.models[0];
+	assert.equal(plan?.maxTokens, 16384);
+	assert.deepEqual(plan?.input, ['text']);
+	assert.equal(plan?.reasoning, false);
+});
+
+void test('Recreated custom providers do not inherit old secrets and unlink stops using them', async () => {
+	const values = new Map([['scribe-ai-custom-1', 'old-secret'], ['linked-key', 'new-secret']]);
+	const app = { secretStorage: { getSecret: (id: string) => values.get(id) ?? null } } as unknown as App;
+	const settings: CommunicationSettings = { credentialIds: {}, proxyUrl: '', providerNames: {}, baseUrls: {}, protocols: {} };
+	const store = createCredentialStore(app, settings);
+	const service = createModelService(store, transport, {
+		customProviders: () => [{
+			id: 'custom-1', label: 'Local', baseUrl: `${baseUrl}/mirror`, protocol: 'openai-completions', models: ['local-model'],
+		}],
+	});
+	const send = () => service.send({
+		providerId: 'custom-1', model: 'local-model', messages: [{ role: 'user', content: 'hi' }], tools: [],
+	});
+	assert.equal((await send()).content, 'Mirrored');
+	assert.equal(mirroredPath, '/mirror/chat/completions');
+	assert.equal(mirroredAuthorization, 'Bearer local');
+	assert.deepEqual(await store.list(), []);
+	settings.credentialIds['custom-1'] = 'linked-key';
+	await send();
+	assert.equal(mirroredAuthorization, 'Bearer new-secret');
+	delete settings.credentialIds['custom-1'];
+	await send();
+	assert.equal(mirroredAuthorization, 'Bearer local');
+	assert.equal(values.get('scribe-ai-custom-1'), 'old-secret');
+});
+
+void test('Custom model discovery authenticates and reports the working chat base URL', async () => {
+	let discoveredBaseUrl = '';
+	const service = createModelService(credentials, transport, {
+		customProviders: () => [{ id: 'custom-1', label: 'Local', baseUrl: discoveredBaseUrl,
+			protocol: 'openai-completions', models: ['local-model'] }],
+	});
+	assert.deepEqual(await service.listCustomModels('custom-1', `${baseUrl}/scan`), {
+		models: ['scanned-1', 'scanned-2'], baseUrl: `${baseUrl}/scan`,
+	});
+	const found = await service.listCustomModels('custom-1', `${baseUrl}/protected`);
+	assert.deepEqual(found, { models: ['local-model'], baseUrl: `${baseUrl}/protected/v1` });
+	discoveredBaseUrl = found.baseUrl;
+	const result = await service.send({ providerId: 'custom-1', model: 'local-model', messages: [], tools: [] });
+	assert.equal(result.content, 'Mirrored');
+	assert.equal(mirroredPath, '/protected/v1/chat/completions');
+	assert.equal(mirroredAuthorization, 'Bearer test-key');
+});
+
+void test('Model settings control the actual tools, reasoning and output limit sent', async () => {
+	const override = { capabilities: { reasoning: true, tools: false }, thinkingLevels: ['low', 'high'] as const, maxTokens: 8 };
+	const service = createModelService(credentials, transport, {
+		customProviders: () => [{ id: 'custom-1', label: 'Custom', baseUrl: `${baseUrl}/openai`,
+			protocol: 'openai-completions', models: ['local-model'] }],
+		modelOverrides: () => ({ 'custom-1': { 'local-model': { ...override, thinkingLevels: [...override.thinkingLevels] } } }),
+	});
+	const send = () => service.send({ providerId: 'custom-1', model: 'local-model', messages: [], reasoning: 'high', maxTokens: 16,
+		tools: [{ name: 'weather', description: 'Weather', inputSchema: { type: 'object' } }],
+	});
+	await send();
+	assert.equal(openAIBody.reasoning_effort, 'high');
+	assert.equal(openAIBody.tools, undefined);
+	assert.equal(openAIBody.max_completion_tokens, 8);
+	override.capabilities = { reasoning: false, tools: true };
+	await send();
+	assert.equal(openAIBody.reasoning_effort, undefined);
+	assert.ok(Array.isArray(openAIBody.tools));
+});
+
+void test('New provider model configuration updates only an isolated draft', () => {
+	const originalModels = ['alpha', 'beta'];
+	const originalOverrides = { alpha: { contextWindow: 64000 }, beta: { maxTokens: 8000 } };
+	const next = applyModelDraft(originalModels, originalOverrides, {
+		previousModel: 'alpha', model: 'renamed', override: { maxTokens: 16000 },
+	});
+	assert.deepEqual(next.models, ['renamed', 'beta']);
+	assert.deepEqual(next.overrides, { renamed: { maxTokens: 16000 }, beta: { maxTokens: 8000 } });
+	assert.deepEqual(originalModels, ['alpha', 'beta']);
+	assert.deepEqual(originalOverrides, { alpha: { contextWindow: 64000 }, beta: { maxTokens: 8000 } });
+	const cleared = applyModelDraft(next.models, next.overrides, {
+		previousModel: 'beta', model: 'beta', override: {},
+	});
+	assert.deepEqual(cleared.overrides, { renamed: { maxTokens: 16000 } });
+});
+
+void test('Every built-in provider falls into one of four categories', () => {
+	const service = createModelService(credentials, transport, {});
+	const categories = new Set(service.providers().map((provider) => providerCategory(provider.id)));
+	assert.ok(service.providers().length > 0);
+	assert.deepEqual([...categories].sort(), ['aggregator', 'domestic', 'global', 'other']);
+});
+
+void test('Providers from the same vendor collapse into one group without URL duplicates', () => {
+	const service = createModelService(credentials, transport, {});
+	const groups = groupProviders(service.providers());
+	const bailian = groups.find((group) => group.label === '阿里云百炼');
+	const openai = groups.find((group) => group.label === 'OpenAI');
+	// Token Plan CN / 按量付费 / Token Plan 国际；团队与个人套餐 URL 完全相同，只保留一套
+	assert.equal(bailian?.providers.length, 4);
+	assert.deepEqual(bailian?.providers.map((provider) => provider.id), ['bailian-token-plan', 'bailian-coding-plan', 'bailian-payg', 'qwen-token-plan']);
+	assert.equal(openai?.providers.length, 2);
+	const ids = groups.flatMap((group) => group.providers.map((provider) => provider.id));
+	assert.ok(!ids.includes('qwen-token-plan-individual'));
+	assert.ok(!ids.includes('qwen-token-plan-individual-cn'));
+});
+
+void test('Every provider group has an icon definition', () => {
+	const groups = groupProviders(createModelService(credentials, transport, {}).providers());
+	const missing = groups.filter((group) => !providerIcon(group.providers[0]?.id ?? group.id));
+	assert.deepEqual(missing.map((group) => group.label), []);
+	// 品牌 SVG 必须是内联内容，而不是只剩空壳
+	assert.ok(providerIcon('openai')?.svg?.includes('<path'));
 });

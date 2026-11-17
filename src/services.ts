@@ -5,7 +5,6 @@ import { createTransport } from './communication/transport';
 import { createContextBuilder } from './orchestration/context/contextBuilder';
 import { createSkillRegistry } from './orchestration/context/skills';
 import { createPermissionPolicy } from './orchestration/policies/permissions';
-import { createRunPolicy } from './orchestration/policies/runPolicy';
 import { createSessionController } from './orchestration/sessionController';
 import { createConversationStore } from './orchestration/storage/conversationStore';
 import { createTaskStore } from './orchestration/storage/taskStore';
@@ -32,7 +31,18 @@ export function createServices(app: App, settings: ScribeSettings): ScribeServic
 	const credentials = createCredentialStore(app, settings.communication);
 	const transport = createTransport(settings.communication);
 	const communication: CommunicationLayer = {
-		models: createModelService(credentials, transport),
+		models: createModelService(credentials, transport, {
+			baseUrls: () => settings.communication.baseUrls,
+			protocols: () => settings.communication.protocols,
+			modelOverrides: () => settings.modelOverrides,
+			customProviders: () => Object.entries(settings.customProviders).map(([id, entry]) => ({
+				id,
+				label: entry.label,
+				baseUrl: entry.baseUrl,
+				protocol: entry.protocol,
+				models: settings.providerModels[id] ?? [],
+			})),
+		}),
 		transport,
 		credentials,
 	};
@@ -44,7 +54,6 @@ export function createServices(app: App, settings: ScribeSettings): ScribeServic
 		context: createContextBuilder(),
 		skills: createSkillRegistry(),
 		permissions: createPermissionPolicy(),
-		policy: createRunPolicy(settings),
 		conversations: createConversationStore(),
 		taskStore: createTaskStore(),
 	};

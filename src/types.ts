@@ -1,7 +1,10 @@
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
+	AuthInteraction,
+	Credential,
 	CredentialStore as PiCredentialStore,
+	LoginOptions,
 	ThinkingLevel,
 	Usage,
 } from '@earendil-works/pi-ai';
@@ -138,15 +141,78 @@ export interface RunState {
 
 /* ───────────── 第五层：通信层接口 ───────────── */
 
+export type ModelModality = 'text' | 'image';
+
+export interface CustomProviderSettings {
+	label: string;
+	baseUrl: string;
+	protocol: string;
+}
+
+/** 传给通信层的自建服务商定义，模型 ID 来自设置里的模型列表 */
+export interface CustomProviderDef extends CustomProviderSettings {
+	id: string;
+	models: string[];
+}
+
+export interface ProviderModelInfo {
+	id: string;
+	/** 模型上下文长度，未知时为 0 */
+	contextWindow: number;
+	/** 输出上限，未知时为 0 */
+	maxTokens: number;
+	/** 输入模态（pi 聊天模型只有 text/image） */
+	input: ModelModality[];
+	/** pi 是否标记该模型支持推理 */
+	reasoning: boolean;
+	/** 目录明确标记该模型不能关闭推理 */
+	requiresReasoning?: boolean;
+	/** 目录里该模型自己的地址与协议 */
+	baseUrl: string;
+	api: string;
+	/** 支持的推理档位，不含关闭 */
+	thinkingLevels: ThinkingLevel[];
+}
+
+/** 单个模型的覆盖配置；缺省字段回落到服务商配置，再回落到目录元数据 */
+export interface ModelOverride {
+	baseUrl?: string;
+	protocol?: string;
+	contextWindow?: number;
+	maxTokens?: number;
+	input?: ModelModality[];
+	output?: ModelModality[];
+	capabilities?: {
+		reasoning?: boolean;
+		tools?: boolean;
+		structuredOutput?: boolean;
+	};
+	/** 该模型开放的推理档位，供聊天界面的档位选择器使用 */
+	thinkingLevels?: ThinkingLevel[];
+	/** 旧版单档位字段，仅用于迁移读取 */
+	thinkingLevel?: ThinkingLevel;
+}
+
 export interface ModelProviderInfo {
 	id: string;
 	label: string;
-	models: string[];
+	models: ProviderModelInfo[];
+	/** 服务商自带的默认地址；模型地址不统一时为空 */
+	baseUrl: string;
+	/** 服务商自带的协议；模型协议不统一时为空 */
+	protocol: string;
+	/** 该服务商可选的协议（来自其模型目录） */
+	protocols: string[];
+	/** OAuth 登录能力及是否由订阅套餐提供 */
+	oauth?: { subscription: boolean };
 }
 
 export interface ModelService {
 	providers(): ModelProviderInfo[];
+	login(providerId: string, interaction: AuthInteraction, options?: LoginOptions): Promise<Credential>;
 	refresh(providerId?: string): Promise<void>;
+	/** 自建/本地服务商：直接向它的 /models 查询模型清单 */
+	listCustomModels(providerId: string, baseUrl: string): Promise<{ models: string[]; baseUrl: string }>;
 	send(request: ModelRequest): Promise<ModelResponse>;
 	stream(request: ModelRequest): ModelStream;
 }
@@ -248,16 +314,9 @@ export interface PermissionPolicy {
 	canSendOutbound(): boolean;
 }
 
-export interface RunPolicy {
-	maxTurns: number;
-	maxToolCallsPerTurn: number;
-	maxContextNotes: number;
-}
-
 export interface RunContext {
 	task: Task;
 	permissions: PermissionPolicy;
-	policy: RunPolicy;
 }
 
 export interface ContextBuilder {
@@ -274,7 +333,6 @@ export interface OrchestrationLayer {
 	context: ContextBuilder;
 	skills: SkillRegistry;
 	permissions: PermissionPolicy;
-	policy: RunPolicy;
 	conversations: ConversationStore;
 	taskStore: TaskStore;
 }
@@ -311,13 +369,27 @@ export interface CommunicationSettings {
 	/** SecretStorage 条目的 ID；条目的值才是凭据，不保存到这里 */
 	credentialIds: Record<string, string>;
 	proxyUrl: string;
+	/** 仅影响显示名称，索引仍然用服务商 ID */
+	providerNames: Record<string, string>;
+	/** 端点覆盖：该服务商的所有模型都走这里，空表示用自带地址 */
+	baseUrls: Record<string, string>;
+	/** 协议覆盖：该服务商的所有模型都走这个协议，空表示用模型自带协议 */
+	protocols: Record<string, string>;
 }
 
+export type ChatLocation = 'right-sidebar' | 'left-sidebar' | 'editor-tab';
+
 export interface ScribeSettings {
-	enabled: boolean;
+	/** 当前生效的模型；providerId + model 指向同一个服务商 */
 	providerId: string;
 	model: string;
-	run: RunPolicy;
+	/** 每个已添加服务商的模型列表，键是内部服务商 ID */
+	providerModels: Record<string, string[]>;
+	chatLocation: ChatLocation;
+	/** providerId → modelId → 该模型的覆盖配置 */
+	modelOverrides: Record<string, Record<string, ModelOverride>>;
+	/** 自建服务商（自定义端点 / 本地模型）：label、地址与协议由用户填写 */
+	customProviders: Record<string, CustomProviderSettings>;
 	communication: CommunicationSettings;
 }
 

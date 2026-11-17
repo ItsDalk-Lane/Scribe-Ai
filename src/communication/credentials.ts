@@ -48,11 +48,11 @@ export function createCredentialStore(
 	settings: CommunicationSettings,
 ): CredentialStore {
 	const chains = new Map<string, Promise<void>>();
-	const secretId = (providerId: string) => settings.credentialIds[providerId]
-		?? credentialIdForProvider(providerId);
-	const read = (providerId: string) => parseCredential(
-		app.secretStorage.getSecret(secretId(providerId)),
-	);
+	// 槽位名称只用于创建，不能用来推断当前服务商有权读取旧密钥。
+	const secretId = (providerId: string) => Object.prototype.hasOwnProperty.call(settings.credentialIds, providerId)
+		? settings.credentialIds[providerId]
+		: undefined;
+	const read = (id: string | undefined) => id ? parseCredential(app.secretStorage.getSecret(id)) : undefined;
 	const checkSignal = (options?: AuthOperationOptions) => options?.signal?.throwIfAborted();
 	const enqueue = <T>(providerId: string, task: () => Promise<T>): Promise<T> => {
 		const previous = chains.get(providerId) ?? Promise.resolve();
@@ -64,30 +64,28 @@ export function createCredentialStore(
 	return {
 		async read(providerId, options) {
 			checkSignal(options);
-			return read(providerId);
+			return read(secretId(providerId));
 		},
 		async list(options) {
 			checkSignal(options);
-			const refs = new Map<string, string>();
-			for (const [providerId, id] of Object.entries(settings.credentialIds)) refs.set(providerId, id);
-			for (const id of app.secretStorage.listSecrets()) {
-				if (id.startsWith(SECRET_PREFIX)) refs.set(id.slice(SECRET_PREFIX.length), id);
-			}
 			const result: CredentialInfo[] = [];
-			for (const [providerId, id] of refs) {
-				const credential = parseCredential(app.secretStorage.getSecret(id));
+			for (const [providerId, id] of Object.entries(settings.credentialIds)) {
+				const credential = read(id);
 				if (credential) result.push({ providerId, type: credential.type });
 			}
 			return result;
 		},
 		modify(providerId, fn, options) {
+			const id = secretId(providerId);
 			return enqueue(providerId, async () => {
 				checkSignal(options);
-				const current = read(providerId);
+				if (!id || id !== secretId(providerId)) throw new Error('Credential link is missing or changed');
+				const current = read(id);
 				const next = await fn(current);
 				checkSignal(options);
 				if (next && next !== current) {
-					app.secretStorage.setSecret(secretId(providerId), serializeCredential(next));
+					if (id !== secretId(providerId)) throw new Error('Credential link is missing or changed');
+					app.secretStorage.setSecret(id, serializeCredential(next));
 				}
 				return next;
 			});
@@ -95,7 +93,8 @@ export function createCredentialStore(
 		delete(providerId, options) {
 			return enqueue(providerId, async () => {
 				checkSignal(options);
-				app.secretStorage.setSecret(secretId(providerId), '');
+				const id = secretId(providerId);
+				if (id) app.secretStorage.setSecret(id, '');
 			});
 		},
 	};
