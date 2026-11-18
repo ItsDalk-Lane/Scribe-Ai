@@ -8,9 +8,11 @@ import type { CredentialStore, Provider } from '@earendil-works/pi-ai';
 import { createProvider } from '@earendil-works/pi-ai';
 import * as openAI from '@earendil-works/pi-ai/api/openai-completions';
 import * as google from '@earendil-works/pi-ai/api/google-generative-ai';
+import * as bedrock from '@earendil-works/pi-ai/api/bedrock-converse-stream';
 import { createCredentialStore } from '../credentials';
 import { diagnostics } from '../diagnostics';
-import { createNodeFetch, nodeFetch } from '../nodeFetch';
+import { modelRequestConfirmation } from '../modelRequestConfirmation';
+import { createNodeFetch, modelNodeFetch, nodeFetch } from '../nodeFetch';
 import { createModelService } from '../providers';
 import { providerCategory } from '../../interaction/providerCategories';
 import { groupProviders } from '../../interaction/providerGroups';
@@ -25,6 +27,9 @@ let openAIBody: Record<string, unknown> = {};
 let openAIAuthorization = '';
 let mirroredPath = '';
 let mirroredAuthorization = '';
+let crossOriginRequests = 0;
+const redirectedModelBodies: string[] = [];
+const confirmedRequestBodies: string[] = [];
 const server = http.createServer((request, response) => {
 	void (async () => {
 		const chunks: Buffer[] = [];
@@ -46,8 +51,26 @@ const server = http.createServer((request, response) => {
 			response.writeHead(303, { location: '/echo-method' }).end();
 			return;
 		}
+		if (url === '/redirect-same-origin') {
+			response.writeHead(307, { location: '/echo-method' }).end();
+			return;
+		}
 		if (url === '/redirect-cross') {
 			response.writeHead(302, { location: `${proxyUrl}/cross` }).end();
+			return;
+		}
+		if (url === '/redirect-cross-post') {
+			response.writeHead(307, { location: `${proxyUrl}/cross` }).end();
+			return;
+		}
+		if (url.startsWith('/redirect-model/')) {
+			redirectedModelBodies.push(body);
+			response.writeHead(307, { location: `${proxyUrl}/cross` }).end();
+			return;
+		}
+		if (url.startsWith('/confirmed-request?')) {
+			confirmedRequestBodies.push(body);
+			response.end('ok');
 			return;
 		}
 		if (url === '/first-byte') {
@@ -122,7 +145,9 @@ const server = http.createServer((request, response) => {
 const proxy = http.createServer((request, response) => {
 	response.setHeader('content-type', 'application/json');
 	if (request.url === '/cross') {
-		response.end(JSON.stringify({ authorization: request.headers.authorization ?? '' }));
+		crossOriginRequests++;
+		request.resume();
+		response.end('{}');
 		return;
 	}
 	response.end(JSON.stringify({ proxied: request.url === 'http://scribe.test/resource' }));
@@ -155,8 +180,23 @@ void test('node fetch follows redirects and drops POST bodies on 303', async () 
 	assert.equal(await (await fetch(`${baseUrl}/redirect`)).text(), 'redirected');
 	const response = await fetch(`${baseUrl}/redirect-post`, { method: 'POST', body: 'payload' });
 	assert.deepEqual(await response.json(), { method: 'GET', body: '' });
-	const cross = await fetch(`${baseUrl}/redirect-cross`, { headers: { authorization: 'Bearer secret' } });
-	assert.deepEqual(await cross.json(), { authorization: '' });
+	const sameOrigin = await fetch(`${baseUrl}/redirect-same-origin`, { method: 'POST', body: 'payload' });
+	assert.deepEqual(await sameOrigin.json(), { method: 'POST', body: 'payload' });
+});
+
+void test('node fetch does not contact a different origin when following redirects', async () => {
+	const fetch = createNodeFetch(() => undefined);
+	await assert.rejects(fetch(`${baseUrl}/redirect-cross`), /Cross-origin redirect blocked/);
+	await assert.rejects(fetch(`${baseUrl}/redirect-cross-post`, {
+		method: 'POST',
+		headers: { authorization: 'Bearer test-value', 'x-api-key': 'test-value' },
+		body: 'temporary model request',
+	}), /Cross-origin redirect blocked/);
+	const manual = await fetch(`${baseUrl}/redirect-cross-post`, { redirect: 'manual' });
+	assert.equal(manual.status, 307);
+	await manual.body?.cancel();
+	await assert.rejects(fetch(`${baseUrl}/redirect-cross`, { redirect: 'error' }), /Redirect rejected/);
+	assert.equal(crossOriginRequests, 0);
 });
 
 void test('node fetch enforces first-byte timeout', async () => {
@@ -317,6 +357,103 @@ void test('OpenAI SDK uses the unified transport and normalizes tool calls', asy
 	assert.ok(eventTypes.includes('text_delta'));
 	assert.ok(eventTypes.includes('toolcall_end'));
 	assert.equal(eventTypes.at(-1), 'done');
+});
+
+void test('OpenAI, Google and Bedrock wait for the actual address to be confirmed before sending', async () => {
+	const endpoint = `${baseUrl}/redirect-model`;
+	const bedrockProvider = createProvider({
+		id: 'test-bedrock',
+		name: 'Test Bedrock',
+		baseUrl: endpoint,
+		auth: { apiKey: { name: 'Test key', resolve: async () => ({
+			auth: { apiKey: 'test-key' },
+			env: { AWS_BEDROCK_FORCE_HTTP1: '1', AWS_REGION: 'us-east-1' },
+		}) } },
+		models: [{ id: 'test-model', name: 'Test model', provider: 'test-bedrock', baseUrl: endpoint,
+			api: 'bedrock-converse-stream', reasoning: false, input: ['text'],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 }],
+		api: bedrock,
+	});
+	const providers = [testProvider('openai-completions'), testProvider('google-generative-ai'), bedrockProvider];
+	const service = createModelService(credentials, transport, {
+		additionalProviders: providers,
+		baseUrls: () => Object.fromEntries(providers.map(({ id }) => [id, endpoint])),
+	});
+	for (const { id } of providers) {
+		const prompt = `Temporary request for ${id}`;
+		const rejection = new Error('本地测试拒绝发送');
+		const addresses: string[] = [];
+		const request = {
+			providerId: id, model: 'test-model', messages: [{ role: 'user' as const, content: prompt }],
+			tools: [], maxRetries: 0,
+		};
+		await assert.rejects(service.send({
+			...request, signal: AbortSignal.timeout(3_000),
+			beforeSend: async (address) => {
+				addresses.push(address);
+				throw rejection;
+			},
+		}), (error: unknown) => error === rejection);
+		assert.equal(redirectedModelBodies.some((body) => body.includes(prompt)), false, `${id} sent before approval`);
+		assert.equal(addresses.length, 1);
+		await assert.rejects(service.send({
+			...request, signal: AbortSignal.timeout(3_000),
+			beforeSend: async (address) => { assert.equal(address, addresses[0]); },
+		}));
+		assert.ok(redirectedModelBodies.some((body) => body.includes(prompt)), `${id} did not reach the mock model endpoint`);
+		assert.match(addresses[0] ?? '', /^http:\/\/127\.0\.0\.1:\d+\/redirect-model\/.+/);
+		assert.doesNotMatch(addresses[0] ?? '', /[?#]/);
+		assert.equal(crossOriginRequests, 0);
+	}
+});
+
+void test('resume confirmation shows the actual request URL after an OAuth address override', async () => {
+	const provider = createProvider({
+		id: 'test-confirm-oauth',
+		name: 'Test OAuth',
+		baseUrl: `${baseUrl}/openai`,
+		auth: { oauth: {
+			name: 'Test OAuth',
+			login: async () => { throw new Error('Unexpected login'); },
+			refresh: async (credential) => credential,
+			toAuth: async () => ({ apiKey: 'mock-session-key', baseUrl: `${baseUrl}/mirror` }),
+		} },
+		models: [{ id: 'test-model', name: 'Test model', provider: 'test-confirm-oauth', baseUrl: `${baseUrl}/openai`,
+			api: 'openai-completions', reasoning: false, input: ['text'],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 }],
+		api: openAI,
+	});
+	const oauthCredentials: CredentialStore = {
+		...credentials,
+		read: async () => ({ type: 'oauth', access: 'access', refresh: 'refresh', expires: Date.now() + 3_600_000 }),
+	};
+	const service = createModelService(oauthCredentials, transport, { additionalProviders: [provider] });
+	mirroredPath = '';
+	const result = await service.send({
+		providerId: 'test-confirm-oauth', model: 'test-model', messages: [{ role: 'user', content: 'Local test' }],
+		tools: [], maxRetries: 0, signal: AbortSignal.timeout(3_000),
+		beforeSend: async (address) => {
+			assert.equal(mirroredPath, '');
+			assert.equal(address, `${baseUrl}/mirror/chat/completions`);
+		},
+	});
+	assert.equal(result.content, 'Mirrored');
+	assert.equal(mirroredPath, '/mirror/chat/completions');
+});
+
+void test('every repeated send checks the confirmed address and hidden URL changes are blocked', async () => {
+	const address = `${baseUrl}/confirmed-request`;
+	const shown: string[] = [];
+	const beforeSend = async (destination: string) => { shown.push(destination); };
+	const send = (query: string, body: string) => modelRequestConfirmation.run(
+		{ beforeSend, controller: new AbortController() },
+		() => modelNodeFetch(`${address}?route=${query}`, { method: 'POST', body }),
+	);
+	await (await send('mock-route-one', 'one')).text();
+	await (await send('mock-route-one', 'two')).text();
+	await assert.rejects(send('mock-route-two', 'unconfirmed'), /地址参数已变更/);
+	assert.deepEqual(shown, [address, address]);
+	assert.deepEqual(confirmedRequestBodies, ['one', 'two']);
 });
 
 void test('Base URL override is used for every model of the provider', async () => {

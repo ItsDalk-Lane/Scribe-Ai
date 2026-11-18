@@ -1,15 +1,14 @@
-import type { App } from 'obsidian';
+import { join, resolve } from 'node:path';
+import type { App, FileSystemAdapter, PluginManifest } from 'obsidian';
 import { createCredentialStore } from './communication/credentials';
 import { createModelService } from './communication/providers';
 import { createTransport } from './communication/transport';
 import { createContextBuilder } from './orchestration/context/contextBuilder';
 import { createSkillRegistry } from './orchestration/context/skills';
-import { createPermissionPolicy } from './orchestration/policies/permissions';
 import { createSessionController } from './orchestration/sessionController';
 import { createConversationStore } from './orchestration/storage/conversationStore';
-import { createTaskStore } from './orchestration/storage/taskStore';
-import { createTaskManager } from './orchestration/taskManager';
-import { createAgent } from './runtime/createAgent';
+import { createAgentLoop } from './runtime/agentLoop';
+import { bindAgent } from './runtime/createAgent';
 import { createModelCoordinator } from './runtime/modelCoordinator';
 import { createRunState } from './runtime/runState';
 import { createToolCoordinator } from './runtime/toolCoordinator';
@@ -23,7 +22,7 @@ import type {
 } from './types';
 
 /** 根级依赖组装：只负责按层创建服务并把它们连起来，业务留在各层 */
-export function createServices(app: App, settings: ScribeSettings): ScribeServices {
+export function createServices(app: App, settings: ScribeSettings, manifest: PluginManifest): ScribeServices {
 	// 第四层：工具层（模型通信之外的执行能力）
 	const tools = createToolLayer();
 
@@ -47,25 +46,26 @@ export function createServices(app: App, settings: ScribeSettings): ScribeServic
 		credentials,
 	};
 
-	// 第二层：编排层（会话、任务、上下文、授权、持久化）
-	const orchestration: OrchestrationLayer = {
-		sessions: createSessionController(),
-		tasks: createTaskManager(),
-		context: createContextBuilder(),
-		skills: createSkillRegistry(),
-		permissions: createPermissionPolicy(),
-		conversations: createConversationStore(),
-		taskStore: createTaskStore(),
-	};
-
-	// 第三层：核心循环层（单任务内部的推理与行动推进）
+	// 核心循环接通模型通信和工具执行。
+	const context = createContextBuilder(tools.registry);
+	const models = createModelCoordinator(communication.models, context);
+	const toolCoordinator = createToolCoordinator(app, tools.executor);
 	const runtime: RuntimeLayer = {
-		createAgent,
+		createAgent: bindAgent(createAgentLoop(models, toolCoordinator)),
 		newState: createRunState,
-		models: createModelCoordinator(),
-		tools: createToolCoordinator(),
+		models,
+		tools: toolCoordinator,
 	};
 
-	// shortcut: 依赖目前直接按创建顺序注入，等实现具体模块时改为显式传入上游服务
+	const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
+	const pluginDirectory = manifest.dir ?? join(app.vault.configDir, 'plugins', manifest.id);
+	const conversations = createConversationStore(resolve(cwd, pluginDirectory, 'conversations'));
+	const orchestration: OrchestrationLayer = {
+		sessions: createSessionController(app, settings, runtime, conversations),
+		context,
+		skills: createSkillRegistry(),
+		conversations,
+	};
+
 	return { app, settings, communication, tools, orchestration, runtime };
 }

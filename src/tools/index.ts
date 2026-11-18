@@ -11,7 +11,7 @@ import { writeTools } from './writeTools';
 import type { ToolLayer, ToolModule, ToolRegistry } from '../types';
 
 export function createToolRegistry(modules: ToolModule[]): ToolRegistry {
-	const all = () => modules.flatMap((module) => module());
+	const all = () => modules.flatMap((module) => module()).filter((tool) => tool.isAvailable?.() ?? true);
 	return {
 		all,
 		find: (name) => all().find((spec) => spec.name === name),
@@ -21,6 +21,7 @@ export function createToolRegistry(modules: ToolModule[]): ToolRegistry {
 /** 工具层的统一出口：能力清单 + 统一执行入口 */
 export function createToolLayer(): ToolLayer {
 	const external = { web: webTools, shell: shellTools, mcp: mcpTools };
+	// 原生命令无法限制在用户选定的资料范围内，因此不注册到聊天。
 	const registry = createToolRegistry([
 		readTools,
 		writeTools,
@@ -29,7 +30,6 @@ export function createToolLayer(): ToolLayer {
 		taskTools,
 		skillTools,
 		external.web,
-		external.shell,
 		external.mcp,
 	]);
 	return { registry, executor: createToolExecutor(registry), external };

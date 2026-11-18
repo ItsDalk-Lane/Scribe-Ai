@@ -12,7 +12,7 @@ export default class ScribeAiPlugin extends Plugin {
 
 	async onload() {
 		const settings = normalizeSettings((await this.loadData()) as Partial<ScribeSettings> | null);
-		this.services = createServices(this.app, settings);
+		this.services = createServices(this.app, settings, this.manifest);
 
 		this.registerView(CHAT_VIEW_TYPE, (leaf) => new ChatView(leaf, this));
 
@@ -29,7 +29,9 @@ export default class ScribeAiPlugin extends Plugin {
 		this.addSettingTab(new ScribeAiSettingTab(this.app, this));
 	}
 
-	onunload() {}
+	onunload() {
+		this.services?.orchestration.sessions.dispose();
+	}
 
 	async activateChatView() {
 		const existing = this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE)[0];

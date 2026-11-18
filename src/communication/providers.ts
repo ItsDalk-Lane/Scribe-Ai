@@ -14,7 +14,7 @@ import type {
 } from '@earendil-works/pi-ai';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { registerLazyOAuthFlows } from '@earendil-works/pi-ai/lazy-oauth';
-import { clampThinkingLevel, createProvider, getSupportedThinkingLevels } from '@earendil-works/pi-ai';
+import { clampThinkingLevel, createProvider, getSupportedThinkingLevels, isContextOverflow, isRetryableAssistantError } from '@earendil-works/pi-ai';
 import * as anthropicMessages from '@earendil-works/pi-ai/api/anthropic-messages';
 import * as azureOpenaiResponses from '@earendil-works/pi-ai/api/azure-openai-responses';
 import * as bedrockConverseStream from '@earendil-works/pi-ai/api/bedrock-converse-stream';
@@ -26,7 +26,11 @@ import * as openaiCompletions from '@earendil-works/pi-ai/api/openai-completions
 import * as openaiResponses from '@earendil-works/pi-ai/api/openai-responses';
 import * as piMessages from '@earendil-works/pi-ai/api/pi-messages';
 import { EXTRA_IMAGE_LIMITS, EXTRA_PROVIDERS } from './extraProviders';
+import { confirmModelRequest, modelRequestConfirmation } from './modelRequestConfirmation';
+import type { ModelRequestConfirmation } from './modelRequestConfirmation';
+import { modelNodeFetch, nodeFetch } from './nodeFetch';
 import { nodeRequire } from './nodeRequire';
+import { ContextOverflowError, RetryableModelError } from '../types';
 import type {
 	CredentialStore,
 	Message,
@@ -56,6 +60,7 @@ function toPiMessage(message: Message): PiMessage {
 			timestamp,
 		};
 	}
+	if (message.rawAssistant) return message.rawAssistant;
 	return {
 		role: 'assistant',
 		content: [
@@ -108,6 +113,8 @@ function resolveReasoning(model: Model<Api>, override: ModelOverride | undefined
 }
 
 function toResponse(message: AssistantMessage): ModelResponse {
+	if (isContextOverflow(message)) throw new ContextOverflowError(message.errorMessage);
+	if (isRetryableAssistantError(message)) throw new RetryableModelError(message.errorMessage);
 	if (message.stopReason === 'error' || message.stopReason === 'aborted') {
 		throw new Error(message.errorMessage || `Model request ${message.stopReason}`);
 	}
@@ -139,6 +146,7 @@ class PiModelStream implements ModelStream {
 		private source: AssistantMessageEventStream,
 		private controller: AbortController,
 		private cleanup: () => void,
+		private confirmation?: ModelRequestConfirmation,
 	) {}
 
 	[Symbol.asyncIterator](): AsyncIterator<ModelStreamEvent> {
@@ -154,7 +162,9 @@ class PiModelStream implements ModelStream {
 
 	async result(): Promise<ModelResponse> {
 		try {
-			return toResponse(await this.source.result());
+			const response = await this.source.result();
+			if (this.confirmation?.failure) throw this.confirmation.failure;
+			return toResponse(response);
 		} finally {
 			this.cleanup();
 		}
@@ -343,6 +353,17 @@ export function createModelService(
 		for (const id of live) registered.add(id);
 	};
 
+	const contextLimits = ({ providerId, model: modelId }: Pick<ModelRequest, 'providerId' | 'model'>) => {
+		syncCustomProviders();
+		const override = serviceOptions.modelOverrides?.()[providerId]?.[modelId];
+		// 自建服务商目录中的窗口只是占位，只有明确填写的覆盖值可用于预算。
+		const model = registered.has(providerId) ? undefined : models.getModel(providerId, modelId);
+		return {
+			contextWindow: override?.contextWindow || model?.contextWindow || 0,
+			maxTokens: override?.maxTokens || model?.maxTokens || 0,
+		};
+	};
+
 	const stream = (request: ModelRequest): ModelStream => {
 		syncCustomProviders();
 		const protocol = serviceOptions.protocols?.()[request.providerId]?.trim() ?? '';
@@ -375,6 +396,18 @@ export function createModelService(
 		if (request.signal?.aborted) onAbort();
 		request.signal?.addEventListener('abort', onAbort, { once: true });
 		const cleanup = () => request.signal?.removeEventListener('abort', onAbort);
+		const confirmation = request.beforeSend ? { beforeSend: request.beforeSend, controller } : undefined;
+		const confirmedFetch: typeof fetch = async (input, init) => {
+			const url = new URL(input instanceof Request ? input.url : input);
+			// Anthropic 的凭据交换也用同一个 fetch，聊天请求固定走 messages。
+			if (model.api === 'anthropic-messages' && url.pathname.endsWith('/v1/oauth/token')) {
+				return transport.fetch(input, init);
+			}
+			if (transport.fetch === nodeFetch) return modelNodeFetch(input, init);
+			await confirmModelRequest(url);
+			controller.signal.throwIfAborted();
+			return transport.fetch(input, init);
+		};
 		const options: SimpleStreamOptions = {
 			signal: controller.signal,
 			maxTokens: override?.maxTokens && request.maxTokens !== undefined
@@ -388,11 +421,14 @@ export function createModelService(
 			// shortcut: SDK total timeout is capped at 24.8 days; remove when SDK supports disabling it.
 			timeoutMs: 2_147_483_647,
 			transport: 'sse',
-			...(isGoogleModel(model) ? {} : { fetch: transport.fetch }),
+			...(isGoogleModel(model) ? {} : { fetch: confirmation ? confirmedFetch : transport.fetch }),
 		};
 		try {
 			const context = toContext(request, override?.capabilities?.tools !== false);
-			return new PiModelStream(models.streamSimple(model, context, options), controller, cleanup);
+			const source = confirmation
+				? modelRequestConfirmation.run(confirmation, () => models.streamSimple(model, context, options))
+				: models.streamSimple(model, context, options);
+			return new PiModelStream(source, controller, cleanup, confirmation);
 		} catch (error) {
 			cleanup();
 			throw error;
@@ -400,6 +436,7 @@ export function createModelService(
 	};
 
 	return {
+		contextLimits,
 		providers: (): ModelProviderInfo[] => {
 			syncCustomProviders();
 			return models.getProviders().map((provider) => ({

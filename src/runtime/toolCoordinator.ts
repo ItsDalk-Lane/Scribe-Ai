@@ -1,9 +1,26 @@
-import { notImplemented } from '../types';
-import type { ToolCoordinator } from '../types';
+import type { App } from 'obsidian';
+import type { ToolCoordinator, ToolExecutor } from '../types';
 
-/** 工具调用协调：按模型提出的行动请求调度工具并回收执行结果 */
-export function createToolCoordinator(): ToolCoordinator {
+export function createToolCoordinator(app: App, executor: ToolExecutor): ToolCoordinator {
 	return {
-		runCalls: () => notImplemented('工具调用协调'),
+		async *runCalls(state, ctx, approve, skip) {
+			const { task, signal, permissions, readFiles, readDelivery, cwd } = ctx;
+			for (const call of state.pendingCalls) {
+				signal.throwIfAborted();
+				const start = { type: 'tool-start' as const, call };
+				const reason = skip ? await skip(call) : undefined;
+				signal.throwIfAborted();
+				if (reason) {
+					ctx.observer.onEvent?.(start);
+					yield { call, result: { callId: call.id, isError: true, content: reason }, skipped: true };
+					continue;
+				}
+				await ctx.record?.(start);
+				signal.throwIfAborted();
+				ctx.observer.onEvent?.(start);
+				const result = await executor.execute(call, { app, task, signal, permissions, readFiles, readDelivery, cwd, approve });
+				yield { call, result };
+			}
+		},
 	};
 }

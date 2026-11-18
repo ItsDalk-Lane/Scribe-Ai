@@ -14,71 +14,1265 @@
 }
 
 /* 下面每条规则都写两种形态：元素自带 scribe- 类（按钮本身），以及处于 scribe- 容器内部。 */
-:where([class^="scribe-"], [class*=" scribe-"]):is(button, .clickable-icon, .scribe-button, [role="button"], [role="tab"], [tabindex="0"]),
-:where([class^="scribe-"], [class*=" scribe-"]) :is(button, .clickable-icon, .scribe-button, [role="button"], [role="tab"], [tabindex="0"]) {
+:where([class^="scribe-"], [class*=" scribe-"]):is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]),
+:where([class^="scribe-"], [class*=" scribe-"]) :is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]) {
 	transition: background-color 120ms ease, color 120ms ease;
 }
 
 /* 普通控件：悬停浅染，按下加深 */
-:where([class^="scribe-"], [class*=" scribe-"]):is(button, .clickable-icon, .scribe-button, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta):not(.mod-warning):hover,
-:where([class^="scribe-"], [class*=" scribe-"]) :is(button, .clickable-icon, .scribe-button, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta):not(.mod-warning):hover {
+:where([class^="scribe-"], [class*=" scribe-"]):is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta):not(.mod-warning):hover,
+:where([class^="scribe-"], [class*=" scribe-"]) :is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta):not(.mod-warning):hover {
 	background-color: var(--scribe-hover) !important;
 }
 
-:where([class^="scribe-"], [class*=" scribe-"]):is(button, .clickable-icon, .scribe-button, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta):not(.mod-warning):active,
-:where([class^="scribe-"], [class*=" scribe-"]) :is(button, .clickable-icon, .scribe-button, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta):not(.mod-warning):active {
+:where([class^="scribe-"], [class*=" scribe-"]):is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta):not(.mod-warning):active,
+:where([class^="scribe-"], [class*=" scribe-"]) :is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta):not(.mod-warning):active {
 	background-color: var(--scribe-active) !important;
 }
 
 /* 主按钮：强调色朝文字色混合，明暗主题下都比常态更"实" */
-:where([class^="scribe-"], [class*=" scribe-"]):is(button, .scribe-button, [role="button"]):is(.mod-cta, .mod-warning):hover,
-:where([class^="scribe-"], [class*=" scribe-"]) :is(button, .scribe-button, [role="button"]):is(.mod-cta, .mod-warning):hover {
+:where([class^="scribe-"], [class*=" scribe-"]):is(button, [role="button"]):is(.mod-cta, .mod-warning):hover,
+:where([class^="scribe-"], [class*=" scribe-"]) :is(button, [role="button"]):is(.mod-cta, .mod-warning):hover {
 	background-color: var(--scribe-accent-hover) !important;
 }
 
-:where([class^="scribe-"], [class*=" scribe-"]):is(button, .scribe-button, [role="button"]):is(.mod-cta, .mod-warning):active,
-:where([class^="scribe-"], [class*=" scribe-"]) :is(button, .scribe-button, [role="button"]):is(.mod-cta, .mod-warning):active {
+:where([class^="scribe-"], [class*=" scribe-"]):is(button, [role="button"]):is(.mod-cta, .mod-warning):active,
+:where([class^="scribe-"], [class*=" scribe-"]) :is(button, [role="button"]):is(.mod-cta, .mod-warning):active {
 	background-color: var(--scribe-accent-active) !important;
 }
 
 /* 键盘焦点：任何主题下都看得见的环 */
-:where([class^="scribe-"], [class*=" scribe-"]):is(button, .clickable-icon, .scribe-button, [role="button"], [role="tab"], [tabindex="0"]):focus-visible,
-:where([class^="scribe-"], [class*=" scribe-"]) :is(button, .clickable-icon, .scribe-button, [role="button"], [role="tab"], [tabindex="0"]):focus-visible {
+:where([class^="scribe-"], [class*=" scribe-"]):is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):focus-visible,
+:where([class^="scribe-"], [class*=" scribe-"]) :is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):focus-visible {
 	outline: 2px solid var(--scribe-accent-hover);
 	outline-offset: 1px;
 }
 
-.scribe-app {
-	display: flex;
-	flex-direction: column;
-	gap: 12px;
-	padding: 12px;
-	height: 100%;
-	overflow-y: auto;
+.workspace-leaf-content[data-type="scribe-chat-view"] > .view-content {
+	padding: 0;
+	overflow: hidden;
 }
 
-.scribe-panel {
-	border: 1px solid var(--background-modifier-border);
+.scribe-app {
+	--scribe-radius-detail: 4px;
+	--scribe-radius-compact: 8px;
+	--scribe-radius-control: 12px;
+	--scribe-radius-code: var(--radius-m);
+	--scribe-radius-card: var(--radius-m);
+	--scribe-height-compact: 28px;
+	--scribe-height-control: 32px;
+	--scribe-height-primary: 36px;
+	--scribe-space-row: 4px;
+	--scribe-space-action: 8px;
+	--scribe-space-card: 12px;
+	--scribe-space-section: 24px;
+	--scribe-type-body: calc(var(--font-text-size, 16px) - 2px) / 1.6;
+	--scribe-type-secondary: 13px / 20px;
+	--scribe-type-caption: 12px / 18px;
+	--scribe-motion: 100ms ease;
+	--scribe-action-reveal: 80ms ease;
+	--scribe-page: var(--background-primary);
+	--scribe-surface: var(--background-secondary);
+	--scribe-raised: var(--background-primary-alt, var(--background-secondary));
+	--scribe-border: var(--background-modifier-border);
+	--scribe-ink: var(--text-normal);
+	--scribe-muted: var(--text-muted);
+	--scribe-accent: var(--interactive-accent);
+	--scribe-warning: var(--text-warning);
+	--scribe-error: var(--text-error);
+	--scribe-success: var(--text-success);
+	--scribe-shadow: var(--shadow-s);
+	display: flex;
+	flex-direction: column;
+	container-type: inline-size;
+	box-sizing: border-box;
+	min-width: 0;
+	height: 100%;
+	overflow: hidden;
+	background: var(--scribe-page);
+	color: var(--scribe-ink);
+	font: var(--scribe-type-body) var(--font-interface);
+}
+
+.scribe-app,
+.scribe-app :where([class^="scribe-"], [class*=" scribe-"]) {
+	--scribe-hover: var(--background-modifier-hover, color-mix(in srgb, var(--scribe-ink) 10%, transparent));
+	--scribe-active: color-mix(in srgb, var(--scribe-ink) 16%, transparent);
+	--scribe-accent-hover: var(--interactive-accent-hover, var(--scribe-accent));
+	--scribe-accent-active: color-mix(in srgb, var(--scribe-accent-hover) 86%, var(--scribe-ink));
+}
+
+.scribe-app button:not(.scribe-note-citation),
+.scribe-app select,
+.scribe-app input[type="text"] {
+	box-sizing: border-box;
+	min-height: var(--scribe-height-control);
+	max-width: 100%;
+	height: auto;
+	padding: var(--scribe-space-row) var(--scribe-space-action);
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--scribe-radius-control);
+	background-color: var(--scribe-raised);
+	color: var(--scribe-ink);
+	box-shadow: none;
+	font: var(--scribe-type-secondary) var(--font-interface);
+}
+
+.scribe-app select {
+	padding-inline-end: var(--scribe-space-section);
+}
+
+.scribe-app button:is(.mod-cta, .mod-warning) {
+	min-height: var(--scribe-height-primary);
+}
+
+.scribe-app button.mod-cta {
+	border-color: transparent;
+	background-color: var(--scribe-accent);
+	color: var(--text-on-accent);
+}
+
+.scribe-app button.mod-warning {
+	--scribe-accent-hover: color-mix(in srgb, var(--scribe-warning) 20%, var(--scribe-surface));
+	--scribe-accent-active: var(--scribe-accent-hover);
+	border-color: color-mix(in srgb, var(--scribe-warning) 35%, transparent);
+	background-color: color-mix(in srgb, var(--scribe-warning) 10%, var(--scribe-surface));
+	color: var(--scribe-ink);
+}
+
+.scribe-app button:disabled {
+	--scribe-hover: var(--scribe-raised);
+	--scribe-active: var(--scribe-raised);
+	--scribe-accent-hover: var(--scribe-accent);
+	--scribe-accent-active: var(--scribe-accent);
+	opacity: .55;
+}
+
+.scribe-app :is(button, select, input, textarea, summary) {
+	transition: color var(--scribe-motion), background-color var(--scribe-motion), border-color var(--scribe-motion);
+}
+
+.scribe-app :is(button, select, input, textarea, summary, a, [tabindex="0"]):focus-visible {
+	outline: 2px solid var(--scribe-accent);
+	outline-offset: 1px;
+}
+
+.scribe-app summary {
+	box-sizing: border-box;
+	min-height: var(--scribe-height-compact);
+	padding: var(--scribe-space-row) var(--scribe-space-action);
+	border-radius: var(--scribe-radius-compact);
+	color: var(--scribe-muted);
+	font: var(--scribe-type-secondary) var(--font-interface);
+	cursor: pointer;
+}
+
+.scribe-app summary:hover {
+	background-color: var(--scribe-hover);
+	color: var(--scribe-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.scribe-app, .scribe-app *, .scribe-app *::before, .scribe-app *::after,
+	.scribe-resume-modal, .scribe-resume-modal * {
+		animation: none !important;
+		transition: none !important;
+		scroll-behavior: auto !important;
+	}
+}
+
+.scribe-chat-navigation {
+	display: flex;
+	flex: none;
+	justify-content: flex-end;
+	gap: 4px;
+	padding: 4px;
+}
+
+.scribe-app button.scribe-chat-icon-button {
+	display: grid;
+	width: 28px;
+	height: 28px;
+	min-height: 28px;
+	place-items: center;
+	padding: 0;
+	border: 0;
 	border-radius: var(--radius-m);
-	padding: 8px;
+	background: transparent;
 	color: var(--text-muted);
 }
 
+.scribe-chat-history {
+	position: relative;
+}
+
+.scribe-history-panel {
+	position: absolute;
+	z-index: 3;
+	inset-inline-end: 0;
+	inset-block-end: calc(100% + 4px);
+	box-sizing: border-box;
+	width: min(320px, calc(100cqw - 8px));
+	max-height: min(400px, 42vh);
+	padding: 8px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--radius-m);
+	background: var(--scribe-page);
+	box-shadow: var(--shadow-s);
+}
+
+.scribe-app[data-layout="landing"] {
+	padding-inline: 8px;
+	overflow-y: auto;
+}
+
+/* Obsidian 的状态栏悬浮在底部，给发送提示留出空间。 */
+body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
+	padding-block-end: var(--size-4-7, 28px);
+}
+
+.scribe-app[data-layout="landing"]::before {
+	flex: 0 0 20%;
+	content: "";
+}
+
+.scribe-chat-hero {
+	display: flex;
+	flex: none;
+	align-items: center;
+	justify-content: center;
+	gap: 12px;
+	margin: 0;
+	padding: 0 0 28px;
+	font-size: 30px;
+	font-weight: 330;
+	line-height: 1.2;
+	text-align: center;
+}
+
+.scribe-chat-hero .scribe-chat-icon {
+	width: 24px;
+	height: 24px;
+}
+
+.scribe-chat-recents {
+	padding: 24px 0 8px;
+}
+
+.scribe-chat-recents h2 {
+	margin: 0 8px 8px;
+	color: var(--scribe-muted);
+	font-size: var(--font-ui-small);
+	font-weight: 600;
+}
+
+.scribe-conversation-list {
+	display: grid;
+	gap: 4px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.scribe-conversation-list li {
+	min-width: 0;
+}
+
+.scribe-app button.scribe-conversation-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	min-height: 36px;
+	padding: 4px 8px;
+	border: 0;
+	border-radius: var(--radius-m);
+	background: transparent;
+	text-align: start;
+}
+
+.scribe-app button.scribe-conversation-row[aria-current] {
+	background: var(--scribe-hover);
+}
+
+.scribe-conversation-row .scribe-chat-icon {
+	display: grid;
+	width: 24px;
+	height: 24px;
+	place-items: center;
+	border-radius: var(--radius-m);
+	background: var(--scribe-surface);
+	color: var(--scribe-muted);
+}
+
+.scribe-conversation-row .scribe-chat-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+.scribe-conversation-title {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	font-weight: 500;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-conversation-row time {
+	flex: none;
+	color: var(--scribe-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.scribe-chat-icon {
+	display: inline-flex;
+	flex: 0 0 auto;
+	width: 16px;
+	height: 16px;
+}
+
+.scribe-chat-icon svg {
+	width: 100%;
+	height: 100%;
+}
+
 .scribe-task-input {
+	display: grid;
+	flex: 0 0 auto;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 4px;
+	min-width: 0;
+	width: 100%;
+}
+
+.scribe-compose-form {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 2px;
+	padding: 8px 4px 4px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+}
+
+.scribe-app textarea.scribe-input {
+	box-sizing: border-box;
+	width: 100%;
+	min-height: 60px;
+	max-height: 240px;
+	padding: 0 8px;
+	border: 0;
+	border-radius: var(--radius-m);
+	background: transparent;
+	color: var(--text-normal);
+	box-shadow: none;
+	font: 14px / 20px var(--font-interface);
+	field-sizing: content;
+	resize: none;
+	overflow-y: auto;
+}
+
+.scribe-app textarea.scribe-input:focus-visible {
+	outline-offset: -2px;
+}
+
+.scribe-input::placeholder {
+	color: var(--text-faint);
+}
+
+.scribe-compose-toolbar,
+.scribe-compose-submit {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.scribe-compose-toolbar {
+	min-width: 0;
+	padding-inline: 4px;
+}
+
+.scribe-compose-submit {
+	flex: 0 0 auto;
+	margin-inline-start: auto;
+}
+
+.scribe-compose-destination {
+	min-width: 0;
+	padding-inline: 4px;
+	overflow: hidden;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	line-height: 1.4;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-app button.scribe-compose-action,
+.scribe-app button.scribe-context-chip-remove,
+.scribe-app .scribe-context-popover button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	border: 0;
+	border-radius: var(--radius-m);
+	background-color: transparent;
+	color: var(--text-muted);
+	box-shadow: none;
+}
+
+.scribe-app button.scribe-compose-action {
+	flex: 0 0 auto;
+	width: 28px;
+	min-height: 28px;
+	height: 28px;
+}
+
+.scribe-app button:is(.scribe-compose-action, .scribe-context-chip-remove):not(:disabled):hover,
+.scribe-app .scribe-context-popover button:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.scribe-app button.scribe-compose-primary,
+.scribe-app button.scribe-compose-primary:disabled {
+	border-radius: 50%;
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.scribe-app button.scribe-compose-primary:not(:disabled):hover {
+	background-color: var(--interactive-accent-hover);
+	color: var(--text-on-accent);
+}
+
+.scribe-compose-primary[type="button"] .scribe-chat-icon {
+	width: 12px;
+	height: 12px;
+}
+
+.scribe-compose-primary[type="button"] svg {
+	fill: currentColor;
+}
+
+.scribe-context-actions {
+	position: relative;
+	flex: 0 0 auto;
+}
+
+.scribe-context-popover {
+	position: absolute;
+	z-index: 2;
+	inset-block-end: calc(100% + 4px);
+	inset-inline-start: 0;
+	display: grid;
+	box-sizing: border-box;
+	width: max-content;
+	max-width: min(16rem, calc(100cqw - 20px));
+	max-height: min(14rem, 35dvh);
+	padding: 4px;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background: var(--background-primary);
+	box-shadow: var(--shadow-s);
+}
+
+.scribe-app .scribe-context-popover button {
+	justify-content: flex-start;
+	gap: 8px;
+	min-width: 0;
+	min-height: 32px;
+	padding: 4px 8px;
+	color: var(--text-normal);
+	text-align: start;
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+
+.scribe-context-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	max-height: 9rem;
+	margin: 0;
+	padding: 0 4px 2px;
+	overflow-y: auto;
+	list-style: none;
+}
+
+.scribe-context-chip {
+	display: flex;
+	align-items: flex-start;
+	gap: 4px;
+	box-sizing: border-box;
+	min-width: 0;
+	max-width: 100%;
+	padding-inline-start: 6px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-secondary);
+	color: var(--text-muted);
+	font: var(--font-ui-smaller) / 20px var(--font-interface);
+}
+
+.scribe-context-chip > .scribe-chat-icon,
+.scribe-context-name {
+	align-self: center;
+}
+
+.scribe-context-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-context-chip .scribe-chat-icon {
+	width: 12px;
+	height: 12px;
+}
+
+.scribe-app button.scribe-context-chip-remove {
+	flex: 0 0 auto;
+	width: 20px;
+	min-height: 20px;
+	height: 20px;
+}
+
+.scribe-selection-preview {
+	flex: 1;
+	min-width: 0;
+}
+
+.scribe-context-chip:has(.scribe-selection-preview[open]) {
+	width: 100%;
+}
+
+.scribe-app .scribe-selection-preview > summary {
+	min-height: 20px;
+	padding: 0 4px 0 0;
+	overflow: hidden;
+	color: inherit;
+	font: inherit;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-selection-preview summary .scribe-chat-icon {
+	margin-inline-end: 4px;
+	vertical-align: -2px;
+}
+
+.scribe-app .scribe-selection-preview pre {
+	max-height: 4rem;
+	margin-inline-end: 4px;
+}
+
+.scribe-task-input > .scribe-chat-disclosure,
+.scribe-compose-form > .scribe-chat-error,
+.scribe-context-popover > .scribe-chat-error {
+	padding-inline: 8px;
+}
+
+.scribe-task-input > .scribe-chat-disclosure {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.4;
+}
+
+.scribe-context-path {
+	display: grid;
+	min-width: 0;
+	gap: 8px;
+	padding: 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	line-height: 1.4;
+	overflow-wrap: anywhere;
+}
+
+.scribe-context-path input {
+	min-width: 0;
+}
+
+.scribe-chat-actions {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: var(--scribe-space-action);
+}
+
+.scribe-chat-path,
+.scribe-chat-last-step,
+.scribe-chat-disclosure,
+.scribe-chat-error {
+	overflow-wrap: anywhere;
+}
+
+.scribe-chat-path {
+	justify-self: start;
+	max-width: 100%;
+	padding: 0 var(--scribe-space-row);
+	border-radius: var(--scribe-radius-detail);
+	background: var(--scribe-surface);
+	color: var(--scribe-ink);
+	font: var(--scribe-type-caption) var(--font-monospace);
+}
+
+.scribe-execution-view {
+	position: relative;
 	display: flex;
 	flex-direction: column;
-	gap: 8px;
-	margin-top: auto;
+	flex: 1 1 auto;
+	min-height: 0;
+	min-width: 0;
 }
 
-.scribe-input {
+.scribe-chat-scroll {
+	--scribe-hover: transparent;
+	--scribe-active: transparent;
+	flex: 1;
+	min-height: 0;
+	overflow-y: auto;
+	overflow-x: hidden;
+	overscroll-behavior: contain;
+}
+
+.scribe-app .scribe-chat-scroll:focus-visible {
+	outline-offset: -2px;
+}
+
+.scribe-chat-column {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
 	width: 100%;
-	resize: vertical;
-	font-family: inherit;
 }
 
-.scribe-button {
-	align-self: flex-end;
+.scribe-chat-loading {
+	margin: 0;
+	padding: 24px 4px;
+	color: var(--scribe-muted);
+	text-align: center;
+}
+
+.scribe-app button.scribe-chat-jump {
+	position: absolute;
+	z-index: 1;
+	inset-block-end: 12px;
+	inset-inline: 0;
+	display: grid;
+	width: 32px;
+	height: 32px;
+	place-items: center;
+	margin-inline: auto;
+	padding: 0;
+	border-radius: 50%;
+	background: var(--scribe-page);
+}
+
+/* 用户消息和回复 */
+.scribe-chat-last-step,
+.scribe-chat-disclosure {
+	font: var(--scribe-type-secondary) var(--font-interface);
+}
+
+.scribe-chat-run {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.scribe-chat-message.is-user {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 8px;
+	min-width: 0;
+	margin: 4px 8px;
+	padding: 8px;
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--radius-m);
+	background: var(--scribe-hover);
+}
+
+.scribe-message-context {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	width: 100%;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.scribe-message-context li {
+	min-width: 0;
+	max-width: 100%;
+}
+
+.scribe-message-context li:has(details[open]) {
+	flex-basis: 100%;
+}
+
+.scribe-app .scribe-message-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-height: 0;
+	max-width: 100%;
+	padding: 1px 6px;
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--radius-s);
+	background: var(--scribe-page);
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
+	list-style: none;
+}
+
+.scribe-message-chip::-webkit-details-marker {
+	display: none;
+}
+
+.scribe-message-chip > span:not(.scribe-chat-icon) {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-message-chip .scribe-chat-icon,
+.scribe-message-chip svg {
+	width: 12px;
+	height: 12px;
+}
+
+.scribe-user-prompt {
+	display: flow-root;
+	width: 100%;
+	min-width: 0;
+	font-size: calc(var(--font-text-size, 16px) - 2px);
+	line-height: 1.6;
+}
+
+.scribe-user-prompt[data-clamped="true"] {
+	max-block-size: 12lh;
+	overflow: clip;
+	mask-image: linear-gradient(to bottom, black 85%, transparent);
+}
+
+.scribe-assistant-turn {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-width: 0;
+	margin-inline: 12px;
+	padding-block-start: 8px;
+}
+
+.scribe-assistant-turn > .scribe-answer-markdown,
+.scribe-activity-body > .scribe-answer-markdown {
+	padding: 4px;
+	font-size: 14px;
+	line-height: 1.6;
+}
+
+.scribe-turn-tail,
+.scribe-turn-metadata {
+	display: flex;
+	align-items: center;
+	gap: 4px 8px;
+	min-width: 0;
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
+}
+
+.scribe-turn-tail {
+	justify-content: space-between;
+}
+
+.scribe-turn-metadata {
+	flex-wrap: wrap;
+}
+
+.scribe-app button.scribe-expand-message,
+.scribe-app .scribe-turn-tail button,
+.scribe-app button.scribe-tool-more {
+	min-height: 24px;
+	padding: 2px 4px;
+	border: 0;
+	border-radius: var(--radius-s);
+	background: transparent;
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
+}
+
+.scribe-app .scribe-turn-tail button {
+	display: inline-grid;
+	flex-shrink: 0;
+	width: 24px;
+	place-content: center;
+}
+
+@media (hover: hover) {
+	.scribe-turn-tail button {
+		opacity: 0;
+		transition: opacity var(--scribe-action-reveal);
+	}
+
+	.scribe-assistant-turn:is(:hover, :focus-within) .scribe-turn-tail button {
+		opacity: 1;
+	}
+}
+
+.scribe-assistant-turn > .scribe-execution-status {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding-inline: 4px;
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
+	overflow-wrap: anywhere;
+}
+
+.scribe-execution-status:is([data-status="awaiting-approval"], [data-status="partial"], [data-status="limit"]) {
+	color: color-mix(in srgb, var(--scribe-warning) 55%, var(--scribe-ink));
+}
+
+.scribe-execution-status[data-status="failed"] {
+	color: var(--scribe-error);
+}
+
+.scribe-turn-error,
+.scribe-chat-last-step {
+	padding-inline: 4px;
+}
+
+.scribe-chat-last-step {
+	color: var(--scribe-muted);
+}
+
+.scribe-chat-content,
+.scribe-chat-pre {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.scribe-answer-markdown {
+	min-width: 0;
+	white-space: normal;
+}
+
+.scribe-answer-markdown > * {
+	margin-block: 0 var(--scribe-space-card);
+}
+
+.scribe-answer-markdown > :last-child,
+.scribe-answer-markdown > p:has(+ p),
+.scribe-answer-markdown :is(li, blockquote) > :last-child {
+	margin-block-end: 0;
+}
+
+.scribe-answer-markdown :is(h1, h2, h3, h4, h5, h6) {
+	color: inherit;
+	font-family: inherit;
+	font-size: 1em;
+	line-height: inherit;
+}
+
+.scribe-answer-markdown :is(h1, h2) {
+	font-size: 1.2em;
+}
+
+.scribe-answer-markdown :is(ul, ol) {
+	padding-inline-start: var(--scribe-space-section);
+}
+
+.scribe-answer-markdown blockquote {
+	margin-inline: 0;
+	padding: var(--scribe-space-action) var(--scribe-space-card);
+	border-inline-start: 2px solid var(--scribe-border);
+	border-radius: var(--scribe-radius-detail);
+	background: var(--scribe-surface);
+}
+
+.scribe-answer-markdown blockquote > :first-child,
+.scribe-answer-markdown li > :first-child {
+	margin-block-start: 0;
+}
+
+.scribe-answer-markdown :not(pre) > code {
+	padding: 1px var(--scribe-space-row);
+	border-radius: var(--scribe-radius-detail);
+	background: var(--scribe-surface);
+	font-family: var(--font-monospace);
+}
+
+.scribe-app .scribe-answer-markdown pre {
+	max-height: 22rem;
+	white-space: pre;
+	overflow-wrap: normal;
+}
+
+.scribe-answer-table-scroll {
+	--scribe-hover: var(--scribe-page);
+	--scribe-active: var(--scribe-page);
+	max-width: 100%;
+	overflow-x: auto;
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--scribe-radius-code);
+}
+
+.scribe-answer-table-scroll table {
+	width: 100%;
+	margin: 0;
+	border-collapse: collapse;
+}
+
+.scribe-answer-table-scroll :is(th, td) {
+	min-width: 5em;
+	padding: var(--scribe-space-row) var(--scribe-space-action);
+	border: 1px solid var(--scribe-border);
+	text-align: start;
+}
+
+.scribe-answer-table-scroll th {
+	background: var(--scribe-surface);
+}
+
+.scribe-app .scribe-note-citation {
+	--scribe-hover: transparent;
+	--scribe-active: transparent;
+	display: inline;
+	height: auto;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	box-shadow: none;
+	color: var(--scribe-accent);
+	font: inherit;
+	text-decoration: underline;
+	white-space: normal;
+	vertical-align: baseline;
+}
+
+.scribe-app .scribe-note-citation:hover {
+	color: var(--scribe-accent-hover);
+}
+
+.scribe-chat-pre {
+	max-height: 10rem;
+	min-height: 1.5em;
+	margin: 4px 0;
+	padding: 6px;
+	overflow: auto;
+	border-radius: var(--radius-s);
+	background: var(--background-secondary);
+	color: var(--text-normal);
+}
+
+/* 对话过程、思考与工具调用 */
+.scribe-turn-process,
+.scribe-thinking-card,
+.scribe-tool-card {
+	min-width: 0;
+	margin-block: 4px;
+}
+
+.scribe-app .scribe-activity-heading {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 0;
+	padding: 0 0 0 4px;
+	color: var(--text-faint);
+	font-size: 14px;
+	line-height: 20px;
+	list-style: none;
+}
+
+.scribe-app .scribe-activity-heading:is(:hover, :focus-visible) {
+	background: transparent;
+	color: var(--scribe-ink);
+}
+
+.scribe-activity-heading::-webkit-details-marker {
+	display: none;
+}
+
+.scribe-activity-heading::after {
+	flex: none;
+	width: 6px;
+	height: 6px;
+	margin-inline: 2px 4px;
+	border-block-end: 1.5px solid currentColor;
+	border-inline-end: 1.5px solid currentColor;
+	content: '';
+	transform: rotate(-45deg);
+	transition: transform var(--scribe-motion);
+}
+
+[open] > .scribe-activity-heading::after {
+	transform: rotate(45deg);
+}
+
+.scribe-activity-heading > .scribe-chat-icon,
+.scribe-activity-heading > .scribe-chat-icon svg {
+	width: 14px;
+	height: 14px;
+	color: var(--scribe-ink);
+}
+
+.scribe-activity-label {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	font-weight: var(--font-medium, 500);
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-process-count {
+	flex: none;
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
+}
+
+.scribe-process-count.is-error {
+	color: var(--scribe-error);
+}
+
+.scribe-tool-status {
+	display: inline-flex;
+	flex: none;
+	color: var(--scribe-muted);
+}
+
+.scribe-tool-status .scribe-chat-icon,
+.scribe-tool-status svg,
+.scribe-execution-status .scribe-chat-icon,
+.scribe-execution-status svg {
+	width: 12px;
+	height: 12px;
+}
+
+[data-state="success"] .scribe-tool-status {
+	color: var(--scribe-success);
+}
+
+[data-state="error"] .scribe-tool-status {
+	color: var(--scribe-error);
+}
+
+[data-state="running"] .scribe-tool-status,
+.scribe-execution-status[data-status="running"] .scribe-chat-icon {
+	color: var(--scribe-accent);
+	animation: scribe-chat-spin 1s linear infinite;
+}
+
+@keyframes scribe-chat-spin {
+	to { transform: rotate(360deg); }
+}
+
+.scribe-activity-body {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-width: 0;
+	margin-block-start: 4px;
+	margin-inline-start: 4px;
+	padding-inline-start: 12px;
+	border-inline-start: 1px solid var(--scribe-border);
+}
+
+.scribe-turn-thinking {
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.scribe-tool-body {
+	gap: 8px;
+}
+
+.scribe-tool-body section {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-width: 0;
+}
+
+.scribe-tool-body :is(strong, .scribe-tool-meta) {
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
+}
+
+.scribe-tool-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 8px;
+	overflow-wrap: anywhere;
+}
+
+.scribe-tool-meta:empty {
+	display: none;
+}
+
+.scribe-app .scribe-tool-body .scribe-chat-pre {
+	max-height: 24rem;
+	margin: 0;
+	padding: 8px;
+	border: 0;
+	border-radius: var(--radius-s);
+	background: var(--background-secondary-alt, var(--scribe-surface));
+}
+
+.scribe-tool-change > strong {
+	display: block;
+	margin-block-end: 4px;
+}
+
+.scribe-app :is(.scribe-chat-pre, .scribe-approval-diff) {
+	--scribe-hover: var(--scribe-surface);
+	--scribe-active: var(--scribe-surface);
+	min-width: 0;
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--scribe-radius-code);
+	background: var(--scribe-surface);
+}
+
+.scribe-app .scribe-chat-pre {
+	padding: var(--scribe-space-card);
+	font: var(--scribe-type-caption) var(--font-monospace);
+}
+
+.scribe-chat-error {
+	color: color-mix(in srgb, var(--scribe-error) 65%, var(--scribe-ink));
+}
+
+.scribe-approval-view {
+	box-sizing: border-box;
+	flex: none;
+	width: 100%;
+	min-width: 0;
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--scribe-radius-card);
+	background: var(--scribe-surface);
+}
+
+.scribe-approval-warning {
+	display: flex;
+	align-items: center;
+	gap: var(--scribe-space-action);
+	padding: 8px 12px;
+	border-block-end: 1px solid var(--scribe-border);
+	color: var(--scribe-ink);
+	font: var(--scribe-type-secondary) var(--font-interface);
+	font-weight: 600;
+}
+
+.scribe-approval-warning .scribe-chat-icon {
+	color: var(--scribe-accent);
+}
+
+.scribe-approval-body {
+	--scribe-hover: transparent;
+	--scribe-active: transparent;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	align-content: start;
+	gap: var(--scribe-space-action);
+	max-height: min(18rem, 32dvh);
+	padding: 8px 12px;
+	overflow: auto;
+	color: var(--scribe-muted);
+	font: var(--scribe-type-secondary) var(--font-interface);
+}
+
+.scribe-app .scribe-approval-body:focus-visible {
+	outline-offset: -2px;
+}
+
+.scribe-approval-body h3 {
+	color: var(--scribe-ink);
+	font: var(--scribe-type-body) var(--font-interface);
+	font-weight: 600;
+	overflow-wrap: anywhere;
+}
+
+.scribe-approval-body :is(.scribe-approval-diff, .scribe-chat-pre) {
+	max-height: none;
+}
+
+.scribe-approval-actions {
+	justify-content: flex-end;
+	padding: 8px 12px;
+	border-block-start: 1px solid var(--scribe-border);
+}
+
+.scribe-app .scribe-approval-actions button {
+	min-height: 24px;
+	padding-block: 2px;
+	border-radius: var(--radius-m);
+}
+
+.scribe-approval-view h3,
+.scribe-approval-view p {
+	margin: 0;
+}
+
+.scribe-approval-diff {
+	display: grid;
+	gap: var(--scribe-space-action);
+	max-height: 22rem;
+	overflow: auto;
+}
+
+.scribe-approval-diff-group {
+	width: 100%;
+	border-collapse: collapse;
+	font: var(--scribe-type-caption) var(--font-monospace);
+}
+
+.scribe-approval-diff-group th,
+.scribe-approval-diff-group td {
+	padding: 1px var(--scribe-space-row);
+	text-align: start;
+	vertical-align: top;
+}
+
+.scribe-approval-diff-group th {
+	background: var(--scribe-raised);
+}
+
+.scribe-approval-diff-group th:nth-child(-n+2),
+.scribe-approval-diff-row td:nth-child(-n+3) {
+	width: 1%;
+	color: var(--scribe-muted);
+	white-space: nowrap;
+}
+
+.scribe-approval-diff-row.is-remove {
+	background: color-mix(in srgb, var(--scribe-error) 12%, transparent);
+}
+
+.scribe-approval-diff-row.is-add {
+	background: color-mix(in srgb, var(--scribe-success) 12%, transparent);
+}
+
+.scribe-approval-diff-content {
+	white-space: break-spaces;
+	overflow-wrap: anywhere;
+}
+
+.scribe-approval-line-ending {
+	margin-inline-start: var(--scribe-space-action);
+	color: var(--scribe-muted);
 }
 
 .scribe-settings-tabs {
@@ -668,6 +1862,11 @@
 
 .scribe-modal-actions.is-between {
 	justify-content: space-between;
+}
+
+.scribe-resume-contents {
+	max-height: 40vh;
+	overflow: auto;
 }
 
 .scribe-manual-model-row {

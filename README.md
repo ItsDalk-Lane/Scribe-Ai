@@ -1,6 +1,18 @@
 # Scribe Ai
 
-Model settings for your vault.
+Run AI tasks in Obsidian with your configured model.
+
+## Agent tasks
+
+Open **Scribe Ai** and submit a task. The agent starts in the current vault. Use **Add a path outside the vault** to grant a task access to a specific file or folder. Add it again for a new task. Paths mentioned in the instructions or saved in chat history do not grant access.
+
+To ask about part of an open note, highlight the text in its editor and choose **Attach current selection**. Review the preview or remove it before sending. This submits the current question and the exact highlighted excerpt as a selection-only request. The submitted excerpt is saved with the conversation.
+
+Chats and tool results are saved locally in the Scribe Ai plugin folder for this vault. Reopening Obsidian restores your last chat, including any partial reply saved when you stopped or closed the chat. Send a follow-up to pick up from it, or select **Review before resuming** to inspect the saved task's outgoing content and destination before continuing it. Select **New chat** for a fresh conversation.
+
+When you send a task, the current chat history, instructions, file references, and tool results it uses can be sent to the selected model provider. Select **Stop** to cancel pending work. Tools from a previous task only run again when a new task requests them and any required approval is granted.
+
+`Read`, `Glob`, and `Grep` retrieve information. `Write`, `Edit`, and `NotebookEdit` preview changes for approval. An overwrite requires the model to receive every line of the file's current version in this task. For long notes, request smaller pages or use a local edit. Chat does not run shell commands. Turning off **Tool calling** for the selected model also blocks local tool execution.
 
 ## Development
 
@@ -9,6 +21,7 @@ npm install
 npm run dev    # watch build into main.js
 npm run build  # type-check + production bundle
 npm run lint
+npm run test:agent
 ```
 
 Copy `main.js` and `manifest.json` (plus `styles.css` if present) into
@@ -38,7 +51,7 @@ OAuth token refreshes are serialized and written back to the same secret. Secret
 
 ### Network
 
-Streaming responses support cancellation, gzip/Brotli/deflate decoding, backpressure, and connection/first-byte/stream-idle timeouts. Proxy resolution order is plugin setting, environment variables, Electron system proxy (best effort), then direct connection. Localhost and `NO_PROXY` targets bypass proxies.
+Streaming responses support cancellation, gzip/Brotli/deflate decoding, backpressure, and connection/first-byte/stream-idle timeouts. The plugin's network channel blocks automatic redirects to a different site. If a service has moved, configure its new URL directly. Proxy resolution order is plugin setting, environment variables, Electron system proxy (best effort), then direct connection. Localhost and `NO_PROXY` targets bypass proxies.
 
 Run the local transport and protocol integration tests with:
 

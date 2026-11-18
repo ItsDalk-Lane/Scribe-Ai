@@ -1,0 +1,127 @@
+import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
+import { chmod, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import type { PreparedTool, ToolContext } from '../../types';
+import { authorizedLineRange, resolveToolPath } from './pathUtils';
+import type { ResolvedToolPath } from './pathUtils';
+
+export const MAX_TEXT_BYTES = 2 * 1024 * 1024;
+
+export function fileFingerprint(text: string): string {
+	return createHash('sha256').update(text).digest('hex');
+}
+
+export function fileToolInput(input: unknown, fields: string[]): Record<string, unknown> {
+	if (input === null || typeof input !== 'object' || Array.isArray(input)
+		|| Object.keys(input).some((key) => !fields.includes(key))) {
+		throw new Error('工具参数无效。');
+	}
+	return input as Record<string, unknown>;
+}
+
+export function requiredText(input: Record<string, unknown>, key: string, allowEmpty = false): string {
+	const value = Object.prototype.hasOwnProperty.call(input, key) ? input[key] : undefined;
+	if (typeof value !== 'string' || (!allowEmpty && !value.trim())) throw new Error(`参数 ${key} 必须是有效的文本。`);
+	return value;
+}
+
+export function checkTextSize(text: string): void {
+	if (Buffer.byteLength(text, 'utf8') > MAX_TEXT_BYTES) throw new Error('文件超过 2 MB 的文本处理限制。');
+	if (text.includes('\0')) throw new Error('文件包含二进制数据，无法按文本处理。');
+}
+
+export async function readToolFile(ctx: ToolContext, path: ResolvedToolPath): Promise<string> {
+	if (!path.stat?.isFile()) throw new Error('请选择一个文件。');
+	if (path.stat.size > MAX_TEXT_BYTES) throw new Error('文件超过 2 MB 的文本处理限制。');
+	ctx.signal.throwIfAborted();
+	const file = path.vaultPath ? ctx.app.vault.getFileByPath(path.vaultPath) : null;
+	const bytes = file
+		? await ctx.app.vault.readBinary(file)
+		: await readFile(path.absolutePath, { signal: ctx.signal });
+	ctx.signal.throwIfAborted();
+	const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+	checkTextSize(text);
+	return text;
+}
+
+export async function prepareFileChange(
+	ctx: ToolContext,
+	input: string,
+	update: (before: string | undefined, requireFullRead: () => void) => string,
+	options: { allowMissing?: boolean } = {},
+): Promise<PreparedTool> {
+	const path = await resolveToolPath(ctx, input, 'write', options);
+	if (authorizedLineRange(ctx, path)) throw new Error('本次仅授权了部分行，请选择整个文件后再修改。');
+	let before: string | undefined;
+	if (path.stat) {
+		const readPath = await resolveToolPath(ctx, input, 'read');
+		before = await readToolFile(ctx, readPath);
+	}
+	const fingerprint = before === undefined ? undefined : fileFingerprint(before);
+	if (fingerprint && ctx.readFiles.get(path.absolutePath) !== fingerprint) {
+		throw new Error('修改已有文件前，请使用 Read 读取其最新内容。');
+	}
+	const requireFullRead = () => {
+		if (fingerprint && !ctx.readDelivery.hasFullRead(path.absolutePath, fingerprint)) {
+			throw new Error('整篇覆盖前，请用 Read 读取同一版本的全部内容。结果被截短时请减小每次读取的行数；只修改部分内容时可用 Edit。');
+		}
+	};
+	const after = update(before, requireFullRead);
+	checkTextSize(after);
+	if (before === after) throw new Error('文件内容没有变化。');
+	return {
+		approval: { title: before === undefined ? '创建文件' : '修改文件', target: path.displayPath, before, after },
+		async run() {
+			const current = await resolveToolPath(ctx, input, 'write', options);
+			if (current.absolutePath !== path.absolutePath || current.stat?.ino !== path.stat?.ino || current.stat?.dev !== path.stat?.dev) {
+				throw new Error('文件位置或状态已变化，请重新确认。');
+			}
+			ctx.signal.throwIfAborted();
+			const file = current.vaultPath ? ctx.app.vault.getFileByPath(current.vaultPath) : null;
+			if (!current.stat) {
+				if (current.vaultPath) await ctx.app.vault.create(current.vaultPath, after);
+				else await writeFile(current.absolutePath, after, { flag: 'wx' });
+			} else if (file) {
+				await ctx.app.vault.process(file, (source) => {
+					ctx.signal.throwIfAborted();
+					if (file.path !== current.vaultPath || source !== before) throw new Error('文件已变化，请重新读取和确认。');
+					return after;
+				});
+			} else if (current.vaultPath) {
+				await ctx.app.vault.adapter.process(current.vaultPath, (source) => {
+					ctx.signal.throwIfAborted();
+					if (source !== before) throw new Error('文件已变化，请重新读取和确认。');
+					return after;
+				});
+			} else {
+				await replaceExternalFile(ctx, current, before, after);
+			}
+			ctx.readFiles.set(current.absolutePath, fileFingerprint(after));
+			return `${before === undefined ? '已创建' : '已更新'} ${path.displayPath}。`;
+		},
+	};
+}
+
+async function replaceExternalFile(
+	ctx: ToolContext,
+	path: ResolvedToolPath,
+	before: string | undefined,
+	after: string,
+): Promise<void> {
+	const staging = await mkdtemp(join(dirname(path.absolutePath), '.scribe-ai-'));
+	try {
+		const temp = join(staging, 'content');
+		await writeFile(temp, after, { mode: 0o600 });
+		await chmod(temp, (path.stat?.mode ?? 0o600) & 0o777);
+		const current = await resolveToolPath(ctx, path.requestedPath, 'write');
+		if (current.absolutePath !== path.absolutePath || current.stat?.ino !== path.stat?.ino
+			|| current.stat?.dev !== path.stat?.dev || await readToolFile(ctx, current) !== before) {
+			throw new Error('文件已变化，请重新读取和确认。');
+		}
+		ctx.signal.throwIfAborted();
+		await rename(temp, path.absolutePath);
+	} finally {
+		await rm(staging, { recursive: true, force: true });
+	}
+}

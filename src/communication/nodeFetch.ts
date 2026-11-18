@@ -2,6 +2,7 @@ import type { Agent, ClientRequest, IncomingMessage } from 'node:http';
 import { diagnostics } from './diagnostics';
 import { toLogEntry } from './events';
 import type { NodeFetchObserver } from './events';
+import { confirmModelRequest } from './modelRequestConfirmation';
 import { nodeRequire } from './nodeRequire';
 import { bridgeResponse } from './nodeResponse';
 import { getProxyAgentWithStatus } from './proxy';
@@ -21,11 +22,11 @@ function abortReason(signal: AbortSignal): Error {
 export function createNodeFetch(
 	getAgent: ProxyAgentResolver = getProxyAgentWithStatus,
 	options: NodeFetchOptions = {},
-): typeof fetch {
+) {
 	const timeouts = { ...DEFAULT_TIMEOUTS, ...options.timeouts };
 	let nextRequestId = 0;
 
-	return async (input, init) => {
+	return async (input: Parameters<typeof fetch>[0], init?: RequestInit, confirm?: (url: URL) => Promise<void>) => {
 		const request = new Request(input, init);
 		request.signal.throwIfAborted();
 		const initialUrl = new URL(request.url);
@@ -47,6 +48,8 @@ export function createNodeFetch(
 			requestBody: Buffer | undefined,
 			redirects: number,
 		): Promise<Response> => {
+			request.signal.throwIfAborted();
+			await confirm?.(url);
 			request.signal.throwIfAborted();
 			const resolution = await getAgent(url);
 			let agent: Agent | undefined;
@@ -129,14 +132,25 @@ export function createNodeFetch(
 						response.resume();
 						cleanup();
 						if (request.redirect === 'error') {
-							fail(new Error(`Redirect rejected for ${url.href}`));
+							fail(new Error('Redirect rejected by request settings.'));
 							return;
 						}
 						if (redirects >= 20) {
 							fail(new Error('Too many redirects'));
 							return;
 						}
-						const nextUrl = new URL(location, url);
+						let nextUrl: URL;
+						try {
+							nextUrl = new URL(location, url);
+						} catch {
+							fail(new TypeError('Invalid redirect URL.'));
+							return;
+						}
+						// 认证信息可能在任意请求头里，保留方法的转址也会重发正文。
+						if (nextUrl.protocol !== initialUrl.protocol || nextUrl.origin !== origin) {
+							fail(new Error('Cross-origin redirect blocked. Configure the final service URL directly.'));
+							return;
+						}
 						const nextMethod = status === 303 || ((status === 301 || status === 302) && method === 'POST')
 							? 'GET'
 							: method;
@@ -144,11 +158,6 @@ export function createNodeFetch(
 						if (nextMethod === 'GET') {
 							delete nextHeaders['content-length'];
 							delete nextHeaders['content-type'];
-						}
-						if (nextUrl.origin !== url.origin) {
-							delete nextHeaders.authorization;
-							delete nextHeaders.cookie;
-							delete nextHeaders['proxy-authorization'];
 						}
 						void send(nextUrl, nextMethod, nextHeaders, nextMethod === 'GET' ? undefined : requestBody, redirects + 1).then(resolve, reject);
 						return;
@@ -180,6 +189,9 @@ export function createNodeFetch(
 	};
 }
 
-export const nodeFetch: typeof fetch = createNodeFetch(getProxyAgentWithStatus, {
+const fetchWithOptionalConfirmation = createNodeFetch(getProxyAgentWithStatus, {
 	observer: (event) => diagnostics.record(toLogEntry(event)),
 });
+
+export const nodeFetch: typeof fetch = fetchWithOptionalConfirmation;
+export const modelNodeFetch: typeof fetch = (input, init) => fetchWithOptionalConfirmation(input, init, confirmModelRequest);

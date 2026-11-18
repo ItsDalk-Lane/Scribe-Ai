@@ -33,20 +33,35 @@ export interface Message {
 	toolCallId?: string;
 	toolName?: string;
 	isError?: boolean;
+	skipped?: boolean;
+	incomplete?: true;
 	/** assistant 消息中由模型发起的工具调用 */
 	toolCalls?: ToolCall[];
+	/** 保留同一模型继续当前任务时所需的原始内容和签名 */
+	rawAssistant?: AssistantMessage;
 }
 
 export interface NoteRef {
 	path: string;
+	kind?: 'file' | 'folder';
+	/** 本次任务显式提交的库外资料，用于恢复任务时校验授权来源。 */
+	addedExternal?: true;
 	/** 选区起止行，缺省表示整篇笔记 */
 	lines?: [number, number];
+}
+
+export interface NoteSelection {
+	path: string;
+	title: string;
+	text: string;
+	lines: [number, number];
 }
 
 export interface TaskRequest {
 	conversationId: string;
 	instruction: string;
 	refs: NoteRef[];
+	selection?: NoteSelection;
 }
 
 export type TaskStatus =
@@ -54,7 +69,11 @@ export type TaskStatus =
 	| 'running'
 	| 'awaiting-user'
 	| 'done'
+	| 'file-changes-done'
+	| 'partial'
 	| 'failed'
+	| 'limit'
+	| 'interrupted'
 	| 'cancelled';
 
 export interface Task {
@@ -85,16 +104,59 @@ export interface ToolResult {
 	callId: string;
 	content: string;
 	isError: boolean;
+	fileRead?: FileReadPage;
+}
+
+export interface FileReadPage {
+	path: string;
+	fingerprint: string;
+	/** 零起点，end 不含。 */
+	start: number;
+	end: number;
+	lineCount: number;
+}
+
+export interface ReadDelivery {
+	remember(message: Message, page: FileReadPage): void;
+	accept(messages: Message[]): void;
+	hasFullRead(path: string, fingerprint: string): boolean;
 }
 
 export interface ToolContext {
 	task: Task;
 	app: App;
+	signal: AbortSignal;
+	permissions: PermissionPolicy;
+	readFiles: Map<string, string>;
+	readDelivery: ReadDelivery;
+	cwd: string;
+	approve?: (approval: ToolApproval) => Promise<boolean>;
+}
+
+export interface ToolApproval {
+	title: string;
+	target: string;
+	before?: string;
+	after?: string;
+	kind?: 'shell';
+}
+
+export interface PreparedTool {
+	approval?: ToolApproval;
+	run(): Promise<string | { content: string; fileRead: FileReadPage }> | string;
+}
+
+export interface ToolDefinition extends ToolSpec {
+	isReadOnly: boolean;
+	maxResultSizeChars?: number;
+	isAvailable?(): boolean;
+	prepare(input: unknown, ctx: ToolContext): Promise<PreparedTool> | PreparedTool;
 }
 
 /* ───────────── 模型 ───────────── */
 
 export interface ModelRequest {
+	beforeSend?: (address: string) => Promise<void>;
 	providerId: string;
 	model: string;
 	system?: string;
@@ -120,6 +182,9 @@ export interface ModelResponse {
 	raw: AssistantMessage;
 }
 
+export class ContextOverflowError extends Error {}
+export class RetryableModelError extends Error {}
+
 export type ModelStreamEvent = AssistantMessageEvent;
 
 export interface ModelStream extends AsyncIterable<ModelStreamEvent> {
@@ -129,7 +194,8 @@ export interface ModelStream extends AsyncIterable<ModelStreamEvent> {
 
 /* ───────────── 运行状态 ───────────── */
 
-export type RunStatus = 'idle' | 'running' | 'awaiting-approval' | 'done' | 'failed';
+export type TerminalRunStatus = 'done' | 'file-changes-done' | 'partial' | 'failed' | 'cancelled' | 'limit' | 'interrupted';
+export type RunStatus = 'idle' | 'running' | 'awaiting-approval' | TerminalRunStatus;
 
 export interface RunState {
 	taskId: string;
@@ -137,6 +203,36 @@ export interface RunState {
 	messages: Message[];
 	pendingCalls: ToolCall[];
 	status: RunStatus;
+	resumed?: boolean;
+	error?: string;
+}
+
+export type RunEvent =
+	| { type: 'state'; state: RunState }
+	| { type: 'turn-start'; turn: number }
+	| { type: 'model-retry'; waiting: boolean }
+	| { type: 'text-delta'; text: string }
+	| { type: 'tool-start'; call: ToolCall }
+	| { type: 'tool-end'; call: ToolCall; result: ToolResult };
+
+export type RunCheckpoint = Exclude<RunEvent, { type: 'text-delta' | 'model-retry' }>;
+
+export interface RunObserver {
+	onEvent?: (event: RunEvent) => void;
+	approve?: (approval: ToolApproval, signal: AbortSignal) => Promise<boolean>;
+	retryConnection?: (signal: AbortSignal) => Promise<void>;
+	confirmResume?: (preview: ResumePreview, signal: AbortSignal) => Promise<boolean>;
+}
+
+export interface ResumePreview {
+	address: string;
+	request: ModelRequest;
+	source: TaskRequest;
+}
+
+export interface ResumeReview {
+	prepare(request: ModelRequest): void;
+	beforeSend(this: void, address: string): Promise<void>;
 }
 
 /* ───────────── 第五层：通信层接口 ───────────── */
@@ -209,6 +305,7 @@ export interface ModelProviderInfo {
 
 export interface ModelService {
 	providers(): ModelProviderInfo[];
+	contextLimits?(model: RunContext['model']): Pick<ProviderModelInfo, 'contextWindow' | 'maxTokens'> | undefined;
 	login(providerId: string, interaction: AuthInteraction, options?: LoginOptions): Promise<Credential>;
 	refresh(providerId?: string): Promise<void>;
 	/** 自建/本地服务商：直接向它的 /models 查询模型清单 */
@@ -248,12 +345,12 @@ export interface CommunicationLayer {
 
 /* ───────────── 第四层：工具层接口 ───────────── */
 
-/** 一个工具模块只声明能力清单，实际执行统一走工具执行入口 */
-export type ToolModule = () => ToolSpec[];
+/** 各模块提供工具定义，校验、授权和结果处理统一走执行入口 */
+export type ToolModule = () => ToolDefinition[];
 
 export interface ToolRegistry {
-	all(): ToolSpec[];
-	find(name: string): ToolSpec | undefined;
+	all(): ToolDefinition[];
+	find(name: string): ToolDefinition | undefined;
 }
 
 export interface ToolExecutor {
@@ -275,26 +372,54 @@ export interface ToolLayer {
 /* ───────────── 第二层：编排层接口 ───────────── */
 
 export interface ConversationStore {
-	load(conversationId: string): Promise<Message[]>;
-	append(conversationId: string, messages: Message[]): Promise<void>;
+	list(): Promise<ConversationSummary[]>;
+	load(id: string): Promise<ConversationSnapshot>;
+	lastOpened(): Promise<string | undefined>;
+	setLastOpened(id: string): Promise<void>;
+	append(id: string, entries: ConversationEntry[]): Promise<void>;
 }
 
-export interface TaskStore {
-	load(taskId: string): Promise<Task | null>;
-	save(task: Task): Promise<void>;
-	list(): Promise<Task[]>;
+export interface RunStep {
+	phase: 'starting' | 'model' | 'tool' | 'approval' | 'tool-result';
+	turn: number;
+	call?: Pick<ToolCall, 'id' | 'name'>;
 }
 
-export interface TaskManager {
-	create(request: TaskRequest, parentId?: string): Promise<Task>;
-	update(taskId: string, patch: Partial<Task>): Promise<Task>;
-	children(taskId: string): Promise<Task[]>;
+export type ConversationEntry =
+	| { type: 'start'; task: Task; model: RunContext['model'] }
+	| { type: 'messages'; taskId: string; messages: Message[]; step?: RunStep }
+	| { type: 'step'; taskId: string; step: RunStep }
+	| { type: 'finish'; taskId: string; status: TerminalRunStatus; turn: number; error?: string; partial?: string; resumed?: boolean };
+
+export interface SavedRun {
+	request: TaskRequest;
+	model: RunContext['model'];
+	state: RunState;
+	step?: RunStep;
+	partial?: string;
+	finalized?: boolean;
+}
+
+export interface ConversationSnapshot {
+	id: string;
+	runs: SavedRun[];
+}
+
+export interface ConversationSummary {
+	id: string;
+	title: string;
+	updatedAt: number;
 }
 
 export interface SessionController {
 	createConversation(): Promise<string>;
-	submit(request: TaskRequest): Promise<Task>;
+	listConversations(): Promise<ConversationSummary[]>;
+	openConversation(id?: string): Promise<ConversationSnapshot | null>;
+	submit(request: TaskRequest, observer?: RunObserver): { taskId: string; result: Promise<RunState> };
+	resume(conversationId: string, taskId: string, observer?: RunObserver): { taskId: string; result: Promise<RunState> };
 	cancel(taskId: string): Promise<void>;
+	pause(taskId: string): void;
+	dispose(): void;
 }
 
 export interface SkillInfo {
@@ -309,6 +434,7 @@ export interface SkillRegistry {
 
 export interface PermissionPolicy {
 	canRead(path: string): boolean;
+	readLines?(path: string): [number, number] | undefined;
 	canWrite(path: string): boolean;
 	canCallTool(tool: ToolSpec): boolean;
 	canSendOutbound(): boolean;
@@ -317,24 +443,32 @@ export interface PermissionPolicy {
 export interface RunContext {
 	task: Task;
 	permissions: PermissionPolicy;
+	cwd: string;
+	model: Pick<ModelRequest, 'providerId' | 'model'>;
+	checkModel?: () => void;
+	resumeReview?: ResumeReview;
+	signal: AbortSignal;
+	observer: RunObserver;
+	readFiles: Map<string, string>;
+	readDelivery: ReadDelivery;
+	history?: Message[];
+	agreements?: string[];
+	record?: (event: RunCheckpoint) => Promise<void>;
 }
 
 export interface ContextBuilder {
 	build(
 		ctx: RunContext,
-		history: Message[],
-		skills: SkillRegistry,
+		current: Message[],
+		maxBytes: number,
 	): Promise<ModelRequest>;
 }
 
 export interface OrchestrationLayer {
 	sessions: SessionController;
-	tasks: TaskManager;
 	context: ContextBuilder;
 	skills: SkillRegistry;
-	permissions: PermissionPolicy;
 	conversations: ConversationStore;
-	taskStore: TaskStore;
 }
 
 /* ───────────── 第三层：核心循环层接口 ───────────── */
@@ -344,7 +478,12 @@ export interface ModelCoordinator {
 }
 
 export interface ToolCoordinator {
-	runCalls(state: RunState, ctx: RunContext): Promise<ToolResult[]>;
+	runCalls(
+		state: RunState,
+		ctx: RunContext,
+		approve: ToolContext['approve'],
+		skip?: (call: ToolCall) => string | undefined | Promise<string | undefined>,
+	): AsyncIterable<{ call: ToolCall; result: ToolResult; skipped?: boolean }>;
 }
 
 export interface AgentLoop {

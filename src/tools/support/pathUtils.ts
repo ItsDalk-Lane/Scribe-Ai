@@ -1,8 +1,94 @@
-/** 工具操作路径的处理与校验：统一为正斜杠并拒绝越出笔记库的路径 */
-export function normalizeVaultPath(path: string): string {
-	return path.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '');
+import type { Stats } from 'node:fs';
+import { lstat, realpath, stat } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import type { ToolContext } from '../../types';
+
+export interface ResolvedToolPath {
+	requestedPath: string;
+	absolutePath: string;
+	vaultPath?: string;
+	displayPath: string;
+	stat?: Stats;
 }
 
-export function isInsideVault(path: string): boolean {
-	return !normalizeVaultPath(path).split('/').includes('..');
+/** 目录范围按路径段判断，避免同名前缀混入。 */
+export function isWithinPath(directory: string, target: string): boolean {
+	const suffix = relative(directory, target);
+	return !isAbsolute(suffix) && suffix !== '..' && !suffix.startsWith(`..${sep}`);
+}
+
+export function toolAbsolutePath(cwd: string, input: string): string {
+	if (!input.trim() || input.includes('\0')) throw new Error('文件路径无效。');
+	if (process.platform === 'win32') {
+		const windowsPath = input.replace(/\//g, '\\');
+		if (/^\\\\[?.]\\/.test(windowsPath) || /^[A-Za-z]:(?!\\)/.test(windowsPath)
+			|| windowsPath.replace(/^[A-Za-z]:/, '').includes(':')
+			|| windowsPath.split('\\').some((part) => part !== '.' && part !== '..'
+				&& (/[. ]$/.test(part) || /^(?:con|prn|aux|nul|(?:com|lpt)[1-9¹²³])(?:\.|$)/i.test(part)))) {
+			throw new Error('文件路径无效。');
+		}
+	}
+	return resolve(cwd, input);
+}
+
+/** 同时检查传入路径和实际地址，避免链接把操作带出授权范围。 */
+export async function resolveToolPath(
+	ctx: ToolContext,
+	input: string,
+	operation: 'read' | 'write',
+	options?: { allowMissing?: boolean },
+): Promise<ResolvedToolPath> {
+	ctx.signal.throwIfAborted();
+	const requestedPath = toolAbsolutePath(ctx.cwd, input);
+	const checkPermission = (target: string) => {
+		const allowed = operation === 'read' ? ctx.permissions.canRead(target) : ctx.permissions.canWrite(target);
+		if (!allowed) throw new Error('此路径未包含在本次任务授权的资料中。');
+	};
+	checkPermission(requestedPath);
+	const canonicalVault = await realpath(ctx.cwd);
+	let absolutePath: string;
+	let fileStat: Stats | undefined;
+	try {
+		absolutePath = await realpath(requestedPath);
+		checkPermission(absolutePath);
+		fileStat = await stat(absolutePath);
+	} catch (error) {
+		if (!hasFileErrorCode(error, 'ENOENT')) throw error;
+		if (!options?.allowMissing) throw new Error('指定的文件或文件夹不存在。');
+		const existing = await lstat(requestedPath).catch((failure: unknown) => {
+			if (!hasFileErrorCode(failure, 'ENOENT')) throw failure;
+			return undefined;
+		});
+		if (existing) throw new Error('目标已存在或指向不存在的位置。');
+		absolutePath = resolve(await realpath(dirname(requestedPath)), basename(requestedPath));
+		checkPermission(absolutePath);
+	}
+	if (operation === 'write' && fileStat?.isFile() && fileStat.nlink > 1) {
+		throw new Error('此文件有多个硬链接，无法单独修改这个位置。');
+	}
+	ctx.signal.throwIfAborted();
+	const vaultPath = isWithinPath(canonicalVault, absolutePath)
+		? relative(canonicalVault, absolutePath).split(sep).join('/')
+		: undefined;
+	return { requestedPath, absolutePath, vaultPath, displayPath: vaultPath || absolutePath, stat: fileStat };
+}
+
+export function hasFileErrorCode(error: unknown, code: string): boolean {
+	return error instanceof Error && 'code' in error && error.code === code;
+}
+
+export function authorizedLineRange(ctx: ToolContext, path: ResolvedToolPath): [number, number] | undefined {
+	if (ctx.permissions.readLines) return ctx.permissions.readLines(path.absolutePath);
+	let lines: [number, number] | undefined;
+	for (const ref of ctx.task.request.refs) {
+		const allowed = resolve(ctx.cwd, ref.path);
+		if (ref.kind === 'folder' && (isWithinPath(allowed, path.requestedPath) || isWithinPath(allowed, path.absolutePath))) {
+			return undefined;
+		}
+		if (ref.kind !== 'folder' && [path.requestedPath, path.absolutePath].some((candidate) => relative(allowed, candidate) === '')) {
+			if (!ref.lines) return undefined;
+			lines ??= ref.lines;
+		}
+	}
+	return lines;
 }
