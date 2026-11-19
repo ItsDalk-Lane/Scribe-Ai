@@ -13,7 +13,6 @@ export function createTask(request: TaskRequest): Task {
 		id: randomUUID(),
 		request: {
 			...request,
-			instruction: request.instruction.trim(),
 			refs: selection ? [] : request.refs.map((ref) => ({ ...ref, lines: ref.lines && [...ref.lines] })),
 			selection: selection && { path: selection.path, title: selection.title, text: selection.text, lines: [...selection.lines] },
 		},

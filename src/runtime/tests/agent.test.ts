@@ -7,6 +7,7 @@ import type { TestContext } from 'node:test';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { App } from 'obsidian';
 import { createModelService } from '../../communication/providers';
+import { restoreExecution } from '../../interaction/context';
 import { createContextBuilder } from '../../orchestration/context/contextBuilder';
 import { createSessionController } from '../../orchestration/sessionController';
 import { normalizeSettings } from '../../orchestration/settings/defaults';
@@ -83,6 +84,118 @@ function sessionsFor(app: App, service: Pick<ModelService, 'stream' | 'contextLi
 	const adapter = app.vault.adapter as import('obsidian').FileSystemAdapter;
 	return createSessionController(app, settings, runtime, createConversationStore(join(adapter.getBasePath(), 'transcripts')));
 }
+
+void test('thinking arrives before the reply completes and keeps its id and duration after reopening', async (t) => {
+	const { app } = await fixture(t);
+	const response = emptyModelResponse('回答');
+	response.raw.content.unshift({ type: 'thinking', thinking: '整理线索' });
+	const { raw } = response;
+	let finished = false;
+	let notifyCheckpoint!: () => void;
+	let releaseStream!: () => void;
+	const checkpoint = new Promise<void>((resolve) => { notifyCheckpoint = resolve; });
+	const waiting = new Promise<void>((resolve) => { releaseStream = resolve; });
+	const sessions = sessionsFor(app, {
+		contextLimits: () => ({ contextWindow: 128_000, maxTokens: 8192 }),
+		stream: () => ({
+			async *[Symbol.asyncIterator]() {
+				yield { type: 'thinking_start', contentIndex: 0, partial: raw };
+				yield { type: 'thinking_delta', contentIndex: 0, partial: raw, delta: '整理' };
+				yield { type: 'thinking_delta', contentIndex: 0, partial: raw, delta: '线索' };
+				yield { type: 'thinking_end', contentIndex: 0, partial: raw, content: '整理线索' };
+				await waiting;
+				yield { type: 'text_delta', contentIndex: 1, partial: raw, delta: '回答' };
+			},
+			result: async () => { finished = true; return response; },
+			cancel() {},
+		}),
+	}, []);
+	const deltas: string[] = [];
+	let thoughtDuration = -1;
+	const handle = sessions.submit({ conversationId: 'thinking', instruction: '梳理线索', refs: [] }, {
+		onEvent(event) {
+			if (event.type !== 'thinking-delta' && event.type !== 'thinking-end' && event.type !== 'text-delta') return;
+			assert.equal(finished, false);
+			assert.equal(event.messageId, `assistant:${handle.taskId}:1`);
+			assert.equal(event.contentIndex, event.type === 'text-delta' ? 1 : 0);
+			if (event.type === 'thinking-end') {
+				thoughtDuration = event.durationMs;
+				notifyCheckpoint();
+			}
+			deltas.push(event.type === 'thinking-end' ? 'end' : event.text);
+		},
+	});
+	try {
+		assert.ok(await Promise.race([checkpoint.then(() => true), handle.result.then(() => false)]));
+		const inProgress = (await sessions.openConversation('thinking'))?.runs[0]?.state.messages.at(-1);
+		assert.equal(inProgress?.id, `assistant:${handle.taskId}:1`);
+		assert.equal(inProgress.incomplete, true);
+		assert.equal(inProgress.thinkingBlocks?.[0]?.thinking, '整理线索');
+	} finally {
+		releaseStream();
+	}
+	assert.equal((await handle.result).status, 'done');
+	assert.deepEqual(deltas, ['整理', '线索', 'end', '回答']);
+	assert.ok(thoughtDuration >= 0);
+	const savedRun = (await sessions.openConversation('thinking'))?.runs[0]?.state;
+	assert.ok(savedRun?.createdAt && savedRun.finishedAt && savedRun.finishedAt >= savedRun.createdAt);
+	const messages = savedRun.messages.filter(({ role }) => role === 'assistant');
+	assert.equal(messages?.length, 1);
+	const message = messages[0];
+	assert.equal(message?.id, `assistant:${handle.taskId}:1`);
+	assert.ok(message.metrics && message.metrics.firstDeltaMs !== undefined && message.metrics.decodeMs !== undefined);
+	assert.equal(message.metrics.modelMs, message.metrics.firstDeltaMs + message.metrics.decodeMs);
+	assert.equal(message.metrics.contextWindow, 128_000);
+	assert.ok(message.metrics.endedAt <= savedRun.finishedAt);
+	assert.deepEqual(message?.rawAssistant?.content[0], { type: 'thinking', thinking: '整理线索', durationMs: thoughtDuration });
+});
+
+void test('a provider that marks its thinking as redacted at the end never streams that block', async (t) => {
+	const { app } = await fixture(t);
+	const response = emptyModelResponse('可以显示的回答');
+	response.raw.api = 'pi-messages';
+	const thought = { type: 'thinking' as const, thinking: '隐藏的内容', redacted: false };
+	response.raw.content.unshift(thought);
+	const sessions = sessionsFor(app, {
+		stream: () => ({
+			async *[Symbol.asyncIterator]() {
+				yield { type: 'thinking_delta', contentIndex: 0, partial: response.raw, delta: thought.thinking };
+				thought.redacted = true;
+				yield { type: 'thinking_end', contentIndex: 0, partial: response.raw, content: thought.thinking };
+			},
+			result: async () => response,
+			cancel() {},
+		}),
+	}, []);
+	const handle = sessions.submit({ conversationId: 'redacted-thinking', instruction: '梳理线索', refs: [] }, {
+		onEvent(event) { assert.notEqual(event.type, 'thinking-delta'); },
+	});
+	assert.equal((await handle.result).status, 'done');
+});
+
+void test('stopping before the answer saves visible thinking without retaining an unfinished raw response', async (t) => {
+	const { app } = await fixture(t);
+	const response = emptyModelResponse('');
+	response.raw.content = [{ type: 'thinking', thinking: '已经显示的思考' }];
+	const sessions = sessionsFor(app, {
+		stream: () => ({
+			async *[Symbol.asyncIterator]() {
+				yield { type: 'thinking_delta', contentIndex: 0, partial: response.raw, delta: '已经显示的思考' };
+			},
+			result: async () => response,
+			cancel() {},
+		}),
+	}, []);
+	const handle = sessions.submit({ conversationId: 'stopped-thinking', instruction: '梳理线索', refs: [] }, {
+		onEvent(event) { if (event.type === 'thinking-delta') void sessions.cancel(handle.taskId); },
+	});
+	assert.equal((await handle.result).status, 'cancelled');
+	const message = (await sessions.openConversation('stopped-thinking'))?.runs[0]?.state.messages.at(-1);
+	assert.equal(message?.id, `assistant:${handle.taskId}:1`);
+	assert.equal(message?.incomplete, true);
+	assert.equal(message?.rawAssistant, undefined);
+	assert.equal(message?.thinkingBlocks?.[0]?.thinking, '已经显示的思考');
+});
 
 void test('tools keep going past 12 rounds and 8 calls and return errors to the model', async (t) => {
 	const { app } = await fixture(t);
@@ -377,27 +490,42 @@ void test('a model disconnection restarts only the incomplete model turn and pre
 			requests.push(request);
 			switch (requests.length) {
 				case 1: return fakeStream(emptyModelResponse('', [a]), request.signal);
-				case 2: return {
-					...fakeStream(emptyModelResponse('断开的半句', [b]), request.signal),
-					result: () => Promise.reject(new RetryableModelError('socket hang up')),
-				};
+				case 2: {
+					const response = emptyModelResponse('断开的半句', [b]);
+					const partial = response.raw;
+					return {
+						...fakeStream(response, request.signal),
+						async *[Symbol.asyncIterator]() {
+							yield { type: 'text_delta', partial, contentIndex: 0, delta: '断开的半句' };
+							yield { type: 'thinking_delta', partial, contentIndex: 1, delta: '随后出现的思考' };
+							yield { type: 'thinking_end', partial, contentIndex: 1, content: '随后出现的思考' };
+							yield { type: 'text_delta', partial, contentIndex: 2, delta: '断线前最后一段' };
+						},
+						result: () => Promise.reject(new RetryableModelError('socket hang up')),
+					};
+				}
 				case 3: return fakeStream(emptyModelResponse('', [b]), request.signal);
 				case 4: return fakeStream(emptyModelResponse('两篇都写好了。'), request.signal);
 				default: throw new Error('多余的模型请求');
 			}
 		},
 	}, [writeTools]);
-	const reconnects: boolean[] = [];
+	const reconnects: string[] = [];
+	let disconnectedReplyId: string | undefined;
 	const result = await sessions.submit({ conversationId: 'disconnected-write', instruction: '依次创建两篇笔记。', refs: [] }, {
 		approve: async () => true,
 		onEvent(event) {
+			if (event.type === 'text-delta' && event.text === '断开的半句') disconnectedReplyId = event.messageId;
 			if (event.type === 'model-retry') {
-				reconnects.push(event.waiting);
+				assert.equal(event.waiting, false);
+				reconnects.push(event.messageId);
 				assert.deepEqual(writes, ['A.md']);
 			}
 		},
 	}).result;
-	assert.deepEqual(reconnects, [false]);
+	assert.ok(disconnectedReplyId);
+	assert.deepEqual(reconnects, [disconnectedReplyId]);
+	assert.ok(result.messages.some(({ id }) => id === `${disconnectedReplyId}:retry:1`));
 	assert.equal(result.turn, 3);
 	assert.deepEqual(requests[1]?.messages, requests[2]?.messages);
 	assert.equal(requests[2]?.messages.at(-1)?.toolCallId, a.id);
@@ -407,7 +535,12 @@ void test('a model disconnection restarts only the incomplete model turn and pre
 	assert.ok(result.messages.every(({ content }) => !content.includes('断开的半句')));
 	const saved = await sessions.openConversation('disconnected-write');
 	assert.equal(saved?.runs.length, 1);
-	assert.equal(saved.runs[0]?.state.status, 'file-changes-done');
+	const savedRun = saved.runs[0]!;
+	assert.equal(savedRun.state.status, 'file-changes-done');
+	assert.ok(savedRun.state.messages.every(({ id }) => id !== disconnectedReplyId));
+	assert.deepEqual(restoreExecution(savedRun).items.flatMap((row) => (
+		(row.kind === 'text' || row.kind === 'thinking') && row.messageId === disconnectedReplyId ? [row.content] : []
+	)), ['断开的半句', '随后出现的思考', '断线前最后一段']);
 });
 
 void test('stopping during reconnect cancels the pending model request', async (t) => {
@@ -641,6 +774,8 @@ void test('a truncated answer resumes from saved text without replaying tools', 
 	const messages = saved?.runs[0]?.state.messages ?? [];
 	assert.equal(messages.filter(({ role }) => role === 'user').length, 1);
 	assert.equal(messages.filter(({ role }) => role === 'assistant').map(({ content }) => content).join(''), '开头和结尾。');
+	assert.ok(messages.find(({ role }) => role === 'tool')?.toolDurationMs !== undefined);
+	assert.equal(messages.find(({ content }) => content === '开头')?.truncated, true);
 });
 
 void test('continuations that restart a cutoff line save each completed line once', async (t) => {
@@ -667,6 +802,35 @@ void test('continuations that restart a cutoff line save each completed line onc
 	assert.deepEqual(answers.map(({ content }) => content).join('').split('\n'),
 		['053', '054', '055', '108', '109'].map((number) => `${number} | 山风过松林`));
 	assert.equal(answers.at(-1)?.rawAssistant, undefined);
+});
+
+void test('pausing just after truncation resumes without repeating the saved answer', async (t) => {
+	const { app } = await fixture(t);
+	const savedText = Array.from({ length: 10 }, (_, index) => `已经保存的第 ${index + 1} 行`).join('\n');
+	const remainder = '\n从截断处继续的结尾。';
+	const requests: ModelRequest[] = [];
+	const sessions = sessionsFor(app, {
+		stream(request) {
+			requests.push(request);
+			return requests.length === 1
+				? fakeStream(emptyModelResponse(savedText, [], 'limit'), request.signal)
+				: fakeStream(emptyModelResponse(savedText + remainder), request.signal);
+		},
+	}, []);
+	const conversationId = 'paused-after-truncation';
+	const run = sessions.submit({ conversationId, instruction: '请耐心讲解。', refs: [] }, {
+		onEvent(event) {
+			if (event.type === 'state' && event.state.messages.at(-1)?.truncated) sessions.pause(event.state.taskId);
+		},
+	});
+	assert.equal((await run.result).status, 'interrupted');
+	assert.equal(requests.length, 1);
+	const continued = await sessions.resume(conversationId, run.taskId).result;
+	assert.equal(continued.status, 'done');
+	assert.match(requests[1]?.messages.at(-1)?.content ?? '', /从已经保存的文字末尾接着写/);
+	const opened = await sessions.openConversation(conversationId);
+	const stored = opened?.runs[0]?.state.messages.filter(({ role }) => role === 'assistant');
+	assert.deepEqual(stored?.map(({ content }) => content), [savedText, remainder]);
 });
 
 void test('repeated output truncation stops after two continuations and preserves the partial answer', async (t) => {

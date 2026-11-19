@@ -53,6 +53,21 @@ void test('long history is trimmed without losing the current instruction or too
 	assert.ok(hugeResult.content.length > 20_000);
 });
 
+void test('saved timing and usage do not consume the outgoing message budget', async () => {
+	const withStatistics: Message[] = [current[0]!, {
+		...current[1]!, id: 'assistant:timed',
+		metrics: { endedAt: 1_700_000_000_000, modelMs: 45, firstDeltaMs: 25, decodeMs: 20, contextWindow: 8_000 },
+		reportedUsage: { prompt: 32, output: 12 },
+		usage: { input: 32, output: 12, cacheRead: 0, cacheWrite: 0, totalTokens: 44,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+	}, { ...current[2]!, toolDurationMs: 33 }];
+	const original = await context.build(runContext(), current, 8_000);
+	const available = inputBytes(original);
+	const withDisplay = await context.build(runContext(), withStatistics, available);
+	assert.deepEqual(withDisplay.messages, withStatistics);
+	assert.equal(inputBytes(withDisplay), available);
+});
+
 void test('dropped chat turns still carry explicit user agreements in order and within the budget', async () => {
 	const original = '先约定：只改正文，保留原标题。';
 	const newer = '更新之前的约定：附录也可以改。';

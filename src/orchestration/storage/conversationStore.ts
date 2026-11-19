@@ -5,11 +5,13 @@ import { mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-import type { ConversationStore, ConversationSummary } from '../../types';
+import type { ConversationEntry, ConversationStore, ConversationSummary } from '../../types';
 import { ConversationRecordError, parseConversationEntry, replayConversation } from './taskStore';
 
 const idPattern = /^(?!(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$)[A-Z0-9][A-Z0-9-]{0,95}$/i;
-const writeQueue = new Map<string, Promise<void>>();
+const titleLimit = 120;
+const writeQueue = new Map<string, Promise<unknown>>();
+const deletedLogs = new Set<string>();
 const noFollow = constants.O_NOFOLLOW ?? 0;
 
 function checkId(id: string): void {
@@ -20,12 +22,12 @@ function isMissing(error: unknown): boolean {
 	return error instanceof Error && 'code' in error && error.code === 'ENOENT';
 }
 
-async function enqueue(path: string, write: () => Promise<void>): Promise<void> {
+async function enqueue<T>(path: string, write: () => Promise<T>): Promise<T> {
 	const pending = writeQueue.get(path) ?? Promise.resolve();
 	const next = pending.catch(() => {}).then(write);
 	writeQueue.set(path, next);
 	try {
-		await next;
+		return await next;
 	} finally {
 		if (writeQueue.get(path) === next) writeQueue.delete(path);
 	}
@@ -50,6 +52,46 @@ function openIfExists(path: string) {
 	});
 }
 
+async function readSmallText(path: string, limit: number): Promise<string | undefined> {
+	const opened = await openIfExists(path);
+	if (!opened) return undefined;
+	try {
+		return opened.stat.size <= limit ? (await opened.file.readFile('utf8')).trim() : undefined;
+	} finally {
+		await opened.file.close();
+	}
+}
+
+async function readPointer(path: string): Promise<string | undefined> {
+	const id = await readSmallText(path, 100);
+	return id && idPattern.test(id) ? id : undefined;
+}
+
+async function unlinkIfExists(path: string): Promise<void> {
+	try {
+		await unlink(path);
+	} catch (error) {
+		if (!isMissing(error)) throw error;
+	}
+}
+
+async function writeAtomically(path: string, value: string): Promise<void> {
+	const temporary = `${path}-${randomUUID()}.tmp`;
+	const file = await open(temporary, 'wx', 0o600);
+	try {
+		try {
+			await file.writeFile(value, 'utf8');
+			await file.sync();
+		} finally {
+			await file.close();
+		}
+		await rename(temporary, path);
+	} catch (error) {
+		await unlink(temporary).catch(() => {});
+		throw error;
+	}
+}
+
 /** 只回放以换行结尾的记录，未写完的末行留待下次追加时清理。 */
 async function* readRecords(file: FileHandle, size: number) {
 	const buffer = Buffer.allocUnsafe(8192);
@@ -65,6 +107,33 @@ async function* readRecords(file: FileHandle, size: number) {
 		tail = lines.pop() ?? '';
 		for (const line of lines) yield parseConversationEntry(line, ++lineNumber);
 	}
+}
+
+async function readThroughTask(path: string, id: string, taskId: string, inclusive: boolean): Promise<ConversationEntry[]> {
+	const opened = await openIfExists(path);
+	if (!opened) throw new Error('对话不存在。');
+	const { file, stat } = opened;
+	const entries: ConversationEntry[] = [];
+	let found = false;
+	try {
+		for await (const entry of readRecords(file, stat.size)) {
+			if (entry.type === 'start') {
+				if (found) break;
+				if (entry.task.request.conversationId !== id) throw new Error('任务不属于此对话。');
+				found = entry.task.id === taskId;
+				if (found && !inclusive) break;
+			}
+			entries.push(entry);
+		}
+	} finally {
+		await file.close();
+	}
+	if (!found) throw new Error('对话中找不到这条消息。');
+	return entries;
+}
+
+function serialize(entries: ConversationEntry[]): string {
+	return entries.map((entry) => JSON.stringify(entry)).join('\n') + '\n';
 }
 
 async function appendRecords(path: string, payload: string): Promise<void> {
@@ -118,6 +187,7 @@ export function createConversationStore(directory: string): ConversationStore {
 		checkId(id);
 		return join(root, `${id}.jsonl`);
 	};
+	const titlePath = (id: string) => join(root, `${id}.title`);
 
 	return {
 		async list() {
@@ -131,7 +201,9 @@ export function createConversationStore(directory: string): ConversationStore {
 				const id = file.name.slice(0, -6);
 				if (!idPattern.test(id)) continue;
 				const summary = await conversationSummary(join(root, file.name), id);
-				if (summary) chats.push(summary);
+				if (!summary) continue;
+				const title = await readSmallText(titlePath(id), titleLimit * 4).catch(() => undefined);
+				chats.push(title && title.length <= titleLimit ? { ...summary, title } : summary);
 			}
 			return chats.sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
 		},
@@ -146,36 +218,61 @@ export function createConversationStore(directory: string): ConversationStore {
 				await opened.file.close();
 			}
 		},
+		async fork(id, taskId) {
+			const path = logPath(id);
+			const branchId = randomUUID();
+			return enqueue(path, async () => {
+				const entries = await readThroughTask(path, id, taskId, true);
+				for (const entry of entries) {
+					if (entry.type === 'start') entry.task.request.conversationId = branchId;
+				}
+				const branch = await replayConversation(branchId, entries);
+				await writeAtomically(logPath(branchId), serialize(entries));
+				return branch;
+			});
+		},
+		async replaceFrom(id, taskId, entries) {
+			const path = logPath(id);
+			if (entries[0]?.type !== 'start') throw new Error('改写对话缺少新的起始任务。');
+			await enqueue(path, async () => {
+				const kept = await readThroughTask(path, id, taskId, false);
+				const replacement = [...kept, ...entries];
+				await replayConversation(id, replacement);
+				await writeAtomically(path, serialize(replacement));
+			});
+		},
+		async rename(id, title) {
+			const path = logPath(id);
+			const value = title.trim();
+			if (!value || value.length > titleLimit) throw new Error('请输入 1 到 120 个字符的对话名称。');
+			await enqueue(path, async () => {
+				const opened = await openIfExists(path);
+				if (!opened) throw new Error('对话不存在。');
+				await opened.file.close();
+				await writeAtomically(titlePath(id), value);
+			});
+		},
+		async delete(id) {
+			const path = logPath(id);
+			await enqueue(path, () => enqueue(pointer, async () => {
+				const selected = await readPointer(pointer);
+				await unlinkIfExists(titlePath(id));
+				await unlinkIfExists(path);
+				// 阻止已经排队的旧写入在删除后重新建立记录。
+				deletedLogs.add(path.toLowerCase());
+				if (selected?.toLowerCase() === id.toLowerCase()) await unlinkIfExists(pointer);
+			}));
+		},
 		async lastOpened() {
 			await writeQueue.get(pointer)?.catch(() => {});
-			const opened = await openIfExists(pointer);
-			if (!opened) return undefined;
-			try {
-				if (opened.stat.size > 100) return undefined;
-				const id = (await opened.file.readFile('utf8')).trim();
-				return idPattern.test(id) ? id : undefined;
-			} finally {
-				await opened.file.close();
-			}
+			return readPointer(pointer);
 		},
 		async setLastOpened(id) {
-			checkId(id);
+			const path = logPath(id);
 			await enqueue(pointer, async () => {
+				if (deletedLogs.has(path.toLowerCase())) throw new Error('对话已删除。');
 				await mkdir(root, { recursive: true, mode: 0o700 });
-				const temporary = join(root, `last-opened-${randomUUID()}.tmp`);
-				const file = await open(temporary, 'wx', 0o600);
-				try {
-					try {
-						await file.writeFile(`${id}\n`, 'utf8');
-						await file.sync();
-					} finally {
-						await file.close();
-					}
-					await rename(temporary, pointer);
-				} catch (error) {
-					await unlink(temporary).catch(() => {});
-					throw error;
-				}
+				await writeAtomically(pointer, `${id}\n`);
 			});
 		},
 		async append(id, entries) {
@@ -184,8 +281,9 @@ export function createConversationStore(directory: string): ConversationStore {
 			if (entries.some((entry) => entry.type === 'start' && entry.task.request.conversationId !== id)) {
 				throw new Error('任务不属于此对话。');
 			}
-			const payload = entries.map((entry) => JSON.stringify(entry)).join('\n') + '\n';
+			const payload = serialize(entries);
 			await enqueue(path, async () => {
+				if (deletedLogs.has(path.toLowerCase())) throw new Error('对话已删除。');
 				await mkdir(root, { recursive: true, mode: 0o700 });
 				await appendRecords(path, payload);
 			});

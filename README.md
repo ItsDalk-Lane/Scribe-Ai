@@ -4,9 +4,9 @@ Run AI tasks in Obsidian with your configured model.
 
 ## Agent tasks
 
-Open **Scribe Ai** and submit a task. The agent starts in the current vault. Use **Add a path outside the vault** to grant a task access to a specific file or folder. Add it again for a new task. Paths mentioned in the instructions or saved in chat history do not grant access.
+Open **Scribe Ai** and submit a task. The agent starts in the current vault. Under **Add a path outside the vault**, choose a file or folder in the system picker to grant access for the current task. Add it again for a new task. Paths mentioned in the instructions or saved in chat history do not grant access.
 
-To ask about part of an open note, highlight the text in its editor and choose **Attach current selection**. Review the preview or remove it before sending. This submits the current question and the exact highlighted excerpt as a selection-only request. The submitted excerpt is saved with the conversation.
+You can expand saved text selections in older conversations to review the exact excerpts sent with those messages.
 
 Chats and tool results are saved locally in the Scribe Ai plugin folder for this vault. Reopening Obsidian restores your last chat, including any partial reply saved when you stopped or closed the chat. Send a follow-up to pick up from it, or select **Review before resuming** to inspect the saved task's outgoing content and destination before continuing it. Select **New chat** for a fresh conversation.
 
@@ -23,6 +23,8 @@ npm run build  # type-check + production bundle
 npm run lint
 npm run test:agent
 ```
+
+The agent suite also checks live chat timeline order, tool grouping, and remembered disclosure state.
 
 Copy `main.js` and `manifest.json` (plus `styles.css` if present) into
 `<Vault>/.obsidian/plugins/scribe-ai/` and enable the plugin in

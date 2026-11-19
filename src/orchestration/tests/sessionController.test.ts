@@ -16,10 +16,11 @@ import { createToolRegistry } from '../../tools';
 import { createToolExecutor } from '../../tools/executor';
 import { readTools } from '../../tools/readTools';
 import { writeTools } from '../../tools/writeTools';
-import type { ModelRequest, ModelStream, RuntimeLayer, Task, ToolCall } from '../../types';
+import type { ModelRequest, ModelService, ModelStream, RuntimeLayer, ScribeSettings, Task, ToolCall } from '../../types';
 import { createContextBuilder } from '../context/contextBuilder';
 import { createSessionController } from '../sessionController';
 import { normalizeSettings } from '../settings/defaults';
+import { chatModelKey } from '../settings/thinking';
 import { createConversationStore } from '../storage/conversationStore';
 
 const firstModel = { providerId: 'test-provider', model: 'first-model' };
@@ -74,14 +75,15 @@ async function fixture(t: TestContext) {
 	return {
 		cwd,
 		directory,
-		connect: (stream: (request: ModelRequest) => ModelStream, model = firstModel) => {
+		connect: (stream: (request: ModelRequest) => ModelStream, model: Partial<ScribeSettings> = firstModel,
+			thinkingOptions?: ModelService['thinkingOptions']) => {
 			const registry = createToolRegistry([readTools, writeTools]);
 			const models = createModelCoordinator({ stream }, createContextBuilder(registry));
 			const tools = createToolCoordinator(app, createToolExecutor(registry));
 			const runtime: RuntimeLayer = {
 				newState: createRunState, createAgent: bindAgent(createAgentLoop(models, tools)), models, tools,
 			};
-			return createSessionController(app, normalizeSettings(model), runtime, createConversationStore(directory));
+			return createSessionController(app, normalizeSettings(model), runtime, createConversationStore(directory), thinkingOptions);
 		},
 	};
 }
@@ -132,6 +134,94 @@ void test('after reopening, the same conversation sends prior messages and tool 
 	reopened.dispose();
 });
 
+void test('branching copies through the selected reply and editing replaces only the original tail', async (t) => {
+	const { connect } = await fixture(t);
+	const sent: ModelRequest[] = [];
+	const sessions = connect((request) => {
+		sent.push(request);
+		return reply(`回答 ${sent.length}`);
+	});
+	const conversationId = await sessions.createConversation();
+	const submit = (instruction: string, replaceFrom?: string) => sessions.submit({ conversationId, instruction, refs: [] }, {}, replaceFrom);
+	const first = await submit('保留这轮').result;
+	const edited = await submit('旧指令').result;
+	const later = await submit('更晚的指令').result;
+	await assert.rejects(submit('不能改写', 'missing').result, /找不到/);
+	assert.deepEqual((await sessions.openConversation(conversationId))?.runs.map(({ state }) => state.taskId),
+		[first.taskId, edited.taskId, later.taskId]);
+	const branch = await sessions.forkConversation(conversationId, edited.taskId);
+	assert.notEqual(branch.id, conversationId);
+	assert.equal((await sessions.openConversation())?.id, branch.id);
+	assert.deepEqual(branch.runs.map(({ request, state }) => [request.conversationId, state.taskId, state.messages.at(-1)?.content]),
+		[[branch.id, first.taskId, '回答 1'], [branch.id, edited.taskId, '回答 2']]);
+	assert.equal(sent.length, 3);
+
+	const run = submit('修改后的指令', edited.taskId);
+	await assert.rejects(sessions.forkConversation(conversationId, first.taskId), /正在运行/);
+	assert.equal((await run.result).status, 'done');
+	assert.deepEqual(sent[3]?.messages.map(({ content }) => content), ['保留这轮', '回答 1', '修改后的指令']);
+	assert.deepEqual((await sessions.openConversation(conversationId))?.runs.map(({ state }) => state.taskId), [first.taskId, run.taskId]);
+	assert.deepEqual(await sessions.openConversation(branch.id), branch);
+});
+
+void test('deleting a saved conversation rejects an active run and prevents stale submissions', async (t) => {
+	const { connect } = await fixture(t);
+	let requests = 0;
+	const sessions = connect(() => { requests++; return reply('保留到删除。'); });
+	const id = await sessions.createConversation();
+	const request = { conversationId: id, instruction: '原始指令', refs: [] };
+	const running = sessions.submit(request);
+	await assert.rejects(sessions.deleteConversation(id), /先停止/);
+	assert.equal((await running.result).status, 'done');
+	await sessions.renameConversation(id, '新标题');
+	assert.equal((await sessions.listConversations())[0]?.title, '新标题');
+	await sessions.deleteConversation(id);
+	assert.equal(await sessions.openConversation(), null);
+	await assert.rejects(sessions.openConversation(id), /对话已删除|对话不存在/);
+	assert.equal((await sessions.submit(request).result).status, 'failed');
+	assert.equal(requests, 1);
+	assert.deepEqual(await sessions.listConversations(), []);
+	const next = await sessions.createConversation();
+	assert.deepEqual(await connect(() => reply('')).openConversation(), { id: next, runs: [] });
+});
+
+void test('resumed runs retain their saved effort and legacy runs ignore the current chat choice', async (t) => {
+	const { directory, connect } = await fixture(t);
+	const key = chatModelKey(firstModel.providerId, firstModel.model);
+	const thinkingOptions: ModelService['thinkingOptions'] = (_model, preferred) => ({ levels: ['low', 'high'], level: preferred ?? 'low' });
+	const start = connect((request) => {
+		assert.equal(request.reasoning, 'high');
+		return reply('暂停前的回复。');
+	}, { ...firstModel, thinkingByModel: { [key]: 'high' } }, thinkingOptions);
+	const id = await start.createConversation();
+	const run = start.submit({ conversationId: id, instruction: '请分两段作答。', refs: [] }, {
+		onEvent(event) {
+			if (event.type === 'text-delta') start.pause(run.taskId);
+		},
+	});
+	assert.equal((await run.result).status, 'interrupted');
+	const store = createConversationStore(directory);
+	assert.equal((await store.load(id)).runs[0]?.model.reasoning, 'high');
+	const unavailable = connect(() => assert.fail('原档位不可用时不能发送请求'), firstModel,
+		() => ({ levels: ['low'], level: 'low' }));
+	await assert.rejects(unavailable.resume(id, run.taskId).result, { level: 'high' });
+	assert.equal((await store.load(id)).runs[0]?.state.status, 'interrupted');
+	const legacyId = 'legacy-effort';
+	const legacyTask: Task = {
+		id: 'legacy-task', status: 'running', createdAt: 1, updatedAt: 1,
+		request: { conversationId: legacyId, instruction: '继续旧记录。', refs: [] },
+	};
+	await store.append(legacyId, [{ type: 'start', task: legacyTask, model: firstModel }]);
+	const seen: ModelRequest['reasoning'][] = [];
+	const reopened = connect((request) => {
+		seen.push(request.reasoning);
+		return reply('已完成。');
+	}, { ...firstModel, thinkingByModel: { [key]: 'low' } }, thinkingOptions);
+	assert.equal((await reopened.resume(id, run.taskId).result).status, 'done');
+	assert.equal((await reopened.resume(legacyId, legacyTask.id).result).status, 'done');
+	assert.deepEqual(seen, ['high', undefined]);
+});
+
 for (const action of ['close-and-ask', 'stop-and-ask', 'close-and-resume'] as const) {
 	void test(`visible partial reply survives ${action} without duplication`, async (t) => {
 		const { cwd, connect } = await fixture(t);
@@ -155,7 +245,9 @@ for (const action of ['close-and-ask', 'stop-and-ask', 'close-and-resume'] as co
 		});
 		const stopped = await handle.result;
 		assert.equal(stopped.status, action === 'stop-and-ask' ? 'cancelled' : 'interrupted');
-		assert.deepEqual(stopped.messages.at(-1), { role: 'assistant', content: shownPartial, incomplete: true });
+		assert.deepEqual(stopped.messages.at(-1), {
+			role: 'assistant', id: `assistant:${handle.taskId}:2`, content: shownPartial, incomplete: true,
+		});
 
 		const continuation = '第二点是铃兰。';
 		const sent: ModelRequest[] = [];
@@ -167,7 +259,7 @@ for (const action of ['close-and-ask', 'stop-and-ask', 'close-and-resume'] as co
 		assert.ok(opened);
 		assert.equal(opened.finalized, action === 'stop-and-ask' ? true : undefined);
 		const rendered = restoreExecution(opened);
-		assert.equal(rendered.draft, '');
+		assert.equal(rendered.items.filter((row) => row.kind === 'text' && row.content === shownPartial).length, 1);
 		assert.equal(rendered.state?.messages.filter(({ content }) => content === shownPartial).length, 1);
 		const continued = await (action === 'close-and-resume' ? reopened.resume(conversationId, handle.taskId)
 			: reopened.submit({ conversationId, instruction: '请接着讲第二点。', refs: [] })).result;
@@ -195,7 +287,7 @@ void test('a stopped reply from older saved conversations is included in follow-
 	const sessions = connect((request) => { sent.push(request); return reply('继续。'); });
 	const saved = (await sessions.openConversation(id))?.runs[0];
 	assert.ok(saved);
-	assert.equal(restoreExecution(saved).draft, shownPartial);
+	assert.equal(restoreExecution(saved).items.find((row) => row.kind === 'text')?.content, shownPartial);
 	assert.equal((await sessions.submit({ conversationId: id, instruction: '继续。', refs: [] }).result).status, 'done');
 	assert.equal(sent[0]?.messages.filter(({ content }) => content === shownPartial).length, 1);
 });

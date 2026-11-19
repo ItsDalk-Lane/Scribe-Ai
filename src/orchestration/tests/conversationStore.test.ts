@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -55,6 +55,33 @@ void test('saved conversations can be listed, reopened and appended independentl
 	assert.equal((await store.load('second')).runs.length, 1);
 });
 
+void test('renaming keeps the original transcript and ordering, and deletion removes only the selected chat', async (t) => {
+	const { directory, store } = await fixture(t);
+	await store.append('first', [start('first', 'one', '原始任务')]);
+	await store.append('second', [start('second', 'two', '另一个会话')]);
+	await store.setLastOpened('second');
+	const before = await store.list();
+	const log = await readFile(join(directory, 'first.jsonl'), 'utf8');
+	await assert.rejects(store.rename('first', '   '), /对话名称/);
+	await assert.rejects(store.rename('first', '字'.repeat(121)), /对话名称/);
+	await store.rename('first', '  笔记整理 计划  一  ');
+	const reopened = createConversationStore(directory);
+	assert.deepEqual(await reopened.list(), before.map((item) => item.id === 'first'
+		? { ...item, title: '笔记整理 计划  一' } : item));
+	assert.equal(await readFile(join(directory, 'first.jsonl'), 'utf8'), log);
+	assert.equal((await reopened.load('first')).runs[0]?.request.instruction, '原始任务');
+
+	const deleting = reopened.delete('first');
+	const lateWrite = assert.rejects(store.append('first', [start('first', 'late', '不能恢复')]), /已删除/);
+	await Promise.all([deleting, lateWrite]);
+	assert.equal(await reopened.lastOpened(), 'second');
+	assert.deepEqual((await reopened.list()).map(({ id }) => id), ['second']);
+	assert.deepEqual((await readdir(directory)).sort(), ['last-opened', 'second.jsonl']);
+	await reopened.delete('second');
+	assert.equal(await reopened.lastOpened(), undefined);
+	assert.deepEqual(await readdir(directory), []);
+});
+
 void test('a torn tail cannot hide a completed result or revive a pending approval', async (t) => {
 	const { directory, store } = await fixture(t);
 	const readCall = { id: 'read1', name: 'Read', input: { file_path: 'note.md' } };
@@ -89,6 +116,8 @@ void test('committed malformed records and unsafe conversation IDs are rejected'
 	const { directory, store } = await fixture(t);
 	await assert.rejects(store.load('../escape'), /编号无效/);
 	await assert.rejects(store.setLastOpened('../escape'), /编号无效/);
+	await assert.rejects(store.rename('../escape', '随便一个名称'), /编号无效/);
+	await assert.rejects(store.delete('../escape'), /编号无效/);
 	await store.append('bad-log', [start('bad-log', 'task', 'Check history')]);
 	await appendFile(join(directory, 'bad-log.jsonl'), 'invalid record\n');
 	await store.append('bad-log', [{ type: 'finish', taskId: 'task', status: 'done', turn: 1 }]);

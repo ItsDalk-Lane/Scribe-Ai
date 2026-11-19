@@ -1,14 +1,18 @@
 import { Plugin } from 'obsidian';
+import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 import { CHAT_VIEW_ICON, CHAT_VIEW_TYPE } from './constants';
 import { ChatView } from './interaction/ChatView';
 import { ScribeAiSettingTab } from './interaction/SettingsTab';
 import { uiText } from './interaction/uiText';
 import { normalizeSettings } from './orchestration/settings/defaults';
+import { updateChatThinking } from './orchestration/settings/thinking';
 import { createServices } from './services';
 import type { ScribeServices, ScribeSettings } from './types';
 
 export default class ScribeAiPlugin extends Plugin {
 	services!: ScribeServices;
+	private settingsSave = Promise.resolve();
+	private settingsListeners = new Set<() => void>();
 
 	async onload() {
 		const settings = normalizeSettings((await this.loadData()) as Partial<ScribeSettings> | null);
@@ -51,7 +55,35 @@ export default class ScribeAiPlugin extends Plugin {
 		await this.app.workspace.revealLeaf(leaf);
 	}
 
-	async saveSettings() {
-		await this.saveData(this.services.settings);
+	subscribeSettings(listener: () => void): () => void {
+		this.settingsListeners.add(listener);
+		return () => { this.settingsListeners.delete(listener); };
+	}
+
+	async saveSettings(selection?: Pick<ScribeSettings, 'providerId' | 'model'> & { thinkingLevel?: ModelThinkingLevel }): Promise<void> {
+		const save = this.settingsSave.then(async () => {
+			const { settings, communication } = this.services;
+			const target = selection ?? settings;
+			const current = { providerId: settings.providerId, model: settings.model };
+			const hasModel = () => settings.providerModels[target.providerId]?.includes(target.model);
+			if (selection && (!hasModel() || (selection.thinkingLevel !== undefined
+				&& (selection.providerId !== current.providerId || selection.model !== current.model)))) {
+				throw new Error(uiText().chatModelChanged);
+			}
+			const thinkingByModel = hasModel() ? updateChatThinking(settings, target, communication.models.thinkingOptions)
+				: settings.thinkingByModel;
+			const selected = { providerId: target.providerId, model: target.model, thinkingByModel };
+			await this.saveData({ ...settings, ...selected });
+			// 写入期间如有更新的设置操作，保留其选择。
+			if (settings.providerId === current.providerId && settings.model === current.model && (!selection || hasModel())) {
+				Object.assign(settings, selected);
+			}
+		});
+		this.settingsSave = save.catch(() => undefined);
+		try {
+			await save;
+		} finally {
+			this.settingsListeners.forEach((listener) => listener());
+		}
 	}
 }

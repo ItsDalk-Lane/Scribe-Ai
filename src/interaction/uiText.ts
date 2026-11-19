@@ -1,4 +1,5 @@
 import { getLanguage } from 'obsidian';
+import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 
 export interface UiText {
 	openChatCommand: string;
@@ -83,6 +84,10 @@ export interface UiText {
 	capabilityTools: string;
 	capabilityStructured: string;
 	thinkingLevel: string;
+	thinkingLevelNames: Record<ModelThinkingLevel, string>;
+	chatChooseModel: string;
+	chatNoModelSelected: string;
+	chatResumeThinkingUnavailable: string;
 	customValue: string;
 	modalityText: string;
 	modalityImage: string;
@@ -125,29 +130,33 @@ export interface UiText {
 	modelDescription: string;
 	taskPlaceholder: string;
 	submit: string;
-	chatScopeDescription: string;
 	noExecution: string;
 	chatContextLabel: string;
 	chatAddContext: string;
 	chatPickVaultItem: string;
-	chatAttachSelection: string;
-	chatSelectionUnavailable: string;
 	chatSelectionPreview: string;
 	chatRemoveSelection: string;
 	chatAddExternalPath: string;
+	chatPickExternalFile: string;
+	chatPickExternalFolder: string;
+	chatExternalPickerFailed: string;
 	chatAbsolutePath: string;
 	chatInvalidPath: string;
-	chatPathKind: string;
 	chatFile: string;
 	chatFolder: string;
 	chatConversation: string;
 	chatHistory: string;
 	chatRecentConversations: string;
+	chatConversationTitle: string;
+	chatRenameConversation: string;
+	chatDeleteConversation: string;
+	chatDeleteConfirm: string;
+	chatRenameError: string;
+	chatDeleteError: string;
 	chatNewConversation: string;
 	chatUntitled: string;
 	chatLoadingHistory: string;
 	chatHistoryError: string;
-	chatCitationUnavailable: string;
 	chatInterrupted: string;
 	chatLastStep: string;
 	chatStepStarting: string;
@@ -156,9 +165,9 @@ export interface UiText {
 	chatStepApproval: string;
 	chatStepResult: string;
 	chatModelMissing: string;
-	chatModelChanged: string;
 	chatSubmitDisclosure: string;
 	chatSelectionDisclosure: string;
+	chatModelChanged: string;
 	chatStop: string;
 	chatResume: string;
 	chatResumeReview: string;
@@ -171,8 +180,6 @@ export interface UiText {
 	chatReconnecting: string;
 	chatWaitingForConnection: string;
 	chatRetryConnection: string;
-	chatAllDone: string;
-	chatResumedAllDone: string;
 	chatPartiallyDone: string;
 	chatStopped: string;
 	chatFailed: string;
@@ -185,39 +192,32 @@ export interface UiText {
 	chatExpandMessage: string;
 	chatCollapseMessage: string;
 	chatLatest: string;
-	chatProcess: string;
+	chatTurnNavigator: string;
+	chatJumpToTurn: string;
 	chatThinking: string;
+	chatThinkingPending: string;
+	chatThinkingDuration: string;
+	chatResolved: string;
+	chatTimelineApproval: string;
+	chatTimelineWaitingConnection: string;
+	chatTimelineContextRetry: string;
+	chatTimelineUsage: string;
+	chatToolGroupRead: string;
+	chatToolGroupSearch: string;
+	chatToolGroupEdit: string;
+	chatToolGroupWrite: string;
+	chatToolGroupRun: string;
+	chatToolGroupGeneric: string;
+	chatOpenToolTarget: string;
 	chatResponding: string;
 	chatCopyReply: string;
+	chatCitationUnavailable: string;
 	chatCopiedReply: string;
 	chatCopyFailed: string;
-	chatReplyTime: string;
-	chatReplyUsage: string;
-	chatToolActivity: string;
-	chatToolCount: string;
-	chatToolFailures: string;
 	chatToolArguments: string;
 	chatToolOutput: string;
-	chatToolWaitingOutput: string;
 	chatToolSkipped: string;
-	chatToolRead: string;
-	chatToolSearch: string;
-	chatToolEdit: string;
-	chatToolWrite: string;
-	chatToolRun: string;
-	chatToolNoOutput: string;
-	chatToolEmptyText: string;
-	chatToolPattern: string;
-	chatToolFileFilter: string;
-	chatToolFromLine: string;
-	chatToolMaxLines: string;
-	chatToolRequestedContent: string;
-	chatToolRequestedEdit: string;
 	chatToolNoChanges: string;
-	chatToolCell: string;
-	chatToolCellInsert: string;
-	chatToolCellReplace: string;
-	chatToolCellDelete: string;
 	chatToolMoreText: string;
 	chatToolLessText: string;
 	chatApprovalHeading: string;
@@ -237,6 +237,44 @@ export interface UiText {
 	chatDiffFullText: string;
 	chatDiffFullPreview: string;
 	chatCommand: string;
+	chatVaultReference: string;
+	chatCopyMessage: string;
+	chatMessageCopied: string;
+	chatEditFromHere: string;
+	chatCancelEdit: string;
+	chatForkReply: string;
+	chatForkFailed: string;
+	chatProcessSummary: string;
+	chatActivitySummary: string;
+	chatAverageSpeed: string;
+	chatSpeedValue: string;
+	chatActivityStats: string;
+	chatModelDuration: string;
+	chatToolDuration: string;
+	chatFirstDelta: string;
+	chatSpeed: string;
+	chatMetricSeconds: string;
+	chatMetricMinutes: string;
+	chatSessionUsage: string;
+	chatRunUsage: string;
+	chatProviderModel: string;
+	chatCacheHit: string;
+	chatUncachedInput: string;
+	chatCacheRead: string;
+	chatCacheWrite: string;
+	chatOutputTokens: string;
+	chatTotalTokens: string;
+	chatReportedCost: string;
+	chatMissingUsage: string;
+	chatIncompleteUsage: string;
+	chatContextUsed: string;
+	chatContextPending: string;
+	chatContextStats: string;
+	chatContextSource: string;
+	chatPromptTokens: string;
+	chatWindowCapacity: string;
+	chatRemainingCapacity: string;
+	chatMetricsRunning: string;
 	chatApprove: string;
 	chatDeny: string;
 }
@@ -324,6 +362,10 @@ const EN: UiText = {
 	capabilityTools: 'Tool calling',
 	capabilityStructured: 'Structured output',
 	thinkingLevel: 'Thinking level',
+	thinkingLevelNames: { off: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Very high', max: 'Maximum' },
+	chatChooseModel: 'Choose a model',
+	chatNoModelSelected: 'No model selected',
+	chatResumeThinkingUnavailable: 'The saved thinking level ({level}) is unavailable.',
 	customValue: 'Custom',
 	modalityText: 'Text',
 	modalityImage: 'Image',
@@ -366,29 +408,33 @@ const EN: UiText = {
 	modelDescription: 'Choose a model from this provider’s catalog.',
 	taskPlaceholder: 'Describe the task to complete',
 	submit: 'Submit',
-	chatScopeDescription: 'Tools work in this vault by default. Use “Add a path outside the vault” to grant access for this task.',
 	noExecution: 'No execution records yet',
 	chatContextLabel: 'Task files and folders',
 	chatAddContext: 'Add context',
 	chatPickVaultItem: 'Select a vault file or folder',
-	chatAttachSelection: 'Attach current selection',
-	chatSelectionUnavailable: 'Select text in a note while editing, then try again.',
 	chatSelectionPreview: 'Selected text preview',
 	chatRemoveSelection: 'Remove selection',
-	chatAddExternalPath: 'Add a path outside the vault',
+	chatAddExternalPath: 'Path outside the vault',
+	chatPickExternalFile: 'Choose file…',
+	chatPickExternalFolder: 'Choose folder…',
+	chatExternalPickerFailed: 'The system picker could not open. Enter the full path instead.',
 	chatAbsolutePath: 'Full path to file or folder',
-	chatInvalidPath: 'Enter the full path to this file or folder.',
-	chatPathKind: 'Path type',
+	chatInvalidPath: 'Enter the full path to an existing item of the selected type.',
 	chatFile: 'File',
 	chatFolder: 'Folder',
 	chatConversation: 'Conversation',
 	chatHistory: 'Chat history',
 	chatRecentConversations: 'Recent chats',
+	chatConversationTitle: 'Chat title',
+	chatRenameConversation: 'Rename chat',
+	chatDeleteConversation: 'Delete chat',
+	chatDeleteConfirm: 'Permanently delete “{title}” and all of its messages? This cannot be undone.',
+	chatRenameError: 'Could not save the chat title.',
+	chatDeleteError: 'Could not delete the chat.',
 	chatNewConversation: 'New conversation',
 	chatUntitled: 'Untitled conversation',
 	chatLoadingHistory: 'Loading conversation…',
 	chatHistoryError: 'Could not load the saved conversation.',
-	chatCitationUnavailable: 'Could not open the cited note.',
 	chatInterrupted: 'Interrupted',
 	chatLastStep: 'Last saved step',
 	chatStepStarting: 'Preparing the task',
@@ -397,9 +443,9 @@ const EN: UiText = {
 	chatStepApproval: 'Waiting for approval',
 	chatStepResult: 'Tool result received',
 	chatModelMissing: 'Select a model in settings to start a task.',
+	chatSubmitDisclosure: 'Submitting sends your instructions to {provider}. It may also send chat history and material read by tools.',
+	chatSelectionDisclosure: 'Submitting sends your instructions and the attached selection to {provider}.',
 	chatModelChanged: 'The model changed. Check the destination and submit again.',
-	chatSubmitDisclosure: 'Submitting sends this conversation’s history and your instructions to this provider. It may also send the contents the tools read.',
-	chatSelectionDisclosure: 'Submitting sends only your current instructions and this selection to this provider.',
 	chatStop: 'Stop task',
 	chatResume: 'Resume task',
 	chatResumeReview: 'Review before resuming',
@@ -412,8 +458,6 @@ const EN: UiText = {
 	chatReconnecting: 'Reconnecting to the model',
 	chatWaitingForConnection: 'Model service unavailable. Progress is saved.',
 	chatRetryConnection: 'Retry connection',
-	chatAllDone: 'File changes complete',
-	chatResumedAllDone: 'All complete',
 	chatPartiallyDone: 'Some operations incomplete',
 	chatStopped: 'Stopped',
 	chatFailed: 'Task failed',
@@ -426,39 +470,32 @@ const EN: UiText = {
 	chatExpandMessage: 'Show more',
 	chatCollapseMessage: 'Show less',
 	chatLatest: 'Jump to latest',
-	chatProcess: 'View process',
+	chatTurnNavigator: 'Jump within conversation',
+	chatJumpToTurn: 'Jump to turn {n}',
 	chatThinking: 'Thinking',
+	chatThinkingPending: 'Thinking…',
+	chatThinkingDuration: 'Thought for {n} s',
+	chatResolved: 'Resolved',
+	chatTimelineApproval: 'Waiting for approval',
+	chatTimelineWaitingConnection: 'Waiting to reconnect',
+	chatTimelineContextRetry: 'Retrying with a shorter history',
+	chatTimelineUsage: '{n} tokens',
+	chatToolGroupRead: 'Read {count} files',
+	chatToolGroupSearch: 'Ran {count} searches',
+	chatToolGroupEdit: 'Made {count} edits',
+	chatToolGroupWrite: 'Wrote {count} files',
+	chatToolGroupRun: 'Ran {count} commands',
+	chatToolGroupGeneric: 'Called {name} {count} times',
+	chatOpenToolTarget: 'Open {target}',
 	chatResponding: 'Writing a reply…',
 	chatCopyReply: 'Copy reply',
+	chatCitationUnavailable: 'Could not open the cited note.',
 	chatCopiedReply: 'Reply copied',
 	chatCopyFailed: 'Could not copy the reply',
-	chatReplyTime: 'Reply time',
-	chatReplyUsage: 'Reply recorded {tokens} tokens',
-	chatToolActivity: 'Tool activity',
-	chatToolCount: 'Tools: {count}',
-	chatToolFailures: 'Failed: {count}',
-	chatToolArguments: 'Tool input',
-	chatToolOutput: 'Recorded output',
-	chatToolWaitingOutput: 'Waiting for output',
+	chatToolArguments: 'Call arguments',
+	chatToolOutput: 'Tool output',
 	chatToolSkipped: 'Skipped',
-	chatToolRead: 'Read {target}',
-	chatToolSearch: 'Search {target}',
-	chatToolEdit: 'Edit {target}',
-	chatToolWrite: 'Write {target}',
-	chatToolRun: 'Run {target}',
-	chatToolNoOutput: 'No output',
-	chatToolEmptyText: 'Empty text',
-	chatToolPattern: 'Search pattern',
-	chatToolFileFilter: 'File filter',
-	chatToolFromLine: 'Requested start line: {line}',
-	chatToolMaxLines: 'Line limit: {count}',
-	chatToolRequestedContent: 'Proposed content',
-	chatToolRequestedEdit: 'Proposed replacement (fragment line numbers)',
 	chatToolNoChanges: 'No differences in the proposed text',
-	chatToolCell: 'Cell',
-	chatToolCellInsert: 'Insert cell',
-	chatToolCellReplace: 'Replace cell',
-	chatToolCellDelete: 'Delete cell',
 	chatToolMoreText: 'Show full recorded text',
 	chatToolLessText: 'Show preview only',
 	chatApprovalHeading: 'Approval needed',
@@ -478,6 +515,44 @@ const EN: UiText = {
 	chatDiffFullText: 'View full text',
 	chatDiffFullPreview: 'Review the full before and after text for this change.',
 	chatCommand: 'Command',
+	chatVaultReference: 'Note or folder',
+	chatCopyMessage: 'Copy',
+	chatMessageCopied: 'Copied',
+	chatEditFromHere: 'Edit from here',
+	chatCancelEdit: 'Cancel',
+	chatForkReply: 'Branch',
+	chatForkFailed: 'Could not branch the conversation.',
+	chatProcessSummary: 'Messages {messages} · Tool calls {tools}',
+	chatActivitySummary: 'Turns {rounds} · Messages {messages}',
+	chatAverageSpeed: 'Average {n} tokens/s',
+	chatSpeedValue: '{n} tokens/s',
+	chatActivityStats: 'Conversation activity',
+	chatModelDuration: 'Model time',
+	chatToolDuration: 'Tool time',
+	chatFirstDelta: 'Average time to first token',
+	chatSpeed: 'Average speed',
+	chatMetricSeconds: '{s}s',
+	chatMetricMinutes: '{m}m {s}s',
+	chatSessionUsage: 'Token usage',
+	chatRunUsage: 'Turn usage',
+	chatProviderModel: 'Provider / model',
+	chatCacheHit: 'Cache hit',
+	chatUncachedInput: 'Uncached input',
+	chatCacheRead: 'Cache read',
+	chatCacheWrite: 'Cache write',
+	chatOutputTokens: 'Output',
+	chatTotalTokens: 'Total',
+	chatReportedCost: 'Reported cost',
+	chatMissingUsage: 'Some usage was not reported. Figures shown are based on reported data.',
+	chatIncompleteUsage: 'Partial usage',
+	chatContextUsed: '{n}% used',
+	chatContextPending: 'Updates on next request',
+	chatContextStats: 'Context {n}% used',
+	chatContextSource: 'From the most recent request.',
+	chatPromptTokens: 'Prompt tokens',
+	chatWindowCapacity: 'Model context window',
+	chatRemainingCapacity: 'Remaining capacity',
+	chatMetricsRunning: 'Task is running.',
 	chatApprove: 'Allow once',
 	chatDeny: 'Decline',
 };
@@ -565,6 +640,10 @@ const ZH_CN: UiText = {
 	capabilityTools: '工具调用',
 	capabilityStructured: '结构化输出',
 	thinkingLevel: '推理档位',
+	thinkingLevelNames: { off: '关闭', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高' },
+	chatChooseModel: '选择模型',
+	chatNoModelSelected: '未选择模型',
+	chatResumeThinkingUnavailable: '原任务使用的「{level}」推理档位已不可用。',
 	customValue: '自定义',
 	modalityText: '文本',
 	modalityImage: '图片',
@@ -607,29 +686,33 @@ const ZH_CN: UiText = {
 	modelDescription: '从该服务商的模型目录中选择。',
 	taskPlaceholder: '描述要完成的任务',
 	submit: '提交',
-	chatScopeDescription: '默认在当前笔记库工作。通过「添加库外路径」授权访问库外资料，仅对本次任务有效。',
 	noExecution: '暂无执行记录',
 	chatContextLabel: '任务文件和文件夹',
 	chatAddContext: '添加参考资料',
 	chatPickVaultItem: '选择库内文件或文件夹',
-	chatAttachSelection: '附上当前选区',
-	chatSelectionUnavailable: '请先在笔记编辑模式中选中文字。',
 	chatSelectionPreview: '选区预览',
 	chatRemoveSelection: '移除选区',
-	chatAddExternalPath: '添加库外路径',
+	chatAddExternalPath: '库外路径',
+	chatPickExternalFile: '选择文件…',
+	chatPickExternalFolder: '选择文件夹…',
+	chatExternalPickerFailed: '无法打开系统选择窗口，可以手动输入完整路径。',
 	chatAbsolutePath: '文件或文件夹的完整路径',
-	chatInvalidPath: '请输入该文件或文件夹的完整路径。',
-	chatPathKind: '路径类型',
+	chatInvalidPath: '请输入实际存在且类型正确的完整路径。',
 	chatFile: '文件',
 	chatFolder: '文件夹',
 	chatConversation: '对话',
 	chatHistory: '历史对话',
 	chatRecentConversations: '最近对话',
+	chatConversationTitle: '对话标题',
+	chatRenameConversation: '编辑标题',
+	chatDeleteConversation: '删除对话',
+	chatDeleteConfirm: '永久删除「{title}」及其全部消息？删除后无法撤销。',
+	chatRenameError: '无法保存对话标题。',
+	chatDeleteError: '无法删除对话。',
 	chatNewConversation: '新建对话',
 	chatUntitled: '未命名对话',
 	chatLoadingHistory: '正在加载对话…',
 	chatHistoryError: '无法加载已保存的对话。',
-	chatCitationUnavailable: '无法打开这篇来源笔记。',
 	chatInterrupted: '已中断',
 	chatLastStep: '上次停在',
 	chatStepStarting: '准备任务',
@@ -638,9 +721,9 @@ const ZH_CN: UiText = {
 	chatStepApproval: '等待你确认',
 	chatStepResult: '已收到工具结果',
 	chatModelMissing: '请先在设置里选择模型。',
+	chatSubmitDisclosure: '提交会向 {provider} 发送当前指令，也可能附带对话历史和工具读取的资料。',
+	chatSelectionDisclosure: '提交会向 {provider} 发送当前指令和附上的选区。',
 	chatModelChanged: '模型已更换。请确认发送对象，再提交任务。',
-	chatSubmitDisclosure: '提交会把本段对话历史和你的指令发送给此服务商，工具取得的资料也可能一同发送。',
-	chatSelectionDisclosure: '这次只向此服务商发送当前指令和附上的选区。',
 	chatStop: '停止任务',
 	chatResume: '继续任务',
 	chatResumeReview: '查看续做资料',
@@ -653,8 +736,6 @@ const ZH_CN: UiText = {
 	chatReconnecting: '正在重连模型服务',
 	chatWaitingForConnection: '模型服务暂未恢复，任务进度已保留',
 	chatRetryConnection: '重试连接',
-	chatAllDone: '文件修改完成',
-	chatResumedAllDone: '全部完成',
 	chatPartiallyDone: '部分操作未完成',
 	chatStopped: '已停止',
 	chatFailed: '任务失败',
@@ -667,39 +748,32 @@ const ZH_CN: UiText = {
 	chatExpandMessage: '展开消息',
 	chatCollapseMessage: '收起消息',
 	chatLatest: '回到最新消息',
-	chatProcess: '查看过程',
+	chatTurnNavigator: '对话跳转',
+	chatJumpToTurn: '跳转到第 {n} 轮',
 	chatThinking: '思考',
+	chatThinkingPending: '思考中…',
+	chatThinkingDuration: '思考了 {n} 秒',
+	chatResolved: '已解决',
+	chatTimelineApproval: '等待批准',
+	chatTimelineWaitingConnection: '等待重连',
+	chatTimelineContextRetry: '正在缩短对话记录并重试',
+	chatTimelineUsage: '{n} 个 token',
+	chatToolGroupRead: '读取了 {count} 个文件',
+	chatToolGroupSearch: '搜索了 {count} 次',
+	chatToolGroupEdit: '修改了 {count} 次',
+	chatToolGroupWrite: '写入了 {count} 个文件',
+	chatToolGroupRun: '执行了 {count} 条命令',
+	chatToolGroupGeneric: '调用了 {name} {count} 次',
+	chatOpenToolTarget: '打开 {target}',
 	chatResponding: '正在回复…',
 	chatCopyReply: '复制回复',
+	chatCitationUnavailable: '无法打开这篇来源笔记。',
 	chatCopiedReply: '已复制回复',
 	chatCopyFailed: '无法复制回复',
-	chatReplyTime: '回复时间',
-	chatReplyUsage: '本次回复记录 {tokens} 个 token',
-	chatToolActivity: '工具活动',
-	chatToolCount: '工具 {count} 项',
-	chatToolFailures: '失败 {count} 项',
-	chatToolArguments: '工具输入',
-	chatToolOutput: '已记录的输出',
-	chatToolWaitingOutput: '等待输出',
+	chatToolArguments: '调用参数',
+	chatToolOutput: '工具输出',
 	chatToolSkipped: '已跳过',
-	chatToolRead: '读取 {target}',
-	chatToolSearch: '搜索 {target}',
-	chatToolEdit: '修改 {target}',
-	chatToolWrite: '写入 {target}',
-	chatToolRun: '执行 {target}',
-	chatToolNoOutput: '没有输出',
-	chatToolEmptyText: '空文本',
-	chatToolPattern: '搜索条件',
-	chatToolFileFilter: '文件筛选',
-	chatToolFromLine: '请求起始行：{line}',
-	chatToolMaxLines: '最多读取 {count} 行',
-	chatToolRequestedContent: '请求写入的内容',
-	chatToolRequestedEdit: '请求替换的片段（行号从片段开头算）',
 	chatToolNoChanges: '请求替换的内容没有差别',
-	chatToolCell: '单元格',
-	chatToolCellInsert: '插入单元格',
-	chatToolCellReplace: '替换单元格',
-	chatToolCellDelete: '删除单元格',
 	chatToolMoreText: '查看已记录的全文',
 	chatToolLessText: '收起全文',
 	chatApprovalHeading: '等待确认',
@@ -719,6 +793,44 @@ const ZH_CN: UiText = {
 	chatDiffFullText: '查看全文',
 	chatDiffFullPreview: '改动较大，请核对下方的完整原文和新内容。',
 	chatCommand: '执行命令',
+	chatVaultReference: '笔记/文件夹',
+	chatCopyMessage: '复制',
+	chatMessageCopied: '已复制',
+	chatEditFromHere: '从这条编辑',
+	chatCancelEdit: '取消',
+	chatForkReply: '分支',
+	chatForkFailed: '无法创建会话分支。',
+	chatProcessSummary: '{messages} 条消息 · {tools} 次工具调用',
+	chatActivitySummary: '{rounds} 轮 · {messages} 条消息',
+	chatAverageSpeed: '平均速度 {n} 字/秒',
+	chatSpeedValue: '{n} 字/秒',
+	chatActivityStats: '会话活动',
+	chatModelDuration: '大模型耗时',
+	chatToolDuration: '工具耗时',
+	chatFirstDelta: '平均首字延迟',
+	chatSpeed: '平均速度',
+	chatMetricSeconds: '{s} 秒',
+	chatMetricMinutes: '{m} 分 {s} 秒',
+	chatSessionUsage: '会话用量',
+	chatRunUsage: '本轮用量',
+	chatProviderModel: '提供方 / 模型',
+	chatCacheHit: '缓存命中',
+	chatUncachedInput: '未命中输入',
+	chatCacheRead: '缓存读取',
+	chatCacheWrite: '缓存写入',
+	chatOutputTokens: '输出',
+	chatTotalTokens: '合计',
+	chatReportedCost: '实报成本',
+	chatMissingUsage: '服务商返回的用量不完整，此处显示已收到的读数。',
+	chatIncompleteUsage: '部分用量',
+	chatContextUsed: '已用 {n}%',
+	chatContextPending: '待下次请求更新',
+	chatContextStats: '上下文已用 {n}%',
+	chatContextSource: '读数来自最近一次请求。',
+	chatPromptTokens: '提示词 token 总数',
+	chatWindowCapacity: '模型窗口容量',
+	chatRemainingCapacity: '剩余容量',
+	chatMetricsRunning: '任务正在运行。',
 	chatApprove: '仅允许本次',
 	chatDeny: '拒绝',
 };
@@ -806,6 +918,10 @@ const ZH_TW: UiText = {
 	capabilityTools: '工具調用',
 	capabilityStructured: '結構化輸出',
 	thinkingLevel: '推理檔位',
+	thinkingLevelNames: { off: '關閉', minimal: '極低', low: '低', medium: '中', high: '高', xhigh: '極高', max: '最高' },
+	chatChooseModel: '選擇模型',
+	chatNoModelSelected: '未選擇模型',
+	chatResumeThinkingUnavailable: '原任務使用的「{level}」推理檔位已無法使用。',
 	customValue: '自訂',
 	modalityText: '文字',
 	modalityImage: '圖片',
@@ -848,29 +964,33 @@ const ZH_TW: UiText = {
 	modelDescription: '從此服務商的模型目錄中選擇。',
 	taskPlaceholder: '描述要完成的任務',
 	submit: '提交',
-	chatScopeDescription: '預設在目前筆記庫工作。透過「加入庫外路徑」授權存取庫外資料，僅對本次任務有效。',
 	noExecution: '尚無執行記錄',
 	chatContextLabel: '任務檔案和資料夾',
 	chatAddContext: '加入參考資料',
 	chatPickVaultItem: '選擇庫內檔案或資料夾',
-	chatAttachSelection: '附上目前選取的文字',
-	chatSelectionUnavailable: '請先在筆記編輯模式中選取文字。',
 	chatSelectionPreview: '選取文字預覽',
 	chatRemoveSelection: '移除選取的文字',
-	chatAddExternalPath: '加入庫外路徑',
+	chatAddExternalPath: '庫外路徑',
+	chatPickExternalFile: '選擇檔案…',
+	chatPickExternalFolder: '選擇資料夾…',
+	chatExternalPickerFailed: '無法開啟系統選擇視窗，可以手動輸入完整路徑。',
 	chatAbsolutePath: '檔案或資料夾的完整路徑',
-	chatInvalidPath: '請輸入該檔案或資料夾的完整路徑。',
-	chatPathKind: '路徑類型',
+	chatInvalidPath: '請輸入實際存在且類型正確的完整路徑。',
 	chatFile: '檔案',
 	chatFolder: '資料夾',
 	chatConversation: '對話',
 	chatHistory: '歷史對話',
 	chatRecentConversations: '最近對話',
+	chatConversationTitle: '對話標題',
+	chatRenameConversation: '編輯標題',
+	chatDeleteConversation: '刪除對話',
+	chatDeleteConfirm: '永久刪除「{title}」及其全部訊息？刪除後無法復原。',
+	chatRenameError: '無法儲存對話標題。',
+	chatDeleteError: '無法刪除對話。',
 	chatNewConversation: '新建對話',
 	chatUntitled: '未命名對話',
 	chatLoadingHistory: '正在載入對話…',
 	chatHistoryError: '無法載入已儲存的對話。',
-	chatCitationUnavailable: '無法開啟這篇來源筆記。',
 	chatInterrupted: '已中斷',
 	chatLastStep: '上次停在',
 	chatStepStarting: '準備任務',
@@ -879,9 +999,9 @@ const ZH_TW: UiText = {
 	chatStepApproval: '等待你確認',
 	chatStepResult: '已收到工具結果',
 	chatModelMissing: '請先在設定裡選擇模型。',
+	chatSubmitDisclosure: '提交會向 {provider} 傳送目前的指令，也可能附上對話紀錄和工具讀取的資料。',
+	chatSelectionDisclosure: '提交會向 {provider} 傳送目前的指令和附上的選取內容。',
 	chatModelChanged: '模型已更換。請確認傳送對象，再提交任務。',
-	chatSubmitDisclosure: '提交會把這段對話的紀錄和你的指令傳送給此服務商，工具取得的資料也可能一同傳送。',
-	chatSelectionDisclosure: '這次只向此服務商傳送目前的指令和附上的文字。',
 	chatStop: '停止任務',
 	chatResume: '繼續任務',
 	chatResumeReview: '查看續做資料',
@@ -894,8 +1014,6 @@ const ZH_TW: UiText = {
 	chatReconnecting: '正在重新連線至模型服務',
 	chatWaitingForConnection: '模型服務尚未恢復，已保留任務進度',
 	chatRetryConnection: '重試連線',
-	chatAllDone: '檔案修改完成',
-	chatResumedAllDone: '全部完成',
 	chatPartiallyDone: '部分操作未完成',
 	chatStopped: '已停止',
 	chatFailed: '任務失敗',
@@ -908,39 +1026,32 @@ const ZH_TW: UiText = {
 	chatExpandMessage: '展開訊息',
 	chatCollapseMessage: '收起訊息',
 	chatLatest: '回到最新訊息',
-	chatProcess: '查看過程',
+	chatTurnNavigator: '對話跳轉',
+	chatJumpToTurn: '跳轉到第 {n} 輪',
 	chatThinking: '思考',
+	chatThinkingPending: '思考中…',
+	chatThinkingDuration: '思考了 {n} 秒',
+	chatResolved: '已解決',
+	chatTimelineApproval: '等待核准',
+	chatTimelineWaitingConnection: '等待重新連線',
+	chatTimelineContextRetry: '正在縮短對話記錄並重試',
+	chatTimelineUsage: '{n} 個 token',
+	chatToolGroupRead: '讀取了 {count} 個檔案',
+	chatToolGroupSearch: '搜尋了 {count} 次',
+	chatToolGroupEdit: '修改了 {count} 次',
+	chatToolGroupWrite: '寫入了 {count} 個檔案',
+	chatToolGroupRun: '執行了 {count} 條指令',
+	chatToolGroupGeneric: '呼叫了 {name} {count} 次',
+	chatOpenToolTarget: '開啟 {target}',
 	chatResponding: '正在回覆…',
 	chatCopyReply: '複製回覆',
+	chatCitationUnavailable: '無法開啟這篇來源筆記。',
 	chatCopiedReply: '已複製回覆',
 	chatCopyFailed: '無法複製回覆',
-	chatReplyTime: '回覆時間',
-	chatReplyUsage: '本次回覆記錄 {tokens} 個 token',
-	chatToolActivity: '工具活動',
-	chatToolCount: '工具 {count} 項',
-	chatToolFailures: '失敗 {count} 項',
-	chatToolArguments: '工具輸入',
-	chatToolOutput: '已記錄的輸出',
-	chatToolWaitingOutput: '等待輸出',
+	chatToolArguments: '呼叫參數',
+	chatToolOutput: '工具輸出',
 	chatToolSkipped: '已跳過',
-	chatToolRead: '讀取 {target}',
-	chatToolSearch: '搜尋 {target}',
-	chatToolEdit: '修改 {target}',
-	chatToolWrite: '寫入 {target}',
-	chatToolRun: '執行 {target}',
-	chatToolNoOutput: '沒有輸出',
-	chatToolEmptyText: '空白文字',
-	chatToolPattern: '搜尋條件',
-	chatToolFileFilter: '檔案篩選',
-	chatToolFromLine: '請求起始行：{line}',
-	chatToolMaxLines: '最多讀取 {count} 行',
-	chatToolRequestedContent: '請求寫入的內容',
-	chatToolRequestedEdit: '請求取代的片段（行號從片段開頭算）',
 	chatToolNoChanges: '請求取代的內容沒有差別',
-	chatToolCell: '儲存格',
-	chatToolCellInsert: '插入儲存格',
-	chatToolCellReplace: '取代儲存格',
-	chatToolCellDelete: '刪除儲存格',
 	chatToolMoreText: '查看已記錄的全文',
 	chatToolLessText: '收起全文',
 	chatApprovalHeading: '等待確認',
@@ -960,6 +1071,44 @@ const ZH_TW: UiText = {
 	chatDiffFullText: '查看全文',
 	chatDiffFullPreview: '變更較大，請核對下方完整的原文和新內容。',
 	chatCommand: '執行命令',
+	chatVaultReference: '筆記／資料夾',
+	chatCopyMessage: '複製',
+	chatMessageCopied: '已複製',
+	chatEditFromHere: '從這則編輯',
+	chatCancelEdit: '取消',
+	chatForkReply: '分支',
+	chatForkFailed: '無法建立對話分支。',
+	chatProcessSummary: '{messages} 則訊息 · {tools} 次工具呼叫',
+	chatActivitySummary: '{rounds} 輪 · {messages} 則訊息',
+	chatAverageSpeed: '平均速度 {n} 字／秒',
+	chatSpeedValue: '{n} 字／秒',
+	chatActivityStats: '對話活動',
+	chatModelDuration: '模型耗時',
+	chatToolDuration: '工具耗時',
+	chatFirstDelta: '平均首字延遲',
+	chatSpeed: '平均速度',
+	chatMetricSeconds: '{s} 秒',
+	chatMetricMinutes: '{m} 分 {s} 秒',
+	chatSessionUsage: '對話用量',
+	chatRunUsage: '本輪用量',
+	chatProviderModel: '服務商／模型',
+	chatCacheHit: '快取命中',
+	chatUncachedInput: '未命中輸入',
+	chatCacheRead: '快取讀取',
+	chatCacheWrite: '快取寫入',
+	chatOutputTokens: '輸出',
+	chatTotalTokens: '合計',
+	chatReportedCost: '實報成本',
+	chatMissingUsage: '服務商回傳的用量不完整，此處顯示已收到的讀數。',
+	chatIncompleteUsage: '部分用量',
+	chatContextUsed: '已用 {n}%',
+	chatContextPending: '待下次請求更新',
+	chatContextStats: '上下文已用 {n}%',
+	chatContextSource: '讀數來自最近一次請求。',
+	chatPromptTokens: '提示詞 token 總數',
+	chatWindowCapacity: '模型視窗容量',
+	chatRemainingCapacity: '剩餘容量',
+	chatMetricsRunning: '任務正在執行。',
 	chatApprove: '僅允許本次',
 	chatDeny: '拒絕',
 };

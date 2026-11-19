@@ -1,61 +1,75 @@
 import { isAbsolute } from 'node:path';
-import { MarkdownView } from 'obsidian';
+import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { canResumeRun } from '../orchestration/runResume';
+import { canResumeRun, ResumeThinkingUnavailable } from '../orchestration/runResume';
 import { composerShortcut } from './composerKeyboard';
+import { confirmAction } from './ConfirmModal';
 import ApprovalView from './components/ApprovalView';
+import ChatMetrics from './components/ChatMetrics';
 import ChatNavigation, { ConversationList } from './components/ChatNavigation';
 import ExecutionView from './components/ExecutionView';
+import { MetricPopoverProvider } from './components/MetricPopover';
 import TaskInput from './components/TaskInput';
 import { confirmResume } from './ResumeConfirmModal';
 import { emptyExecution, restoreExecution, updateExecution } from './context';
-import type { ChatApproval } from './context';
+import type { ChatApproval, DisplayedRun } from './context';
 import { uiText } from './uiText';
-import type { ConversationSnapshot, ConversationSummary, NoteRef, NoteSelection, RunObserver, RunEvent, SavedRun, ScribeServices, TaskRequest, ToolApproval } from '../types';
+import { useChatModel } from './useChatModel';
+import type ScribeAiPlugin from '../main';
+import type { ConversationSnapshot, ConversationSummary, NoteRef, NoteSelection, RunObserver, RunEvent, SavedRun, TaskRequest, ToolApproval } from '../types';
 
 interface ActiveSubmission {
 	taskId?: string;
 	retryConnection?: () => void;
 }
 
+interface EditDraft {
+	taskId: string;
+	original: { instruction: string; refs: NoteRef[]; selection: NoteSelection | null };
+}
+
 function vaultRefs(refs: NoteRef[]): NoteRef[] {
 	return refs.filter(({ path }) => !isAbsolute(path));
 }
 
-export default function App({ services }: { services: ScribeServices }) {
+export default function App({ plugin }: { plugin: ScribeAiPlugin }) {
 	const text = uiText();
+	const services = plugin.services;
 	const sessions = services.orchestration.sessions;
-	const { settings } = services;
-	const [selection, setSelection] = useState(() => ({ providerId: settings.providerId, model: settings.model }));
+	const chatModel = useChatModel(plugin);
 	const [refs, setRefs] = useState<NoteRef[]>([]);
 	const [attachedSelection, setAttachedSelection] = useState<NoteSelection | null>(null);
 	const [conversationId, setConversationId] = useState<string | null>(null);
 	const [conversations, setConversations] = useState<ConversationSummary[]>([]);
-	const [history, setHistory] = useState<SavedRun[]>([]);
+	const [history, setHistory] = useState<DisplayedRun[]>([]);
 	const [instruction, setInstruction] = useState('');
 	const [execution, setExecution] = useState(emptyExecution);
 	const [liveRequest, setLiveRequest] = useState<TaskRequest>();
+	const [liveModel, setLiveModel] = useState<SavedRun['model']>();
+	const [editing, setEditing] = useState<EditDraft>();
 	const [approval, setApproval] = useState<ChatApproval | null>(null);
 	const [error, setError] = useState('');
 	const [busy, setBusy] = useState(false);
 	const [loading, setLoading] = useState(true);
+	const [managingHistory, setManagingHistory] = useState(false);
 	const active = useRef<ActiveSubmission | null>(null);
 	const pending = useRef<ChatApproval | null>(null);
 	const mounted = useRef(false);
 	const navigating = useRef(true);
-	const lastMarkdown = useRef<MarkdownView | null>(null);
-	const workspace = services.app.workspace;
-	const providerId = selection.providerId;
+	const input = useRef<HTMLTextAreaElement>(null);
 	const lastRun = history.at(-1);
 	const resumable = canResumeRun(lastRun) ? lastRun : undefined;
 	const liveTaskId = execution.state?.taskId;
-	const visibleHistory = useMemo(() => history.filter((run) => run.state.taskId !== liveTaskId), [history, liveTaskId]);
+	const editIndex = editing ? history.findIndex(({ state }) => state.taskId === editing.taskId) : -1;
+	const metricHistory = useMemo(() => editIndex < 0 ? history : history.slice(0, editIndex), [history, editIndex]);
+	const visibleHistory = useMemo(() => {
+		const visible = editIndex < 0 ? history : liveTaskId ? history.slice(0, editIndex) : history.slice(0, editIndex + 1);
+		return visible.filter((run) => run.state.taskId !== liveTaskId);
+	}, [history, liveTaskId, editIndex]);
 	const landing = !loading && !history.length && !execution.state;
-	const defaultProviderLabel = useMemo(() => providerId
-		? services.communication.models.providers().find((provider) => provider.id === providerId)?.label
-		: undefined, [providerId, services]);
-	const providerLabel = settings.communication.providerNames[providerId]
-		?? settings.customProviders[providerId]?.label ?? defaultProviderLabel ?? providerId;
+	const referenceShape = (refs: NoteRef[]) => JSON.stringify(refs.map(({ path, kind, lines }) => [path, kind, lines]));
+	const expectedRefs = vaultRefs((liveTaskId ? liveRequest : lastRun?.request)?.refs ?? []);
+	const dirty = Boolean(instruction.trim() || attachedSelection || referenceShape(refs) !== referenceShape(expectedRefs));
 
 	const applyConversation = useCallback((conversation: ConversationSnapshot | null) => {
 		setConversationId(conversation?.id ?? null);
@@ -64,16 +78,10 @@ export default function App({ services }: { services: ScribeServices }) {
 		setAttachedSelection(null);
 		setExecution(emptyExecution);
 		setLiveRequest(undefined);
+		setLiveModel(undefined);
+		setEditing(undefined);
 		setInstruction('');
 	}, []);
-
-	useEffect(() => {
-		lastMarkdown.current = workspace.getActiveViewOfType(MarkdownView);
-		const reference = workspace.on('active-leaf-change', (leaf) => {
-			if (leaf?.view instanceof MarkdownView) lastMarkdown.current = leaf.view;
-		});
-		return () => workspace.offref(reference);
-	}, [workspace]);
 
 	useEffect(() => {
 		mounted.current = true;
@@ -116,10 +124,116 @@ export default function App({ services }: { services: ScribeServices }) {
 		}
 	}
 
-	function refreshSelection() {
-		if (settings.providerId === selection.providerId && settings.model === selection.model) return true;
-		setSelection({ providerId: settings.providerId, model: settings.model });
-		return false;
+	async function manageConversation(id: string, title?: string): Promise<boolean> {
+		if (active.current || navigating.current) return false;
+		navigating.current = true;
+		setManagingHistory(true);
+		setError('');
+		try {
+			if (title !== undefined) {
+				await sessions.renameConversation(id, title);
+				if (mounted.current) setConversations((rows) => rows.map((row) => row.id === id ? { ...row, title } : row));
+			} else {
+				await sessions.deleteConversation(id);
+				if (mounted.current) setConversations((rows) => rows.filter((row) => row.id !== id));
+				if (id === conversationId) {
+					if (mounted.current) applyConversation(null);
+					const next = await sessions.createConversation().catch(() => {
+						if (mounted.current) setError(text.saveFailed);
+						return null;
+					});
+					if (mounted.current) setConversationId(next);
+				}
+			}
+			return true;
+		} catch {
+			if (mounted.current) setError(title === undefined ? text.chatDeleteError : text.chatRenameError);
+			return false;
+		} finally {
+			navigating.current = false;
+			if (mounted.current) setManagingHistory(false);
+		}
+	}
+
+	function confirmDeleteConversation(conversation: ConversationSummary, trigger: HTMLButtonElement) {
+		if (active.current || navigating.current) return;
+		const chat = trigger.closest('.scribe-app');
+		confirmAction(services.app, {
+			title: text.chatDeleteConversation,
+			message: text.chatDeleteConfirm.replace('{title}', () => conversation.title || text.chatUntitled),
+			confirmText: text.chatDeleteConversation,
+			cancelText: text.cancel,
+			onConfirm: async () => { if (mounted.current) await manageConversation(conversation.id); },
+			onClose: () => trigger.ownerDocument.defaultView?.requestAnimationFrame(() => {
+				if (!mounted.current) return;
+				const target = trigger.isConnected && !trigger.disabled ? trigger
+					: chat?.querySelector<HTMLButtonElement>('.scribe-chat-history > button:not(:disabled)') ?? input.current;
+				target?.focus({ preventScroll: true });
+			}),
+		});
+	}
+
+	function editTurn(taskId: string) {
+		if (active.current || navigating.current) return;
+		if (editing?.taskId === taskId) {
+			setInstruction(editing.original.instruction);
+			setRefs(editing.original.refs);
+			setAttachedSelection(editing.original.selection);
+			setEditing(undefined);
+		} else {
+			const request = history.find(({ state }) => state.taskId === taskId)?.request;
+			if (!request) return;
+			setEditing({ taskId, original: editing?.original ?? { instruction, refs, selection: attachedSelection } });
+			setInstruction(request.instruction);
+			setRefs(request.refs);
+			setAttachedSelection(request.selection ?? null);
+			setExecution(emptyExecution);
+			setLiveRequest(undefined);
+		}
+		setError('');
+		input.current?.focus({ preventScroll: true });
+	}
+
+	async function forkTurn(taskId: string) {
+		if (!conversationId || active.current || navigating.current) return;
+		navigating.current = true;
+		setLoading(true);
+		setError('');
+		let errorMessage = text.chatForkFailed;
+		try {
+			const branch = await sessions.forkConversation(conversationId, taskId);
+			errorMessage = text.chatHistoryError;
+			if (mounted.current) applyConversation(branch);
+			const index = await sessions.listConversations();
+			if (mounted.current) setConversations(index);
+		} catch {
+			if (mounted.current) setError(errorMessage);
+		} finally {
+			navigating.current = false;
+			if (mounted.current) setLoading(false);
+		}
+	}
+
+	async function changeModel(value: string): Promise<boolean> {
+		if (active.current || navigating.current || chatModel.isSaving()) return false;
+		setError('');
+		try {
+			await chatModel.selectModel(value);
+			return true;
+		} catch {
+			if (mounted.current) setError(text.saveFailed);
+			return false;
+		}
+	}
+
+	async function changeThinking(level: ModelThinkingLevel) {
+		if (active.current || navigating.current) return;
+		setError('');
+		try {
+			await chatModel.selectThinking(level);
+		} catch {
+			if (mounted.current) setError(text.saveFailed);
+		}
 	}
 
 	function requestApproval(submission: ActiveSubmission, details: ToolApproval, signal: AbortSignal): Promise<boolean> {
@@ -156,9 +270,9 @@ export default function App({ services }: { services: ScribeServices }) {
 		});
 	}
 
-	async function perform(prompt: string, resume?: SavedRun) {
-		if (active.current || navigating.current) return;
-		if (!refreshSelection()) {
+	async function perform(prompt: string, resume?: DisplayedRun) {
+		if (active.current || navigating.current || chatModel.isSaving()) return;
+		if (!chatModel.refreshSelection()) {
 			setError(text.chatModelChanged);
 			return;
 		}
@@ -166,31 +280,43 @@ export default function App({ services }: { services: ScribeServices }) {
 		active.current = submission;
 		setBusy(true);
 		setError('');
+		const replaceFrom = !resume ? editing?.taskId : undefined;
+		let appliedEdit = false;
+		let displayed = resume ? restoreExecution(resume) : emptyExecution;
 		const onEvent = (event: RunEvent) => {
 			if (active.current !== submission) return;
-			setExecution((previous) => updateExecution(previous, event));
+			displayed = updateExecution(displayed, event);
+			setExecution(displayed);
+			if (replaceFrom && !appliedEdit && event.type === 'state' && event.state.messages.some(({ role }) => role === 'user')) {
+				appliedEdit = true;
+				setRefs(vaultRefs);
+				setInstruction('');
+				setAttachedSelection(null);
+			}
 		};
 		try {
 			const id = conversationId ?? await sessions.createConversation();
 			if (active.current !== submission) return;
-			if (!refreshSelection()) throw new Error(text.chatModelChanged);
+			if (!chatModel.refreshSelection()) throw new Error(text.chatModelChanged);
 			const observer: RunObserver = {
 				onEvent,
 				approve: (details: ToolApproval, signal: AbortSignal) => requestApproval(submission, details, signal),
 				retryConnection: (signal: AbortSignal) => waitForConnection(submission, signal),
 				confirmResume: (preview, signal) => confirmResume(services.app, preview, signal),
 			};
-			setExecution(resume ? restoreExecution(resume) : emptyExecution);
+			setExecution(displayed);
 			const request = resume?.request ?? {
 				conversationId: id,
 				instruction: prompt,
 				refs: attachedSelection ? [] : refs,
 				...(attachedSelection ? { selection: attachedSelection } : {}),
 			};
-			const run = resume ? sessions.resume(id, resume.state.taskId, observer) : sessions.submit(request, observer);
+			const { providerId, model } = services.settings;
+			const run = resume ? sessions.resume(id, resume.state.taskId, observer) : sessions.submit(request, observer, replaceFrom);
 			submission.taskId = run.taskId;
 			setLiveRequest(request);
-			if (!resume) {
+			setLiveModel(resume?.model ?? { providerId, model });
+			if (!resume && !replaceFrom) {
 				setRefs(vaultRefs);
 				setInstruction('');
 				setAttachedSelection(null);
@@ -198,26 +324,44 @@ export default function App({ services }: { services: ScribeServices }) {
 			setConversationId(id);
 			onEvent({ type: 'state', state: await run.result });
 			if (active.current !== submission) return;
+			if (replaceFrom) {
+				setHistory((previous) => previous.slice(0, editIndex));
+				setEditing(undefined);
+				setRefs(vaultRefs);
+				setInstruction('');
+				setAttachedSelection(null);
+			}
 			const [index, current] = await Promise.allSettled([sessions.listConversations(), sessions.openConversation(id)]);
 			if (active.current !== submission) return;
 			if (index.status === 'fulfilled') setConversations(index.value);
 			if (current.status === 'fulfilled' && current.value?.runs.some(({ state }) => state.taskId === run.taskId)) {
-				if (resume) {
-					setHistory(current.value.runs);
-					setExecution(emptyExecution);
-					setLiveRequest(undefined);
-				} else {
-					applyConversation(current.value);
+				const runs = current.value.runs;
+				const latest = displayed;
+				setHistory((previous) => {
+					const byId = new Map(previous.map((saved) => [saved.state.taskId, saved]));
+					return runs.map((saved) => saved.state.taskId === run.taskId && latest.state
+						? { ...saved, state: latest.state, displayed: latest } : byId.get(saved.state.taskId) ?? saved);
+				});
+				setExecution(emptyExecution);
+				setLiveRequest(undefined);
+				setLiveModel(undefined);
+				if (!resume) {
+					setRefs(vaultRefs(runs.at(-1)?.request.refs ?? []));
+					setAttachedSelection(null);
+					setInstruction('');
 				}
 			}
 			if (index.status === 'rejected' || current.status === 'rejected') setError(text.chatHistoryError);
 		} catch (cause) {
 			if (active.current === submission) {
-				if (resume) {
+				if (resume || replaceFrom) {
 					setExecution(emptyExecution);
 					setLiveRequest(undefined);
+					setLiveModel(undefined);
 				}
-				setError(cause instanceof Error ? cause.message : text.chatFailed);
+				setError(cause instanceof ResumeThinkingUnavailable
+					? text.chatResumeThinkingUnavailable.replace('{level}', text.thinkingLevelNames[cause.level])
+					: cause instanceof Error ? cause.message : text.chatFailed);
 			}
 		} finally {
 			if (active.current === submission) {
@@ -247,34 +391,8 @@ export default function App({ services }: { services: ScribeServices }) {
 			: [...previous, ref]);
 	}
 
-	function attachSelection(): boolean {
-		if (active.current || navigating.current) return false;
-		const recent = workspace.getMostRecentLeaf()?.view;
-		const previous = lastMarkdown.current;
-		let view = workspace.getActiveViewOfType(MarkdownView)
-			?? (previous?.leaf.view === previous ? previous : null)
-			?? (recent instanceof MarkdownView ? recent : null);
-		if (!view) {
-			const file = workspace.getActiveFile();
-			const views = workspace.getLeavesOfType('markdown').map(({ view }) => view)
-				.filter((view): view is MarkdownView => view instanceof MarkdownView && view.file === file);
-			if (views.length === 1) view = views[0] ?? null;
-		}
-		if (!view?.file || view.getMode() !== 'source') return false;
-		const selected = view.editor.getSelection();
-		if (!selected) return false;
-		const from = view.editor.getCursor('from');
-		const to = view.editor.getCursor('to');
-		setAttachedSelection({
-			path: view.file.path,
-			title: view.file.basename,
-			text: selected,
-			lines: [from.line + 1, to.line + (to.ch > 0 ? 1 : 0)],
-		});
-		return true;
-	}
 
-	return (
+	return <MetricPopoverProvider>
 		<div className="scribe-app" data-layout={landing ? 'landing' : 'conversation'} onKeyDown={(event) => {
 			if (!busy || event.defaultPrevented || composerShortcut(event.nativeEvent) !== 'escape'
 				|| !(event.target instanceof Element) || !event.currentTarget.contains(event.target)
@@ -288,34 +406,46 @@ export default function App({ services }: { services: ScribeServices }) {
 					<path fill="currentColor" d="M72 10a8 8 0 0 1 11.3 0l6.7 6.7a8 8 0 0 1 0 11.3L39 79 17 84l5-22L72 10zm-3 14L29 64l-2 10 10-2 40-40-8-8zM13 90h74v6H13z" />
 				</svg>
 				{text.chatEmptyHeading}
-			</h1> : <ExecutionView app={services.app} execution={execution} liveRequest={liveRequest}
-				history={visibleHistory} loading={loading} conversationId={conversationId} />}
+			</h1> : <ExecutionView key={conversationId} app={services.app} execution={execution} liveRequest={liveRequest} liveModel={liveModel}
+				history={visibleHistory} loading={loading} conversationId={conversationId} editingId={editing?.taskId}
+				onEdit={busy || loading ? undefined : editTurn} onFork={busy || loading ? undefined : (id) => void forkTurn(id)} />}
 			<ApprovalView approval={approval} />
-			{!landing && <ChatNavigation conversations={conversations} conversationId={conversationId} disabled={loading || busy}
-				onSelect={(id) => void switchConversation(id)} onNew={() => void switchConversation()} />}
+			{!landing && <div className="scribe-composer-bar">
+				{!loading && <ChatMetrics history={metricHistory} live={execution.state} busy={busy} dirty={dirty} />}
+				<ChatNavigation conversations={conversations} conversationId={conversationId} disabled={loading || busy}
+					managing={managingHistory} onRename={manageConversation} onDelete={confirmDeleteConversation}
+					onSelect={(id) => void switchConversation(id)} onNew={() => void switchConversation()} />
+			</div>}
 			<TaskInput
+				inputRef={input}
 				busy={busy}
-				disabled={loading}
+				disabled={loading || managingHistory}
 				conversationId={conversationId}
 				context={{
 					app: services.app, refs, selection: attachedSelection, onAdd: addRef,
 					onRemove: (path) => setRefs((previous) => previous.filter((ref) => ref.path !== path)),
-					onAttachSelection: attachSelection, onRemoveSelection: () => setAttachedSelection(null),
+					onRemoveSelection: () => setAttachedSelection(null),
 				}}
-				destination={providerLabel && selection.model ? `${providerLabel} · ${selection.model}` : ''}
+				modelGroups={chatModel.groups}
+				modelValue={chatModel.value}
+				modelSaving={chatModel.saving}
+				modelSelecting={chatModel.selecting}
+				thinking={chatModel.thinking}
+				onModelChange={changeModel}
+				onThinkingChange={(level) => void changeThinking(level)}
 				error={error}
 				instruction={instruction}
 				onChange={setInstruction}
-				onFocus={() => { if (!busy) refreshSelection(); }}
 				onSubmit={(instruction) => void perform(instruction)}
-				onResume={!busy && !loading && !attachedSelection && resumable ? () => void perform('', resumable) : undefined}
+				onResume={!busy && !loading && !editing && !attachedSelection && resumable ? () => void perform('', resumable) : undefined}
 				onStop={stop}
 				onRetryConnection={execution.modelRetry === 'manual' ? () => active.current?.retryConnection?.() : undefined}
 			/>
 			{landing && conversations.length > 0 && <section className="scribe-chat-recents" aria-label={text.chatRecentConversations}>
 				<h2>{text.chatRecentConversations}</h2>
-				<ConversationList conversations={conversations} disabled={busy} onSelect={(id) => void switchConversation(id)} />
+				<ConversationList conversations={conversations} disabled={busy || managingHistory} onSelect={(id) => void switchConversation(id)}
+					onRename={manageConversation} onDelete={confirmDeleteConversation} />
 			</section>}
 		</div>
-	);
+	</MetricPopoverProvider>;
 }

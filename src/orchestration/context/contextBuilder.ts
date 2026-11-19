@@ -23,8 +23,13 @@ function bytes(value: unknown): number {
 	return Buffer.byteLength(JSON.stringify(value));
 }
 
-function messageBytes(message: Message): number {
-	return 32 + bytes(message.rawAssistant?.content ?? message);
+function messageBytes({ role, content, toolCalls, toolCallId, toolName, isError, rawAssistant }: Message): number {
+	const blocks = rawAssistant?.content.map((block) => {
+		if (block.type !== 'thinking' || block.durationMs === undefined) return block;
+		const { durationMs: _duration, ...sent } = block;
+		return sent;
+	});
+	return 32 + bytes(blocks ?? { role, content, toolCalls, toolCallId, toolName, isError });
 }
 
 function historyBytes(messages: Message[]): number {

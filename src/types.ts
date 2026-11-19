@@ -5,6 +5,7 @@ import type {
 	Credential,
 	CredentialStore as PiCredentialStore,
 	LoginOptions,
+	ModelThinkingLevel,
 	ThinkingLevel,
 	Usage,
 } from '@earendil-works/pi-ai';
@@ -26,19 +27,51 @@ export function notImplemented(feature: string): never {
 
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
+type ThinkingBlock = Extract<AssistantMessage['content'][number], { type: 'thinking' }> & { durationMs?: number };
+type AssistantRecord = Omit<AssistantMessage, 'content'> & {
+	content: (Exclude<AssistantMessage['content'][number], { type: 'thinking' }> | ThinkingBlock)[];
+};
+
+export interface ModelMetrics {
+	endedAt: number;
+	modelMs: number;
+	firstDeltaMs?: number;
+	decodeMs?: number;
+	contextWindow?: number;
+}
+
+export interface ReportedUsage {
+	prompt?: number;
+	input?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+	output?: number;
+}
+
 export interface Message {
 	role: MessageRole;
 	content: string;
+	/** 用于将流式更新与保存后的同一回复关联起来。 */
+	id?: string;
+	/** 原始响应无法保留时，记录时间线上已显示的思考和正文位置。 */
+	thinkingBlocks?: (ThinkingBlock & { contentIndex: number })[];
+	textIndex?: number;
 	/** role 为 tool 时对应的工具调用 id */
 	toolCallId?: string;
 	toolName?: string;
 	isError?: boolean;
 	skipped?: boolean;
 	incomplete?: true;
+	truncated?: true;
+	metrics?: ModelMetrics;
+	usage?: Usage;
+	/** 仅保留服务商确实报告的用量。空对象表示未报告。 */
+	reportedUsage?: ReportedUsage;
+	toolDurationMs?: number;
 	/** assistant 消息中由模型发起的工具调用 */
 	toolCalls?: ToolCall[];
 	/** 保留同一模型继续当前任务时所需的原始内容和签名 */
-	rawAssistant?: AssistantMessage;
+	rawAssistant?: AssistantRecord;
 }
 
 export interface NoteRef {
@@ -104,6 +137,7 @@ export interface ToolResult {
 	callId: string;
 	content: string;
 	isError: boolean;
+	durationMs?: number;
 	fileRead?: FileReadPage;
 }
 
@@ -165,7 +199,8 @@ export interface ModelRequest {
 	signal?: AbortSignal;
 	maxTokens?: number;
 	temperature?: number;
-	reasoning?: ThinkingLevel;
+	/** null 固定为不请求推理档位，缺省兼容旧请求的默认行为。 */
+	reasoning?: ModelThinkingLevel | null;
 	sessionId?: string;
 	maxRetries?: number;
 }
@@ -173,13 +208,16 @@ export interface ModelRequest {
 export type StopReason = 'end' | 'tool-calls' | 'limit';
 
 export interface ModelResponse {
+	id?: string;
 	content: string;
 	thinking?: string;
 	toolCalls: ToolCall[];
 	stopReason: StopReason;
 	usage?: Usage;
+	reportedUsage?: ReportedUsage;
+	metrics?: ModelMetrics;
 	/** pi-ai 已归一化的完整响应，供需要思考、用量与服务商元数据的调用方使用 */
-	raw: AssistantMessage;
+	raw: AssistantRecord;
 }
 
 export class ContextOverflowError extends Error {}
@@ -203,6 +241,8 @@ export interface RunState {
 	messages: Message[];
 	pendingCalls: ToolCall[];
 	status: RunStatus;
+	createdAt?: number;
+	finishedAt?: number;
 	resumed?: boolean;
 	error?: string;
 }
@@ -210,12 +250,21 @@ export interface RunState {
 export type RunEvent =
 	| { type: 'state'; state: RunState }
 	| { type: 'turn-start'; turn: number }
-	| { type: 'model-retry'; waiting: boolean }
-	| { type: 'text-delta'; text: string }
+	| { type: 'model-retry'; messageId: string; waiting: boolean; reason?: 'context' }
+	| { type: 'text-delta'; messageId: string; contentIndex: number; text: string }
+	| { type: 'thinking-delta'; messageId: string; contentIndex: number; text: string }
+	| { type: 'thinking-end'; messageId: string; contentIndex: number; durationMs: number }
 	| { type: 'tool-start'; call: ToolCall }
-	| { type: 'tool-end'; call: ToolCall; result: ToolResult };
+	| { type: 'tool-end'; call: ToolCall; result: ToolResult; skipped?: boolean };
 
-export type RunCheckpoint = Exclude<RunEvent, { type: 'text-delta' | 'model-retry' }>;
+export type RunCheckpoint = Exclude<RunEvent, { type: 'text-delta' | 'thinking-delta' | 'thinking-end' | 'model-retry' }>;
+
+export interface SavedRetry {
+	beforeMessage: number;
+	event: Extract<RunEvent, { type: 'model-retry' }>;
+	draft?: Pick<Message, 'content' | 'textIndex' | 'thinkingBlocks'>;
+	blocks?: ({ type: 'text'; contentIndex: number; text: string } | (ThinkingBlock & { contentIndex: number }))[];
+}
 
 export interface RunObserver {
 	onEvent?: (event: RunEvent) => void;
@@ -284,9 +333,9 @@ export interface ModelOverride {
 		structuredOutput?: boolean;
 	};
 	/** 该模型开放的推理档位，供聊天界面的档位选择器使用 */
-	thinkingLevels?: ThinkingLevel[];
+	thinkingLevels?: ModelThinkingLevel[];
 	/** 旧版单档位字段，仅用于迁移读取 */
-	thinkingLevel?: ThinkingLevel;
+	thinkingLevel?: ModelThinkingLevel;
 }
 
 export interface ModelProviderInfo {
@@ -305,6 +354,10 @@ export interface ModelProviderInfo {
 
 export interface ModelService {
 	providers(): ModelProviderInfo[];
+	thinkingOptions(this: void, model: Pick<ModelRequest, 'providerId' | 'model'>, preferred?: ModelThinkingLevel): {
+		levels: ModelThinkingLevel[];
+		level?: ModelThinkingLevel;
+	};
 	contextLimits?(model: RunContext['model']): Pick<ProviderModelInfo, 'contextWindow' | 'maxTokens'> | undefined;
 	login(providerId: string, interaction: AuthInteraction, options?: LoginOptions): Promise<Credential>;
 	refresh(providerId?: string): Promise<void>;
@@ -374,9 +427,13 @@ export interface ToolLayer {
 export interface ConversationStore {
 	list(): Promise<ConversationSummary[]>;
 	load(id: string): Promise<ConversationSnapshot>;
+	rename(id: string, title: string): Promise<void>;
+	delete(id: string): Promise<void>;
 	lastOpened(): Promise<string | undefined>;
 	setLastOpened(id: string): Promise<void>;
 	append(id: string, entries: ConversationEntry[]): Promise<void>;
+	fork(id: string, taskId: string): Promise<ConversationSnapshot>;
+	replaceFrom(id: string, taskId: string, entries: ConversationEntry[]): Promise<void>;
 }
 
 export interface RunStep {
@@ -389,7 +446,8 @@ export type ConversationEntry =
 	| { type: 'start'; task: Task; model: RunContext['model'] }
 	| { type: 'messages'; taskId: string; messages: Message[]; step?: RunStep }
 	| { type: 'step'; taskId: string; step: RunStep }
-	| { type: 'finish'; taskId: string; status: TerminalRunStatus; turn: number; error?: string; partial?: string; resumed?: boolean };
+	| { type: 'retry'; taskId: string; retry: SavedRetry }
+	| { type: 'finish'; taskId: string; status: TerminalRunStatus; turn: number; error?: string; partial?: string; resumed?: boolean; finishedAt?: number };
 
 export interface SavedRun {
 	request: TaskRequest;
@@ -398,6 +456,7 @@ export interface SavedRun {
 	step?: RunStep;
 	partial?: string;
 	finalized?: boolean;
+	retries?: SavedRetry[];
 }
 
 export interface ConversationSnapshot {
@@ -415,7 +474,10 @@ export interface SessionController {
 	createConversation(): Promise<string>;
 	listConversations(): Promise<ConversationSummary[]>;
 	openConversation(id?: string): Promise<ConversationSnapshot | null>;
-	submit(request: TaskRequest, observer?: RunObserver): { taskId: string; result: Promise<RunState> };
+	forkConversation(id: string, taskId: string): Promise<ConversationSnapshot>;
+	renameConversation(id: string, title: string): Promise<void>;
+	deleteConversation(id: string): Promise<void>;
+	submit(request: TaskRequest, observer?: RunObserver, replaceFromTaskId?: string): { taskId: string; result: Promise<RunState> };
 	resume(conversationId: string, taskId: string, observer?: RunObserver): { taskId: string; result: Promise<RunState> };
 	cancel(taskId: string): Promise<void>;
 	pause(taskId: string): void;
@@ -444,7 +506,7 @@ export interface RunContext {
 	task: Task;
 	permissions: PermissionPolicy;
 	cwd: string;
-	model: Pick<ModelRequest, 'providerId' | 'model'>;
+	model: Pick<ModelRequest, 'providerId' | 'model' | 'reasoning'>;
 	checkModel?: () => void;
 	resumeReview?: ResumeReview;
 	signal: AbortSignal;
@@ -527,6 +589,8 @@ export interface ScribeSettings {
 	chatLocation: ChatLocation;
 	/** providerId → modelId → 该模型的覆盖配置 */
 	modelOverrides: Record<string, Record<string, ModelOverride>>;
+	/** [服务商 ID, 模型 ID] 编码为键，记住各模型上次选中的推理档位。 */
+	thinkingByModel: Record<string, ModelThinkingLevel>;
 	/** 自建服务商（自定义端点 / 本地模型）：label、地址与协议由用户填写 */
 	customProviders: Record<string, CustomProviderSettings>;
 	communication: CommunicationSettings;

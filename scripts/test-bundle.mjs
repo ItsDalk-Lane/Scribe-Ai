@@ -16,12 +16,14 @@ const suites = {
 		'src/orchestration/tests/sessionController.test.ts',
 		'src/orchestration/tests/contextBudget.test.ts',
 		'src/orchestration/tests/selection.test.ts',
-		'src/interaction/tests/noteCitations.test.ts',
 		'src/interaction/tests/approvalDiff.test.ts',
 		'src/interaction/tests/chatTurnContent.test.ts',
-		'src/interaction/tests/answerMarkdown.test.ts',
+		'src/interaction/tests/chatTimeline.test.ts',
+		'src/interaction/tests/chatModel.test.ts',
+		'src/interaction/tests/markdownBlocks.test.ts',
 		'src/interaction/tests/toolCardDetails.test.ts',
 		'src/interaction/tests/composerKeyboard.test.ts',
+		'src/interaction/tests/externalReferencePicker.test.ts',
 	],
 };
 const suite = process.argv[2];

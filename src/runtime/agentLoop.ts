@@ -3,10 +3,12 @@ import { relative, resolve } from 'node:path';
 import { taskMessage } from '../orchestration/context/contextBuilder';
 import { pauseRun } from '../orchestration/runResume';
 import { isWithinPath, toolAbsolutePath } from '../tools/support/pathUtils';
+import { toolSignature } from '../tools/support/toolSignature';
 import { editTextNotFound } from '../tools/writeTools';
-import type { AgentLoop, Message, ModelCoordinator, RunState, TerminalRunStatus, ToolApproval, ToolCall, ToolCoordinator, ToolResult } from '../types';
+import type { AgentLoop, Message, ModelCoordinator, ModelResponse, RunState, TerminalRunStatus, ToolApproval, ToolCall, ToolCoordinator, ToolResult } from '../types';
 import { latestIncompleteReply, newContinuationText } from './continuationText';
 import { explicitNoteTargets } from './noteTargets';
+import { assistantMessageId } from './runState';
 
 const MAX_TURNS = 32;
 const MAX_TOOL_CALLS = 256;
@@ -22,16 +24,25 @@ const outputContinuation: Message = {
 	content: '上一轮回答被截断。请从截断处继续原任务，保留原有格式，避免重复已写的内容或已完成的操作。需要工具时，重新给出完整的请求。',
 };
 
-function toolSignature({ name, input }: ToolCall): string {
-	return JSON.stringify([name, input], (_key, value: unknown) => {
-		if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
-		const fields = value as Record<string, unknown>;
-		return Object.fromEntries(Object.keys(fields).sort().map((key) => [key, fields[key]]));
-	});
-}
-
 function skippedResults(calls: ToolCall[], content: string): Message[] {
 	return calls.map((call) => ({ role: 'tool', toolCallId: call.id, toolName: call.name, isError: true, skipped: true, content }));
+}
+
+function assistantReply(state: RunState, response: ModelResponse, content: string, raw: boolean, toolCalls?: ToolCall[]): Message {
+	const message: Message = {
+		role: 'assistant', id: response.id ?? assistantMessageId(state), content, toolCalls,
+		truncated: response.stopReason === 'limit' ? true : undefined,
+		metrics: response.metrics,
+		reportedUsage: response.reportedUsage,
+	};
+	if (raw) return { ...message, rawAssistant: response.raw };
+	message.usage = response.usage ?? response.raw.usage;
+	const thinkingBlocks = response.raw.content.flatMap((block, contentIndex) =>
+		block.type === 'thinking' && !block.redacted && block.thinking ? [{
+			type: block.type, thinking: block.thinking, durationMs: block.durationMs, contentIndex,
+		}] : []);
+	const textIndex = response.raw.content.findIndex((block) => block.type === 'text');
+	return { ...message, thinkingBlocks: thinkingBlocks.length ? thinkingBlocks : undefined, textIndex: textIndex > 0 ? textIndex : undefined };
 }
 
 function* savedResults(messages: Message[]) {
@@ -279,7 +290,7 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 							content: `完成检查发现这些目标从未尝试写入：${names}。请按原任务要求只补做这些目标。保留其他笔记的现有改动，确认写入结果后再收尾。`,
 						};
 						outputSoFar = undefined;
-						await update({ messages: [...state.messages, { role: 'assistant', content: `还未写入 ${names}，正在补做。\n\n` }] });
+						await update({ messages: [...state.messages, assistantReply(state, response, `还未写入 ${names}，正在补做。\n\n`, false)] });
 						continue;
 					}
 					const outcome = finished ? taskOutcome(results, written, missing.map(([, name]) => name)) : undefined;
@@ -289,11 +300,7 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 						throw new Error('模型返回了无法配对的工具请求。');
 					}
 					await update({
-						messages: [...state.messages, {
-							role: 'assistant', content: outcome?.content ?? content,
-							rawAssistant: keepRaw && !outcome?.content ? response.raw : undefined,
-							toolCalls: calls,
-						}],
+						messages: [...state.messages, assistantReply(state, response, outcome?.content ?? content, keepRaw && !outcome?.content, calls)],
 						pendingCalls: calls,
 						status: outcome?.status ?? state.status,
 					});
@@ -335,13 +342,14 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 						const message: Message = {
 							role: 'tool', content: result.content, toolCallId: call.id,
 							toolName: call.name, isError: result.isError, skipped: skipped || undefined,
+							toolDurationMs: result.durationMs,
 						};
 						if (result.fileRead) ctx.readDelivery.remember(message, result.fileRead);
 						await update({
 							messages: [...state.messages, message],
 							pendingCalls: state.pendingCalls.slice(1),
 						});
-						observer.onEvent?.({ type: 'tool-end', call, result });
+						observer.onEvent?.({ type: 'tool-end', call, result, skipped });
 						signal.throwIfAborted();
 						if (allStalled(state.pendingCalls)) {
 							await stopAtLimit(repeatedToolsError);

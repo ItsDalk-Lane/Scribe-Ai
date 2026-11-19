@@ -30,7 +30,7 @@ export class ChatView extends ItemView {
 
 	override async onOpen(): Promise<void> {
 		this.root = createRoot(this.contentEl);
-		this.root.render(<App services={this.plugin.services} />);
+		this.root.render(<App plugin={this.plugin} />);
 	}
 
 	override async onClose(): Promise<void> {

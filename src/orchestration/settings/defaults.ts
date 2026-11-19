@@ -1,10 +1,12 @@
 import type { CustomProviderSettings, ModelOverride, ScribeSettings } from '../../types';
+import { chatModelKey, isThinkingLevel } from './thinking';
 
 export const DEFAULT_SETTINGS: ScribeSettings = {
 	providerId: '',
 	model: '',
 	providerModels: {},
 	modelOverrides: {},
+	thinkingByModel: {},
 	customProviders: {},
 	chatLocation: 'right-sidebar',
 	communication: { credentialIds: {}, proxyUrl: '', providerNames: {}, baseUrls: {}, protocols: {} },
@@ -35,6 +37,17 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 	}
 	// 旧配置只有一对 providerId/model，迁移成按服务商记录的模型表
 	if (providerId && model && !providerModels[providerId]) providerModels[providerId] = [model];
+	const thinkingByModel: ScribeSettings['thinkingByModel'] = {};
+	const rawThinking = stored.thinkingByModel;
+	if (rawThinking && typeof rawThinking === 'object' && !Array.isArray(rawThinking)) {
+		for (const [id, models] of Object.entries(providerModels)) {
+			for (const modelId of models) {
+				const key = chatModelKey(id, modelId);
+				const level = rawThinking[key];
+				if (isThinkingLevel(level)) thinkingByModel[key] = level;
+			}
+		}
+	}
 	// 自建服务商：三个字段都必须是字符串
 	const customProviders: ScribeSettings['customProviders'] = {};
 	const rawCustom = stored.customProviders as unknown;
@@ -67,6 +80,7 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 		model,
 		providerModels,
 		modelOverrides,
+		thinkingByModel,
 		customProviders,
 		chatLocation: stored.chatLocation === 'right-sidebar'
 			|| stored.chatLocation === 'left-sidebar'

@@ -7,6 +7,7 @@ import type {
 	JsonObject,
 	Message as PiMessage,
 	Model,
+	ModelThinkingLevel,
 	MutableModels,
 	Provider,
 	SimpleStreamOptions,
@@ -30,6 +31,7 @@ import { confirmModelRequest, modelRequestConfirmation } from './modelRequestCon
 import type { ModelRequestConfirmation } from './modelRequestConfirmation';
 import { modelNodeFetch, nodeFetch } from './nodeFetch';
 import { nodeRequire } from './nodeRequire';
+import { captureReportedUsage } from './reportedUsage';
 import { ContextOverflowError, RetryableModelError } from '../types';
 import type {
 	CredentialStore,
@@ -42,6 +44,7 @@ import type {
 	ModelService,
 	ModelStream,
 	ModelStreamEvent,
+	ReportedUsage,
 	Transport,
 } from '../types';
 
@@ -60,7 +63,13 @@ function toPiMessage(message: Message): PiMessage {
 			timestamp,
 		};
 	}
-	if (message.rawAssistant) return message.rawAssistant;
+	const raw = message.rawAssistant;
+	if (raw) return { ...raw, content: raw.content.map((block) => {
+		if (block.type !== 'thinking' || block.durationMs === undefined) return block;
+		const content = { ...block };
+		delete content.durationMs;
+		return content;
+	}) };
 	return {
 		role: 'assistant',
 		content: [
@@ -96,23 +105,42 @@ function toContext(request: ModelRequest, toolsEnabled: boolean): Context {
 	};
 }
 
-function resolveReasoning(model: Model<Api>, override: ModelOverride | undefined, requested?: ThinkingLevel): ThinkingLevel | undefined {
+function configuredThinking(override: ModelOverride | undefined): ModelThinkingLevel[] | undefined {
+	return Array.isArray(override?.thinkingLevels) ? override.thinkingLevels : override?.thinkingLevel ? [override.thinkingLevel] : undefined;
+}
+
+function reasoningLevels(model: Model<Api>, override: ModelOverride | undefined): ModelThinkingLevel[] {
 	const required = model.thinkingLevelMap?.off === null;
 	const enabled = override?.capabilities?.reasoning;
-	if (!model.reasoning || (enabled === false && !required)) return undefined;
-	const configured = override?.thinkingLevels ?? (override?.thinkingLevel ? [override.thinkingLevel] : undefined);
-	if (configured) {
-		const supported = getSupportedThinkingLevels(model);
-		const allowed = configured.filter((level) => supported.includes(level));
-		if (requested && allowed.includes(requested)) return requested;
-		if (allowed.length || !required) return allowed[0];
-	}
-	if (requested || (!required && enabled !== true)) return requested;
-	const level = clampThinkingLevel(model, 'low');
+	if ((!model.reasoning && enabled !== true) || (enabled === false && !required)) return [];
+	const supported = getSupportedThinkingLevels({ ...model, reasoning: true });
+	const configured = configuredThinking(override);
+	if (!configured) return supported;
+	const allowed = [...new Set(configured.filter((level) => supported.includes(level)))];
+	return required && !allowed.length ? supported : allowed;
+}
+
+function defaultReasoning(model: Model<Api>, override: ModelOverride | undefined, levels: ModelThinkingLevel[]): ModelThinkingLevel | undefined {
+	const configured = configuredThinking(override)?.find((level) => levels.includes(level));
+	if (configured) return configured;
+	if (model.thinkingLevelMap?.off !== null && override?.capabilities?.reasoning !== true) return undefined;
+	const low = clampThinkingLevel({ ...model, reasoning: true }, 'low');
+	return low !== 'off' && levels.includes(low) ? low : levels.find((level) => level !== 'off');
+}
+
+function selectedReasoning(model: Model<Api>, override: ModelOverride | undefined, levels: ModelThinkingLevel[], preferred?: ModelThinkingLevel | null): ModelThinkingLevel | undefined {
+	if (preferred && levels.includes(preferred)) return preferred;
+	return defaultReasoning(model, override, levels) ?? (preferred ? levels[0] : undefined);
+}
+
+function resolveReasoning(model: Model<Api>, override: ModelOverride | undefined, requested?: ModelThinkingLevel | null): ThinkingLevel | undefined {
+	if (requested === null && model.thinkingLevelMap?.off !== null) return undefined;
+	const levels = reasoningLevels(model, override);
+	const level = selectedReasoning(model, override, levels, requested);
 	return level === 'off' ? undefined : level;
 }
 
-function toResponse(message: AssistantMessage): ModelResponse {
+function toResponse(message: AssistantMessage, reportedUsage: ReportedUsage): ModelResponse {
 	if (isContextOverflow(message)) throw new ContextOverflowError(message.errorMessage);
 	if (isRetryableAssistantError(message)) throw new RetryableModelError(message.errorMessage);
 	if (message.stopReason === 'error' || message.stopReason === 'aborted') {
@@ -137,6 +165,7 @@ function toResponse(message: AssistantMessage): ModelResponse {
 		})),
 		stopReason,
 		usage: message.usage,
+		reportedUsage,
 		raw: message,
 	};
 }
@@ -146,6 +175,7 @@ class PiModelStream implements ModelStream {
 		private source: AssistantMessageEventStream,
 		private controller: AbortController,
 		private cleanup: () => void,
+		private readUsage: () => ReportedUsage,
 		private confirmation?: ModelRequestConfirmation,
 	) {}
 
@@ -164,7 +194,7 @@ class PiModelStream implements ModelStream {
 		try {
 			const response = await this.source.result();
 			if (this.confirmation?.failure) throw this.confirmation.failure;
-			return toResponse(response);
+			return toResponse(response, this.readUsage());
 		} finally {
 			this.cleanup();
 		}
@@ -363,6 +393,22 @@ export function createModelService(
 			maxTokens: override?.maxTokens || model?.maxTokens || 0,
 		};
 	};
+	const findModel = (providerId: string, id: string): Model<Api> | undefined => {
+		const model = models.getModel(providerId, id);
+		if (model) return model;
+		// 手填的自定义模型 ID 不在目录里：借该服务商首个模型的元数据，只换 id。
+		const template = models.getProviders().find((entry) => entry.id === providerId)?.getModels()[0];
+		return template && { ...template, id, name: id };
+	};
+	const thinkingOptions: ModelService['thinkingOptions'] = ({ providerId, model: modelId }, preferred) => {
+		syncCustomProviders();
+		const model = findModel(providerId, modelId);
+		if (!model) return { levels: [] };
+		const override = serviceOptions.modelOverrides?.()[providerId]?.[modelId];
+		const levels = reasoningLevels(model, override);
+		const level = selectedReasoning(model, override, levels, preferred);
+		return { levels, level };
+	};
 
 	const stream = (request: ModelRequest): ModelStream => {
 		syncCustomProviders();
@@ -375,13 +421,8 @@ export function createModelService(
 		if (protocol) applyProtocol(request.providerId, protocol);
 		else if (modelProtocol) applyProtocol(request.providerId, '');
 		else restoreProtocol(request.providerId);
-		let model = models.getModel(request.providerId, request.model);
-		if (!model) {
-			// 手填的自定义模型 ID 不在目录里：借该服务商首个模型的元数据，只换 id
-			const template = models.getProviders().find((entry) => entry.id === request.providerId)?.getModels()[0];
-			if (!template) throw new Error(`Unknown model: ${request.providerId}/${request.model}`);
-			model = { ...template, id: request.model, name: request.model };
-		}
+		let model = findModel(request.providerId, request.model);
+		if (!model) throw new Error(`Unknown model: ${request.providerId}/${request.model}`);
 		// 端点覆盖：请求路径只读 model.baseUrl；模型级优先，其次服务商级，最后目录自带
 		const baseUrl = override?.baseUrl?.trim() || serviceOptions.baseUrls?.()[request.providerId]?.trim() || '';
 		if (baseUrl && baseUrl !== model.baseUrl) model = { ...model, baseUrl };
@@ -408,6 +449,7 @@ export function createModelService(
 			controller.signal.throwIfAborted();
 			return transport.fetch(input, init);
 		};
+		const reportedUsage = captureReportedUsage(model.api);
 		const options: SimpleStreamOptions = {
 			signal: controller.signal,
 			maxTokens: override?.maxTokens && request.maxTokens !== undefined
@@ -421,6 +463,7 @@ export function createModelService(
 			// shortcut: SDK total timeout is capped at 24.8 days; remove when SDK supports disabling it.
 			timeoutMs: 2_147_483_647,
 			transport: 'sse',
+			onProviderStreamEvent: reportedUsage.observe,
 			...(isGoogleModel(model) ? {} : { fetch: confirmation ? confirmedFetch : transport.fetch }),
 		};
 		try {
@@ -428,7 +471,7 @@ export function createModelService(
 			const source = confirmation
 				? modelRequestConfirmation.run(confirmation, () => models.streamSimple(model, context, options))
 				: models.streamSimple(model, context, options);
-			return new PiModelStream(source, controller, cleanup, confirmation);
+			return new PiModelStream(source, controller, cleanup, reportedUsage.read, confirmation);
 		} catch (error) {
 			cleanup();
 			throw error;
@@ -437,6 +480,7 @@ export function createModelService(
 
 	return {
 		contextLimits,
+		thinkingOptions,
 		providers: (): ModelProviderInfo[] => {
 			syncCustomProviders();
 			return models.getProviders().map((provider) => ({

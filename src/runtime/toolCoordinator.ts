@@ -18,8 +18,19 @@ export function createToolCoordinator(app: App, executor: ToolExecutor): ToolCoo
 				await ctx.record?.(start);
 				signal.throwIfAborted();
 				ctx.observer.onEvent?.(start);
-				const result = await executor.execute(call, { app, task, signal, permissions, readFiles, readDelivery, cwd, approve });
-				yield { call, result };
+				const started = performance.now();
+				let waiting = 0;
+				const result = await executor.execute(call, { app, task, signal, permissions, readFiles, readDelivery, cwd,
+					approve: approve && (async (approval) => {
+						const requested = performance.now();
+						try {
+							return await approve(approval);
+						} finally {
+							waiting += performance.now() - requested;
+						}
+					}),
+				});
+				yield { call, result: { ...result, durationMs: Math.max(0, performance.now() - started - waiting) } };
 			}
 		},
 	};

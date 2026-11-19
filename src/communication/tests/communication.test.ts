@@ -14,10 +14,13 @@ import { diagnostics } from '../diagnostics';
 import { modelRequestConfirmation } from '../modelRequestConfirmation';
 import { createNodeFetch, modelNodeFetch, nodeFetch } from '../nodeFetch';
 import { createModelService } from '../providers';
+import { conversationMetrics } from '../../interaction/chatMetrics';
 import { providerCategory } from '../../interaction/providerCategories';
 import { groupProviders } from '../../interaction/providerGroups';
 import { providerIcon } from '../../interaction/providerIcons';
 import { applyModelDraft } from '../../interaction/modelDraft';
+import { normalizeSettings } from '../../orchestration/settings/defaults';
+import { chatModelKey, updateChatThinking } from '../../orchestration/settings/thinking';
 import { configureProxy } from '../proxy';
 import type { CommunicationSettings, Transport } from '../../types';
 
@@ -111,6 +114,19 @@ const server = http.createServer((request, response) => {
 			response.write(`data: ${JSON.stringify({ id: 'chat-test', object: 'chat.completion.chunk', created: 1, model: 'test-model', choices: [{ index: 0, delta: { role: 'assistant', content: 'Checking' }, finish_reason: null }] })}\n\n`);
 			response.write(`data: ${JSON.stringify({ id: 'chat-test', object: 'chat.completion.chunk', created: 1, model: 'test-model', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call-1', type: 'function', function: { name: 'weather', arguments: '{"city":"Shenzhen"}' } }] }, finish_reason: null }] })}\n\n`);
 			response.end(`data: ${JSON.stringify({ id: 'chat-test', object: 'chat.completion.chunk', created: 1, model: 'test-model', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\ndata: [DONE]\n\n`);
+			return;
+		}
+		if (url === '/reported-usage/chat/completions') {
+			const { model } = JSON.parse(body) as { model: string };
+			const prompt = model === 'with-zero' ? 0 : 810;
+			const usage = model === 'output-only' ? { completion_tokens: 42 } : {
+				prompt_tokens: prompt, completion_tokens: 42,
+				prompt_tokens_details: { cached_tokens: prompt ? 800 : 0, cache_write_tokens: prompt ? 2 : 0 },
+			};
+			const chunk = { id: 'chat-usage-test', object: 'chat.completion.chunk', created: 1, model };
+			response.writeHead(200, { 'content-type': 'text/event-stream' });
+			response.write(`data: ${JSON.stringify({ ...chunk, choices: [{ index: 0, delta: { role: 'assistant', content: 'Done' }, finish_reason: 'stop' }] })}\n\n`);
+			response.end(`data: ${JSON.stringify({ ...chunk, choices: [], usage })}\n\ndata: [DONE]\n\n`);
 			return;
 		}
 		if (url === '/scan/models') {
@@ -279,7 +295,7 @@ const transport: Transport = {
 	logs: () => [],
 };
 
-function testProvider(api: 'openai-completions' | 'google-generative-ai'): Provider {
+function testProvider(api: 'openai-completions' | 'google-generative-ai', reasoning = false): Provider {
 	const id = api === 'openai-completions' ? 'test-openai' : 'test-google';
 	const providerBaseUrl = api === 'openai-completions' ? `${baseUrl}/openai` : `${baseUrl}/v1beta`;
 	return createProvider({
@@ -287,7 +303,7 @@ function testProvider(api: 'openai-completions' | 'google-generative-ai'): Provi
 		name: id,
 		baseUrl: providerBaseUrl,
 		auth: { apiKey: { name: 'Test key', resolve: async ({ credential }) => ({ auth: { apiKey: credential?.key } }) } },
-		models: [{ id: 'test-model', name: 'Test model', provider: id, baseUrl: providerBaseUrl, api, reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 }],
+		models: [{ id: 'test-model', name: 'Test model', provider: id, baseUrl: providerBaseUrl, api, reasoning, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 }],
 		api: api === 'openai-completions' ? openAI : google,
 	});
 }
@@ -454,6 +470,39 @@ void test('every repeated send checks the confirmed address and hidden URL chang
 	await assert.rejects(send('mock-route-two', 'unconfirmed'), /地址参数已变更/);
 	assert.deepEqual(shown, [address, address]);
 	assert.deepEqual(confirmedRequestBodies, ['one', 'two']);
+});
+
+void test('provider usage distinguishes real zeros, reported totals and missing input', async () => {
+	const providerId = 'usage-test';
+	const service = createModelService(credentials, transport, {
+		customProviders: () => [{ id: providerId, label: 'Usage fixture', baseUrl: `${baseUrl}/reported-usage`,
+			protocol: 'openai-completions', models: ['with-counts', 'output-only', 'with-zero'] }],
+	});
+	async function measure(model: string) {
+		const response = await service.send({ providerId, model, messages: [], tools: [] });
+		const metrics = conversationMetrics([{ taskId: model, turn: 1, status: 'done', pendingCalls: [], messages: [{
+			role: 'assistant', content: response.content, usage: response.usage, reportedUsage: response.reportedUsage,
+			metrics: { endedAt: 10, modelMs: 1000, decodeMs: 500, contextWindow: 1000 },
+		}] }]);
+		return { report: response.reportedUsage, metrics };
+	}
+	const complete = await measure('with-counts');
+	assert.deepEqual(complete.report, { input: 8, cacheRead: 800, cacheWrite: 2, prompt: 810, output: 42 });
+	assert.deepEqual(complete.metrics.context, { prompt: 810, capacity: 1000, remaining: 190, percent: 81 });
+	assert.equal(complete.metrics.usage?.total, 852);
+	const partial = await measure('output-only');
+	assert.deepEqual(partial.report, { output: 42 });
+	assert.equal(partial.metrics.context, undefined);
+	assert.equal(partial.metrics.usage?.total, undefined);
+	assert.equal(partial.metrics.usage?.input, undefined);
+	assert.equal(partial.metrics.usage?.cacheRead, undefined);
+	assert.equal(partial.metrics.usage?.cacheWrite, undefined);
+	assert.equal(partial.metrics.usage?.output, 42);
+	assert.equal(partial.metrics.speed, 84);
+	const zero = await measure('with-zero');
+	assert.equal(zero.metrics.context?.percent, 0);
+	assert.equal(zero.metrics.usage?.input, 0);
+	assert.equal(zero.metrics.usage?.hit, undefined);
 });
 
 void test('Base URL override is used for every model of the provider', async () => {
@@ -672,6 +721,66 @@ void test('Model settings control the actual tools, reasoning and output limit s
 	await send();
 	assert.equal(openAIBody.reasoning_effort, undefined);
 	assert.ok(Array.isArray(openAIBody.tools));
+});
+
+void test('chat effort clamps to the allow-list, remembers each model, and drives the HTTP request', async () => {
+	const providerId = 'effort-test';
+	const first = { providerId, model: 'first-model' };
+	const second = { providerId, model: 'second-model' };
+	const disabled = { providerId, model: 'disabled-model' };
+	const firstKey = chatModelKey(providerId, first.model);
+	const secondKey = chatModelKey(providerId, second.model);
+	const settings = normalizeSettings({
+		...first, providerModels: { [providerId]: [first.model, second.model, disabled.model] },
+		thinkingByModel: { [firstKey]: 'xhigh', [secondKey]: 'high' },
+		modelOverrides: { [providerId]: {
+			[first.model]: { capabilities: { reasoning: true }, thinkingLevels: ['medium', 'off', 'low', 'xhigh'] },
+			[second.model]: { capabilities: { reasoning: true }, thinkingLevels: ['low', 'high'] },
+			[disabled.model]: { capabilities: { reasoning: false }, thinkingLevels: ['high'] },
+		} },
+	});
+	const service = createModelService(credentials, transport, {
+		customProviders: () => [{ id: providerId, label: 'Custom', baseUrl: `${baseUrl}/openai`,
+			protocol: 'openai-completions', models: settings.providerModels[providerId] ?? [] }],
+		modelOverrides: () => settings.modelOverrides,
+	});
+	assert.deepEqual(service.thinkingOptions(first, 'xhigh'), { levels: ['medium', 'off', 'low'], level: 'medium' });
+	assert.deepEqual(service.thinkingOptions(second, 'off'), { levels: ['low', 'high'], level: 'low' });
+	assert.deepEqual(service.thinkingOptions(disabled).levels, []);
+	settings.thinkingByModel = updateChatThinking(settings, first, service.thinkingOptions);
+	assert.deepEqual(settings.thinkingByModel, { [firstKey]: 'medium', [secondKey]: 'high' });
+	await service.send({ ...first, messages: [], tools: [], reasoning: settings.thinkingByModel[firstKey] });
+	assert.equal(openAIBody.reasoning_effort, 'medium');
+	settings.thinkingByModel = updateChatThinking(settings, { ...first, thinkingLevel: 'off' }, service.thinkingOptions);
+	assert.equal(normalizeSettings(settings).thinkingByModel[firstKey], 'off');
+	await service.send({ ...first, messages: [], tools: [], reasoning: settings.thinkingByModel[firstKey] });
+	assert.equal(openAIBody.reasoning_effort, undefined);
+	await service.send({ ...second, messages: [], tools: [], reasoning: settings.thinkingByModel[secondKey] });
+	assert.equal(openAIBody.reasoning_effort, 'high');
+	await service.send({ ...disabled, messages: [], tools: [], reasoning: null });
+	assert.equal(openAIBody.reasoning_effort, undefined);
+});
+
+void test('optional reasoning has an off choice without setting an effort, and required reasoning ignores an old off override', async () => {
+	const optional = { providerId: 'test-openai', model: 'test-model' };
+	const required = { providerId: 'zai-coding-cn', model: 'glm-5.3' };
+	const service = createModelService(credentials, transport, {
+		additionalProviders: [testProvider('openai-completions', true)],
+		baseUrls: () => ({ [required.providerId]: `${baseUrl}/openai` }),
+		modelOverrides: () => ({ [required.providerId]: { [required.model]: {
+			capabilities: { reasoning: false }, thinkingLevels: ['off'],
+		} } }),
+	});
+	const options = service.thinkingOptions(optional);
+	assert.equal(options.level, undefined);
+	assert.equal(options.levels[0], 'off');
+	await service.send({ ...optional, messages: [], tools: [], reasoning: options.level ?? null });
+	assert.equal(openAIBody.reasoning_effort, undefined);
+	const saved = service.thinkingOptions(required, 'high');
+	assert.ok(!saved.levels.includes('off') && saved.levels.includes('high'));
+	assert.equal(saved.level, 'high');
+	await service.send({ ...required, messages: [], tools: [], reasoning: saved.level });
+	assert.equal(openAIBody.reasoning_effort, 'high');
 });
 
 void test('New provider model configuration updates only an isolated draft', () => {

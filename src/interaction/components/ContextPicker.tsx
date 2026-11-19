@@ -1,9 +1,11 @@
 import { basename, isAbsolute } from 'node:path';
-import { FuzzySuggestModal, TFile, TFolder } from 'obsidian';
+import { FuzzySuggestModal, Platform, TFile, TFolder } from 'obsidian';
 import type { App, TAbstractFile } from 'obsidian';
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { NoteRef, NoteSelection } from '../../types';
-import { composerShortcut } from '../composerKeyboard';
+import { composerShortcut, isImeComposing } from '../composerKeyboard';
+import { externalReferenceAt, pickExternalReference } from '../externalReferencePicker';
+import type { ExternalReferenceMode } from '../externalReferencePicker';
 import { uiText } from '../uiText';
 import ChatIcon from './ChatIcon';
 
@@ -39,7 +41,6 @@ export interface ContextPickerProps {
 	disabled: boolean;
 	onAdd: (ref: NoteRef) => void;
 	onRemove: (path: string) => void;
-	onAttachSelection: () => boolean;
 	onRemoveSelection: () => void;
 	onFocusInput?: () => void;
 }
@@ -129,34 +130,65 @@ export function ContextChips({ refs, selection, disabled, onRemove, onRemoveSele
 	);
 }
 
-interface ContextActionsProps extends Pick<ContextPickerProps, 'onAttachSelection' | 'disabled'> {
+interface ContextActionsProps extends Pick<ContextPickerProps, 'onAdd' | 'disabled'> {
 	onPick: () => void;
-	selectionOnly: boolean;
-	externalOpen: boolean;
-	externalId: string;
-	onToggleExternal: (trigger: HTMLButtonElement | null) => void;
+	onFocusInput: () => void;
 }
 
-export function ContextActions({ onPick, onAttachSelection, disabled, selectionOnly, externalOpen, externalId, onToggleExternal }: ContextActionsProps) {
+type ContextMenu = 'closed' | 'open' | 'outside' | 'picking' | ExternalReferenceMode;
+
+export function ContextActions({ onPick, onAdd, disabled, onFocusInput }: ContextActionsProps) {
 	const text = uiText();
 	const trigger = useRef<HTMLButtonElement>(null);
+	const pending = useRef<symbol | null>(null);
 	const id = useId();
-	const [menu, setMenu] = useState<'closed' | 'open' | 'no-selection'>('closed');
+	const [menu, setMenu] = useState<ContextMenu>('closed');
 	const menuOpen = menu !== 'closed' && !disabled;
+	const externalOpen = !Platform.isMacOS && menu !== 'open' && menuOpen;
 
-	useEffect(() => setMenu('closed'), [disabled, selectionOnly]);
+	useLayoutEffect(() => () => { pending.current = null; }, [disabled]);
+	useEffect(() => setMenu('closed'), [disabled]);
+
+	function complete(ref?: NoteRef) {
+		if (ref) onAdd(ref);
+		setMenu('closed');
+		onFocusInput();
+	}
+
+	async function pickOutside(mode: ExternalReferenceMode, title: string) {
+		const document = trigger.current?.ownerDocument;
+		if (!document || disabled || pending.current) return;
+		const token = Symbol();
+		pending.current = token;
+		setMenu('picking');
+		let ref: NoteRef | null;
+		try {
+			ref = await pickExternalReference(document, mode, title);
+		} catch {
+			if (pending.current === token) {
+				pending.current = null;
+				setMenu(mode);
+			}
+			return;
+		}
+		if (pending.current === token) {
+			pending.current = null;
+			complete(ref ?? undefined);
+		}
+	}
 
 	return (
 		<div className="scribe-context-actions" onBlur={(event) => {
-			if (menuOpen && !event.currentTarget.contains(event.relatedTarget)) setMenu('closed');
+			if (menuOpen && !pending.current && !event.currentTarget.contains(event.relatedTarget)) setMenu('closed');
 		}} onKeyDown={(event) => {
 			if (!menuOpen || event.defaultPrevented || composerShortcut(event.nativeEvent) !== 'escape') return;
 			event.preventDefault();
 			event.stopPropagation();
+			if (pending.current) return;
 			setMenu('closed');
 			trigger.current?.focus({ preventScroll: true });
 		}}>
-			<button type="button" ref={trigger} className="scribe-compose-action" disabled={disabled}
+			<button type="button" ref={trigger} className="scribe-compose-action" disabled={disabled || menu === 'picking'}
 				aria-label={text.chatAddContext} title={text.chatAddContext}
 				aria-expanded={menuOpen} aria-controls={menuOpen ? id : undefined}
 				onClick={(event) => {
@@ -164,63 +196,67 @@ export function ContextActions({ onPick, onAttachSelection, disabled, selectionO
 					setMenu(menuOpen ? 'closed' : 'open');
 				}}><ChatIcon name="plus" /></button>
 			{menuOpen && <div className="scribe-context-popover" id={id} role="group" aria-label={text.chatAddContext}>
-				{!selectionOnly && <button type="button" onClick={() => {
+				<button type="button" disabled={menu === 'picking'} onClick={() => {
 					setMenu('closed');
 					onPick();
 				}}>
 					<ChatIcon name="folder-open" />
-					<span>{text.chatPickVaultItem}</span>
-				</button>}
-				<button type="button" onClick={() => setMenu(onAttachSelection() ? 'closed' : 'no-selection')}>
-					<ChatIcon name="text-select" />
-					<span>{text.chatAttachSelection}</span>
+					<span>{text.chatVaultReference}</span>
 				</button>
-				{!selectionOnly && <button type="button" aria-expanded={externalOpen}
-					aria-controls={externalOpen ? externalId : undefined}
-					onClick={() => { setMenu('closed'); onToggleExternal(trigger.current); }}>
+				<button type="button" disabled={menu === 'picking'} aria-expanded={Platform.isMacOS ? undefined : externalOpen}
+					aria-controls={externalOpen ? `${id}-outside` : undefined}
+					onClick={() => {
+						if (Platform.isMacOS) void pickOutside('path', text.chatAddExternalPath);
+						else setMenu(externalOpen ? 'open' : 'outside');
+					}}>
 					<ChatIcon name="folder-plus" />
 					<span>{text.chatAddExternalPath}</span>
-				</button>}
-				{menu === 'no-selection' && <div className="scribe-chat-error" role="alert">{text.chatSelectionUnavailable}</div>}
+					{!Platform.isMacOS && <ChatIcon name={externalOpen ? 'chevron-down' : 'chevron-right'} />}
+				</button>
+				{menu === 'path' && <ExternalPathFallback mode={menu} onAdd={complete} />}
+				{externalOpen && <div className="scribe-context-outside" id={`${id}-outside`}>
+					<button type="button" disabled={menu === 'picking'} onClick={() => void pickOutside('file', text.chatPickExternalFile)}>
+						<ChatIcon name="file-text" /><span>{text.chatPickExternalFile}</span>
+					</button>
+					{menu === 'file' && <ExternalPathFallback mode={menu} onAdd={complete} />}
+					<button type="button" disabled={menu === 'picking'} onClick={() => void pickOutside('folder', text.chatPickExternalFolder)}>
+						<ChatIcon name="folder" /><span>{text.chatPickExternalFolder}</span>
+					</button>
+					{menu === 'folder' && <ExternalPathFallback mode={menu} onAdd={complete} />}
+				</div>}
 			</div>}
 		</div>
 	);
 }
 
-export function ExternalPath({ onAdd, disabled, id }: Pick<ContextPickerProps, 'onAdd' | 'disabled'> & { id: string }) {
+function ExternalPathFallback({ mode, onAdd }: Pick<ContextPickerProps, 'onAdd'> & { mode: ExternalReferenceMode }) {
 	const text = uiText();
 	const [path, setPath] = useState('');
-	const [kind, setKind] = useState<'file' | 'folder'>('file');
 	const [invalidPath, setInvalidPath] = useState(false);
+	const id = useId();
 	const pathInput = useRef<HTMLInputElement>(null);
 	useEffect(() => pathInput.current?.focus(), []);
 
-	function addPath() {
+	async function addPath() {
 		const entered = path.trim();
-		if (!entered) return;
-		pathInput.current?.focus();
+		const input = pathInput.current;
+		if (!entered || !input) return;
+		input.focus();
 		const firstCharacter = entered[0];
 		const fullPath = firstCharacter && ['"', "'"].includes(firstCharacter) && entered.endsWith(firstCharacter)
 			? entered.slice(1, -1)
 			: entered;
-		if (!isAbsolute(fullPath)) {
-			setInvalidPath(true);
-			return;
+		try {
+			const ref = await externalReferenceAt(fullPath, mode);
+			if (pathInput.current === input && input.value.trim() === entered) onAdd(ref);
+		} catch {
+			if (pathInput.current === input && input.value.trim() === entered) setInvalidPath(true);
 		}
-		onAdd({ path: fullPath, kind });
-		setPath('');
-		setInvalidPath(false);
 	}
 
 	return (
-		<form id={id} className="scribe-context-path" aria-label={text.chatAddExternalPath} onSubmit={(event) => {
-			event.preventDefault();
-			event.stopPropagation();
-			if (!disabled) addPath();
-		}} onKeyDown={(event) => {
-			if (event.key === 'Enter') event.stopPropagation();
-		}}>
-			<div>{text.chatScopeDescription}</div>
+		<div className="scribe-context-path">
+			<div className="scribe-chat-error" role="alert" id={`${id}-failed`}>{text.chatExternalPickerFailed}</div>
 			<input
 				ref={pathInput}
 				type="text"
@@ -228,26 +264,19 @@ export function ExternalPath({ onAdd, disabled, id }: Pick<ContextPickerProps, '
 				placeholder={text.chatAbsolutePath}
 				aria-label={text.chatAbsolutePath}
 				aria-invalid={invalidPath}
-				aria-describedby={invalidPath ? `${id}-error` : undefined}
-				disabled={disabled}
+				aria-describedby={invalidPath ? `${id}-failed ${id}-error` : `${id}-failed`}
 				onChange={(event) => {
 					setPath(event.currentTarget.value);
 					setInvalidPath(false);
 				}}
+				onKeyDown={(event) => {
+					if (event.key !== 'Enter' || isImeComposing(event.nativeEvent)) return;
+					event.preventDefault();
+					if (composerShortcut(event.nativeEvent) === 'send') void addPath();
+				}}
 			/>
-			<div className="scribe-chat-actions">
-				<select
-					value={kind}
-					onChange={(event) => setKind(event.currentTarget.value === 'folder' ? 'folder' : 'file')}
-					aria-label={text.chatPathKind}
-					disabled={disabled}
-				>
-					<option value="file">{text.chatFile}</option>
-					<option value="folder">{text.chatFolder}</option>
-				</select>
-				<button type="submit" disabled={disabled || !path.trim()}>{text.add}</button>
-			</div>
+			<button type="button" disabled={!path.trim()} onClick={() => void addPath()}>{text.add}</button>
 			{invalidPath && <div id={`${id}-error`} className="scribe-chat-error" role="alert">{text.chatInvalidPath}</div>}
-		</form>
+		</div>
 	);
 }

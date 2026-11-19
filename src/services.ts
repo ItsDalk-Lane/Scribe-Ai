@@ -61,7 +61,7 @@ export function createServices(app: App, settings: ScribeSettings, manifest: Plu
 	const pluginDirectory = manifest.dir ?? join(app.vault.configDir, 'plugins', manifest.id);
 	const conversations = createConversationStore(resolve(cwd, pluginDirectory, 'conversations'));
 	const orchestration: OrchestrationLayer = {
-		sessions: createSessionController(app, settings, runtime, conversations),
+		sessions: createSessionController(app, settings, runtime, conversations, communication.models.thinkingOptions),
 		context,
 		skills: createSkillRegistry(),
 		conversations,

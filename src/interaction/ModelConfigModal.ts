@@ -1,5 +1,5 @@
 import { App, ButtonComponent, DropdownComponent, Modal, Notice } from 'obsidian';
-import type { ThinkingLevel } from '@earendil-works/pi-ai';
+import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 import { createCredentialStore } from '../communication/credentials';
 import { createModelService } from '../communication/providers';
 import type ScribeAiPlugin from '../main';
@@ -9,7 +9,7 @@ import type { UiText } from './uiText';
 
 const CONTEXT_PRESETS = [64000, 128000, 200000, 256000, 512000, 1000000];
 const OUTPUT_PRESETS = [8000, 16000, 32000, 64000, 128000, 256000];
-const DEFAULT_THINKING: ThinkingLevel[] = ['minimal', 'low', 'medium', 'high'];
+const DEFAULT_THINKING: ModelThinkingLevel[] = ['minimal', 'low', 'medium', 'high'];
 const DEFAULT_CONTEXT = 128000;
 const DEFAULT_OUTPUT = 8000;
 type Caps = { reasoning: boolean; tools: boolean };
@@ -46,8 +46,9 @@ export class ScribeModelConfigModal extends Modal {
 	private draftContext: number;
 	private draftMaxTokens: number;
 	private caps: Caps;
-	private draftThinking: ThinkingLevel[];
-	private defaultThinking: ThinkingLevel[];
+	private draftThinking: ModelThinkingLevel[];
+	private defaultThinking: ModelThinkingLevel[];
+	private availableThinking: ModelThinkingLevel[];
 	private catalog?: ModelProviderInfo['models'][number];
 	private defaultBaseUrl: string;
 	private defaultProtocol: string;
@@ -87,8 +88,9 @@ export class ScribeModelConfigModal extends Modal {
 		};
 		const levels = this.catalog?.thinkingLevels;
 		this.defaultThinking = levels?.length ? levels : DEFAULT_THINKING;
+		this.availableThinking = this.catalog?.requiresReasoning ? this.defaultThinking : ['off', ...this.defaultThinking];
 		this.draftThinking = (override?.thinkingLevels ?? (override?.thinkingLevel ? [override.thinkingLevel] : this.defaultThinking))
-			.filter((level) => this.defaultThinking.includes(level));
+			.filter((level) => this.availableThinking.includes(level));
 	}
 
 	onOpen(): void {
@@ -208,22 +210,23 @@ export class ScribeModelConfigModal extends Modal {
 		const picker = container.createDiv({ cls: 'scribe-multi-select' });
 		const trigger = picker.createEl('button', { cls: 'scribe-multi-select-trigger', attr: { type: 'button' } });
 		const renderTrigger = () => {
-			trigger.setText(this.draftThinking.length ? this.draftThinking.join(' / ') : this.text.thinkingLevel);
+			trigger.setText(this.draftThinking.length
+				? this.draftThinking.map((level) => this.text.thinkingLevelNames[level]).join(' / ') : this.text.thinkingLevel);
 		};
 		renderTrigger();
 		const panel = picker.createDiv({ cls: 'scribe-multi-select-panel scribe-hidden' });
-		for (const level of this.defaultThinking) {
+		for (const level of this.availableThinking) {
 			const row = panel.createEl('label', { cls: 'scribe-multi-select-option' });
 			const checkbox = row.createEl('input', { attr: { type: 'checkbox' } });
 			checkbox.checked = this.draftThinking.includes(level);
-			row.createSpan({ text: level });
+			row.createSpan({ text: this.text.thinkingLevelNames[level] });
 			checkbox.addEventListener('change', () => {
 				if (!checkbox.checked && this.draftThinking.length === 1) {
 					checkbox.checked = true;
 					return;
 				}
 				this.draftThinking = checkbox.checked
-					? this.defaultThinking.filter((item) => this.draftThinking.includes(item) || item === level)
+					? this.availableThinking.filter((item) => this.draftThinking.includes(item) || item === level)
 					: this.draftThinking.filter((item) => item !== level);
 				renderTrigger();
 			});
