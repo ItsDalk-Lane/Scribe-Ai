@@ -5,7 +5,6 @@ import type {
 	Credential,
 	CredentialStore as PiCredentialStore,
 	LoginOptions,
-	ModelThinkingLevel,
 	ThinkingLevel,
 	Usage,
 } from '@earendil-works/pi-ai';
@@ -95,6 +94,12 @@ export interface TaskRequest {
 	instruction: string;
 	refs: NoteRef[];
 	selection?: NoteSelection;
+	chatQuotes?: string[];
+}
+
+export interface QueuedMessage {
+	id: string;
+	request: TaskRequest;
 }
 
 export type TaskStatus =
@@ -200,7 +205,7 @@ export interface ModelRequest {
 	maxTokens?: number;
 	temperature?: number;
 	/** null 固定为不请求推理档位，缺省兼容旧请求的默认行为。 */
-	reasoning?: ModelThinkingLevel | null;
+	reasoning?: string | null;
 	sessionId?: string;
 	maxRetries?: number;
 }
@@ -251,13 +256,14 @@ export type RunEvent =
 	| { type: 'state'; state: RunState }
 	| { type: 'turn-start'; turn: number }
 	| { type: 'model-retry'; messageId: string; waiting: boolean; reason?: 'context' }
+	| { type: 'model-intent'; intent: string }
 	| { type: 'text-delta'; messageId: string; contentIndex: number; text: string }
 	| { type: 'thinking-delta'; messageId: string; contentIndex: number; text: string }
 	| { type: 'thinking-end'; messageId: string; contentIndex: number; durationMs: number }
 	| { type: 'tool-start'; call: ToolCall }
 	| { type: 'tool-end'; call: ToolCall; result: ToolResult; skipped?: boolean };
 
-export type RunCheckpoint = Exclude<RunEvent, { type: 'text-delta' | 'thinking-delta' | 'thinking-end' | 'model-retry' }>;
+export type RunCheckpoint = Exclude<RunEvent, { type: 'text-delta' | 'thinking-delta' | 'thinking-end' | 'model-retry' | 'model-intent' }>;
 
 export interface SavedRetry {
 	beforeMessage: number;
@@ -333,9 +339,11 @@ export interface ModelOverride {
 		structuredOutput?: boolean;
 	};
 	/** 该模型开放的推理档位，供聊天界面的档位选择器使用 */
-	thinkingLevels?: ModelThinkingLevel[];
+	thinkingLevels?: string[];
+	/** 新配置保留用户填写的英文值，旧配置沿用原有模型映射。 */
+	literalThinkingLevels?: true;
 	/** 旧版单档位字段，仅用于迁移读取 */
-	thinkingLevel?: ModelThinkingLevel;
+	thinkingLevel?: string;
 }
 
 export interface ModelProviderInfo {
@@ -354,9 +362,9 @@ export interface ModelProviderInfo {
 
 export interface ModelService {
 	providers(): ModelProviderInfo[];
-	thinkingOptions(this: void, model: Pick<ModelRequest, 'providerId' | 'model'>, preferred?: ModelThinkingLevel): {
-		levels: ModelThinkingLevel[];
-		level?: ModelThinkingLevel;
+	thinkingOptions(this: void, model: Pick<ModelRequest, 'providerId' | 'model'>, preferred?: string): {
+		levels: string[];
+		level?: string;
 	};
 	contextLimits?(model: RunContext['model']): Pick<ProviderModelInfo, 'contextWindow' | 'maxTokens'> | undefined;
 	login(providerId: string, interaction: AuthInteraction, options?: LoginOptions): Promise<Credential>;
@@ -424,6 +432,8 @@ export interface ToolLayer {
 
 /* ───────────── 第二层：编排层接口 ───────────── */
 
+export class MissingConversationError extends Error {}
+
 export interface ConversationStore {
 	list(): Promise<ConversationSummary[]>;
 	load(id: string): Promise<ConversationSnapshot>;
@@ -431,7 +441,11 @@ export interface ConversationStore {
 	delete(id: string): Promise<void>;
 	lastOpened(): Promise<string | undefined>;
 	setLastOpened(id: string): Promise<void>;
-	append(id: string, entries: ConversationEntry[]): Promise<void>;
+	append(id: string, entries: ConversationEntry[], consumption?: { messages: QueuedMessage[]; fifo?: boolean }): Promise<void>;
+	getQueued(id: string): Promise<QueuedMessage[]>;
+	enqueue(id: string, message: QueuedMessage): Promise<void>;
+	editQueued(id: string, messageId: string, instruction: string): Promise<void>;
+	deleteQueued(id: string, messageId: string): Promise<void>;
 	fork(id: string, taskId: string): Promise<ConversationSnapshot>;
 	replaceFrom(id: string, taskId: string, entries: ConversationEntry[]): Promise<void>;
 }
@@ -443,8 +457,11 @@ export interface RunStep {
 }
 
 export type ConversationEntry =
-	| { type: 'start'; task: Task; model: RunContext['model'] }
-	| { type: 'messages'; taskId: string; messages: Message[]; step?: RunStep }
+	| { type: 'queue-add'; message: QueuedMessage }
+	| { type: 'queue-edit'; messageId: string; instruction: string }
+	| { type: 'queue-delete'; messageId: string }
+	| { type: 'start'; task: Task; model: RunContext['model']; consumedQueueIds?: string[] }
+	| { type: 'messages'; taskId: string; messages: Message[]; step?: RunStep; consumedQueueIds?: string[] }
 	| { type: 'step'; taskId: string; step: RunStep }
 	| { type: 'retry'; taskId: string; retry: SavedRetry }
 	| { type: 'finish'; taskId: string; status: TerminalRunStatus; turn: number; error?: string; partial?: string; resumed?: boolean; finishedAt?: number };
@@ -462,6 +479,7 @@ export interface SavedRun {
 export interface ConversationSnapshot {
 	id: string;
 	runs: SavedRun[];
+	queue?: QueuedMessage[];
 }
 
 export interface ConversationSummary {
@@ -470,18 +488,36 @@ export interface ConversationSummary {
 	updatedAt: number;
 }
 
+export interface SessionRunOptions {
+	model?: RunContext['model'];
+	rememberConversation?: boolean;
+}
+
 export interface SessionController {
 	createConversation(): Promise<string>;
 	listConversations(): Promise<ConversationSummary[]>;
 	openConversation(id?: string): Promise<ConversationSnapshot | null>;
-	forkConversation(id: string, taskId: string): Promise<ConversationSnapshot>;
+	forkConversation(id: string, taskId: string, rememberConversation?: boolean): Promise<ConversationSnapshot>;
 	renameConversation(id: string, title: string): Promise<void>;
 	deleteConversation(id: string): Promise<void>;
-	submit(request: TaskRequest, observer?: RunObserver, replaceFromTaskId?: string): { taskId: string; result: Promise<RunState> };
-	resume(conversationId: string, taskId: string, observer?: RunObserver): { taskId: string; result: Promise<RunState> };
+	createSideChat(parentRuns: SavedRun[]): SideChat;
+	submit(request: TaskRequest, observer?: RunObserver, replaceFromTaskId?: string, options?: SessionRunOptions): { taskId: string; result: Promise<RunState> };
+	submitQueued(message: QueuedMessage, observer: RunObserver, onStarted: () => void, options?: SessionRunOptions): { taskId: string; result: Promise<RunState> };
+	canSteer(conversationId: string, taskId: string): boolean;
+	steer(taskId: string, message: QueuedMessage): Promise<void>;
+	resume(conversationId: string, taskId: string, observer?: RunObserver, options?: SessionRunOptions): { taskId: string; result: Promise<RunState> };
 	cancel(taskId: string): Promise<void>;
 	pause(taskId: string): void;
 	dispose(): void;
+}
+
+export interface SideChat {
+	id: string;
+	submit(draft: Pick<TaskRequest, 'instruction' | 'chatQuotes'> & { refs?: NoteRef[]; model?: RunContext['model'] }, observer?: RunObserver): {
+		taskId: string; request: TaskRequest; model: SavedRun['model']; result: Promise<RunState>;
+	};
+	stop(): void;
+	close(): void;
 }
 
 export interface SkillInfo {
@@ -498,17 +534,20 @@ export interface PermissionPolicy {
 	canRead(path: string): boolean;
 	readLines?(path: string): [number, number] | undefined;
 	canWrite(path: string): boolean;
-	canCallTool(tool: ToolSpec): boolean;
+	canCallTool(tool: ToolDefinition): boolean;
 	canSendOutbound(): boolean;
 }
 
 export interface RunContext {
 	task: Task;
+	sideChat?: boolean;
 	permissions: PermissionPolicy;
 	cwd: string;
 	model: Pick<ModelRequest, 'providerId' | 'model' | 'reasoning'>;
 	checkModel?: () => void;
 	resumeReview?: ResumeReview;
+	takeSteering?: () => readonly QueuedMessage[];
+	rejectSteering?: (ids: string[]) => void;
 	signal: AbortSignal;
 	observer: RunObserver;
 	readFiles: Map<string, string>;
@@ -590,7 +629,7 @@ export interface ScribeSettings {
 	/** providerId → modelId → 该模型的覆盖配置 */
 	modelOverrides: Record<string, Record<string, ModelOverride>>;
 	/** [服务商 ID, 模型 ID] 编码为键，记住各模型上次选中的推理档位。 */
-	thinkingByModel: Record<string, ModelThinkingLevel>;
+	thinkingByModel: Record<string, string>;
 	/** 自建服务商（自定义端点 / 本地模型）：label、地址与协议由用户填写 */
 	customProviders: Record<string, CustomProviderSettings>;
 	communication: CommunicationSettings;

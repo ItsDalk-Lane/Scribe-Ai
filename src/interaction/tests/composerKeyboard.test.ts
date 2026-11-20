@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { composerShortcut } from '../composerKeyboard';
+import { composerShortcut, sideChatCommand } from '../composerKeyboard';
 
 const key = (name: string, modifiers?: Partial<KeyboardEvent>) => ({
 	key: name, isComposing: false, repeat: false,
@@ -28,4 +28,11 @@ void test('Escape skips repeat, IME and modified presses', () => {
 	for (const modifiers of [{ repeat: true }, { isComposing: true }, { shiftKey: true }, { keyCode: 229 }]) {
 		assert.equal(composerShortcut(key('Escape', modifiers)), undefined);
 	}
+});
+
+void test('side chat recognizes a standalone slash command with an optional draft', () => {
+	assert.equal(sideChatCommand(' /side '), '');
+	assert.equal(sideChatCommand('/side  请解释\n这段文字'), '请解释\n这段文字');
+	assert.equal(sideChatCommand('/sidebar'), null);
+	assert.equal(sideChatCommand('请解释 /side'), null);
 });

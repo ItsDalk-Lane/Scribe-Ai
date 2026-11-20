@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { Message, RunStatus } from '../../types';
 import { parseConversationEntry, replayConversation } from '../../orchestration/storage/taskStore';
 import { createTask } from '../../orchestration/taskManager';
+import { latestIncompleteReply } from '../../runtime/continuationText';
 import { conversationMetrics, messageTime } from '../chatMetrics';
 import { chatTurnContent, chatTurnPreview } from '../chatTurnContent';
 import { emptyExecution, restoreExecution, updateExecution } from '../context';
@@ -44,17 +45,21 @@ void test('round and conversation metrics use measured timings and provider toke
 	assert.deepEqual(metrics, {
 		rounds: 2, count: 2, modelMs: 5000, toolMs: 137, lagMs: 750, speed: 75000 / 3500,
 		usage: { input: 300, cacheRead: 500, cacheWrite: 51, output: 75, total: 926,
-			hit: 500 / 851, cost: 1, missing: false },
-		context: { prompt: 401, capacity: 1000, remaining: 599, percent: 41 },
+			hit: 500 / 851, cost: 1 },
+		context: { prompt: 401, capacity: 1000, remaining: 599, percent: 40.1 },
 	});
 	const noUsage: Message = { ...next, usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, totalTokens: 0, cost: metadata.usage.cost } };
 	assert.equal(conversationMetrics([state([noUsage])]).usage, undefined);
 	const missing = conversationMetrics([first, { ...second, messages: [noUsage] }]);
 	assert.equal(missing.usage?.total, 475);
-	assert.equal(missing.usage.missing, true);
+	assert.equal(missing.usage.partialTotal, true);
 	assert.equal(missing.context, undefined);
 	assert.equal(missing.speed, undefined);
 	assert.equal(conversationMetrics([state([{ ...output, metrics: undefined }])]).speed, undefined);
+	const precise = conversationMetrics([state([{ role: 'assistant', content: 'Reply',
+		reportedUsage: { prompt: 4630 }, metrics: { endedAt: 8000, modelMs: 2500, contextWindow: 1_000_000 },
+	}])]);
+	assert.equal(precise.context?.percent, 0.47);
 });
 
 void test('turn navigation previews the displayed prompt and last reply without exposing other activity', () => {
@@ -205,6 +210,20 @@ void test('only the confirmed reply leaves the timeline, including its saved con
 	assert.equal(chatTurnPreview(done).reply, '这是回答。');
 	const legacy = restoreExecution(saved([{ ...first, truncated: undefined, toolCalls: [] }, second]));
 	assert.equal(chatTurnContent(legacy).answer, '这是回答。');
+});
+
+void test('a steering instruction within a continued reply preserves the original chat turn and its full answer', () => {
+	const prompt: Message = { role: 'user', content: '查看示例' };
+	const first: Message = { role: 'assistant', id: 'assistant:task:1', content: '第一段。', truncated: true };
+	const instruction: Message = { role: 'user', id: 'steer:queue-id', content: '再补一句。' };
+	const last: Message = { role: 'assistant', id: 'assistant:task:2', content: '第二段。' };
+	assert.equal(latestIncompleteReply([prompt, first, instruction]), '第一段。');
+	assert.equal(latestIncompleteReply([prompt, first, instruction, { ...last, incomplete: true }]), '第一段。第二段。');
+	assert.equal(latestIncompleteReply([prompt, first, instruction, last]), undefined);
+	const run = saved([prompt, first, instruction, last]);
+	const reopened = restoreExecution(run);
+	assert.equal(chatTurnContent(reopened).answer, '第一段。第二段。');
+	assert.deepEqual(chatTurnPreview(reopened, run.request.instruction), { prompt: '查看示例', reply: '第一段。第二段。' });
 });
 
 void test('restores retries at their original position and keeps a notice-only failure flat', () => {

@@ -1,10 +1,9 @@
-import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 import type { ModelRequest, ResumeReview, RunCheckpoint, RunObserver, SavedRun, TaskRequest } from '../types';
 
 export const pauseRun = Symbol('pause run');
 
 export class ResumeThinkingUnavailable extends Error {
-	constructor(readonly level: ModelThinkingLevel) {
+	constructor(readonly level: string) {
 		super(`Saved thinking level is unavailable: ${level}`);
 	}
 }

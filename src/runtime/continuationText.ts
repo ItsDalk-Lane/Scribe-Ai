@@ -1,11 +1,18 @@
 import type { Message } from '../types';
 
+export function isSteeringMessage(message: Message | undefined): boolean {
+	return message?.role === 'user' && message.id?.startsWith('steer:') === true;
+}
+
 export function latestIncompleteReply(messages: Message[]): string | undefined {
-	const continues = (message: Message | undefined) => message?.role === 'assistant' && (message.incomplete || message.truncated);
-	if (!continues(messages.at(-1))) return undefined;
-	let index = messages.length - 1;
-	while (index > 0 && continues(messages[index - 1])) index--;
-	return messages.slice(index).map(({ content }) => content).join('');
+	const fragments: string[] = [];
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index]!;
+		if (isSteeringMessage(message)) continue;
+		if (message.role !== 'assistant' || (!message.incomplete && !message.truncated)) break;
+		fragments.push(message.content);
+	}
+	return fragments.length ? fragments.reverse().join('') : undefined;
 }
 
 export function newContinuationText(previous: string, next: string): string {

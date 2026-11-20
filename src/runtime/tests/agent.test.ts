@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -7,18 +7,20 @@ import type { TestContext } from 'node:test';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { App } from 'obsidian';
 import { createModelService } from '../../communication/providers';
-import { restoreExecution } from '../../interaction/context';
+import { emptyExecution, restoreExecution, updateExecution } from '../../interaction/context';
 import { createContextBuilder } from '../../orchestration/context/contextBuilder';
+import { createRunContext } from '../../orchestration/runContext';
 import { createSessionController } from '../../orchestration/sessionController';
 import { normalizeSettings } from '../../orchestration/settings/defaults';
 import { createConversationStore } from '../../orchestration/storage/conversationStore';
+import { createTask } from '../../orchestration/taskManager';
 import { createToolLayer, createToolRegistry } from '../../tools';
 import { createToolExecutor } from '../../tools/executor';
 import { readTools } from '../../tools/readTools';
 import { writeTools } from '../../tools/writeTools';
-import { RetryableModelError } from '../../types';
+import { ContextOverflowError, RetryableModelError } from '../../types';
 import type {
-	CredentialStore, ModelRequest, ModelResponse, ModelService, ModelStream,
+	CredentialStore, ModelRequest, ModelResponse, ModelService, ModelStream, QueuedMessage,
 	RunObserver, RuntimeLayer, ToolCall, ToolModule, Transport,
 } from '../../types';
 import { createAgentLoop } from '../agentLoop';
@@ -85,10 +87,151 @@ function sessionsFor(app: App, service: Pick<ModelService, 'stream' | 'contextLi
 	return createSessionController(app, settings, runtime, createConversationStore(join(adapter.getBasePath(), 'transcripts')));
 }
 
+void test('steering reaches the next natural model request, keeps its paired tool result and commits after success', async (t) => {
+	const { root, cwd, app } = await fixture(t);
+	const request = { conversationId: 'steering', instruction: '请继续任务', refs: [] };
+	const external = join(root, 'external.md');
+	await Promise.all([writeFile(external, '库外资料'), writeFile(join(cwd, 'Vault.md'), '库内资料')]);
+	const ctx = await createRunContext(createTask({ ...request, refs: [{ path: 'Vault.md', lines: [2, 3] }] }), {
+		cwd, model: { providerId: 'fake', model: 'fake' }, signal: new AbortController().signal, observer: {},
+	}, app.vault.configDir);
+	const queued: QueuedMessage[] = [
+		{ id: 'one', request: { ...request, instruction: '第一条补充', refs: [{ path: 'Vault.md', lines: [2, 2] }] } },
+		{ id: 'two', request: { ...request, instruction: '第二条补充', chatQuotes: ['引用原文'] } },
+		{ id: 'three', request: { ...request, instruction: '第三条补充' } },
+		{ id: 'external', request: { ...request, instruction: '库外补充', refs: [{ path: external }] } },
+		{ id: 'lines', request: { ...request, instruction: '整篇笔记', refs: [{ path: 'Vault.md' }] } },
+	];
+	const denied = ['external', 'lines'];
+	if (process.platform !== 'win32') {
+		await symlink(external, join(cwd, 'Linked.md'));
+		queued.push({ id: 'link', request: { ...request, instruction: '链接附件', refs: [{ path: 'Linked.md' }] } });
+		denied.push('link');
+	}
+	const sent: ModelRequest[] = [];
+	const rejected: string[] = [];
+	const received: string[] = [];
+	const call: ToolCall = { id: 'work', name: 'Echo', input: {} };
+	const context = createContextBuilder(createToolRegistry([]));
+	ctx.takeSteering = () => sent.length ? queued : [];
+	ctx.rejectSteering = (ids) => rejected.push(...ids);
+	ctx.record = async (event) => {
+		if (event.type !== 'state') return;
+		for (const { id } of event.state.messages) {
+			if (id?.startsWith('steer:') && !received.includes(id)) received.push(id);
+		}
+	};
+	const models = createModelCoordinator({
+		contextLimits: () => ({ contextWindow: 8_000, maxTokens: 800 }),
+		stream(input) {
+			sent.push(input);
+			assert.deepEqual(received, []);
+			return fakeStream(sent.length === 1 ? emptyModelResponse('', [call]) : emptyModelResponse('已完成'), input.signal);
+		},
+	}, context);
+	const loop = createAgentLoop(models, {
+		async *runCalls() {
+			yield { call, result: { callId: call.id, isError: false, content: '结果起点 ' + '结果'.repeat(15_000) } };
+		},
+	});
+	const result = await loop.run(ctx, createRunState(ctx));
+	assert.equal(result.turn, 2);
+	assert.equal(sent.length, 2);
+	assert.deepEqual(rejected, denied);
+	assert.deepEqual(received, ['steer:one', 'steer:two', 'steer:three']);
+	assert.deepEqual(sent[1]?.messages.map(({ role }) => role), ['user', 'assistant', 'tool', 'user', 'user', 'user']);
+	assert.match(sent[1]?.messages[2]?.content ?? '', /^结果起点 [\s\S]+已缩短/);
+	assert.match(sent[1]?.messages[3]?.content ?? '', /第一条补充[\s\S]+Vault\.md/);
+	assert.match(sent[1]?.messages[4]?.content ?? '', /第二条补充[\s\S]+引用原文/);
+	assert.equal(sent[1]?.messages[5]?.content, '第三条补充');
+	assert.equal(result.messages.at(-1)?.content, '已完成');
+});
+
+void test('steering clicked during the final model request cannot create another round or consume its row', async (t) => {
+	const { cwd, app } = await fixture(t);
+	const request = { conversationId: 'last-steering', instruction: '请回答', refs: [] };
+	const ctx = await createRunContext(createTask(request), {
+		cwd, model: { providerId: 'fake', model: 'fake' }, signal: new AbortController().signal, observer: {},
+	}, app.vault.configDir);
+	const queued: QueuedMessage[] = [];
+	ctx.takeSteering = () => queued;
+	const loop = createAgentLoop({
+		async nextTurn() {
+			queued.push({ id: 'late', request: { ...request, instruction: '再问一件事' } });
+			return emptyModelResponse('已完成');
+		},
+	}, { async *runCalls() {} });
+	const result = await loop.run(ctx, createRunState(ctx));
+	assert.equal(result.status, 'done');
+	assert.equal(result.turn, 1);
+	assert.equal(queued.length, 1);
+	assert.ok(!result.messages.some(({ id }) => id === 'steer:late'));
+});
+
+void test('stopping while a steering model request is running leaves the message uncommitted', async (t) => {
+	const { cwd, app } = await fixture(t);
+	const request = { conversationId: 'stopped-steering', instruction: '请回答', refs: [] };
+	const controller = new AbortController();
+	const ctx = await createRunContext(createTask(request), {
+		cwd, model: { providerId: 'fake', model: 'fake' }, signal: controller.signal, observer: {},
+	}, app.vault.configDir);
+	ctx.takeSteering = () => [{ id: 'stopped', request: { ...request, instruction: '补充问题' } }];
+	ctx.record = async (event) => {
+		if (event.type === 'state') assert.ok(!event.state.messages.some(({ id }) => id === 'steer:stopped'));
+	};
+	const loop = createAgentLoop({
+		async nextTurn(state) {
+			assert.equal(state.messages.at(-1)?.id, 'steer:stopped');
+			controller.abort();
+			return emptyModelResponse('停止前未处理完');
+		},
+	}, { async *runCalls() {} });
+	const result = await loop.run(ctx, createRunState(ctx));
+	assert.equal(result.status, 'cancelled');
+	assert.ok(!result.messages.some(({ id }) => id === 'steer:stopped'));
+});
+
+void test('oversized steering retries the original turn only when no provider request has been sent', async (t) => {
+	const { cwd, app } = await fixture(t);
+	const request = { conversationId: 'steering-budget', instruction: '请回答', refs: [] };
+	const context = createContextBuilder(createToolRegistry([]));
+	for (const dispatched of [false, true]) {
+		const ctx = await createRunContext(createTask(request), {
+			cwd, model: { providerId: 'fake', model: 'fake' }, signal: new AbortController().signal, observer: {},
+		}, app.vault.configDir);
+		const instruction = 'X'.repeat(dispatched ? 3_000 : 30_000);
+		const sent: ModelRequest[] = [];
+		const rejected: string[] = [];
+		ctx.takeSteering = () => [{ id: 'oversized', request: { ...request, instruction } }];
+		ctx.rejectSteering = (ids) => rejected.push(...ids);
+		const models = createModelCoordinator({
+			contextLimits: () => ({ contextWindow: 4_000, maxTokens: 500 }),
+			stream(input) {
+				sent.push(input);
+				if (!dispatched) return fakeStream(emptyModelResponse('继续完成原任务'), input.signal);
+				return {
+					async *[Symbol.asyncIterator]() {},
+					result: () => Promise.reject(new ContextOverflowError('Input too long')),
+					cancel() {},
+				};
+			},
+		}, context);
+		const loop = createAgentLoop(models, { async *runCalls() {} });
+		const result = await loop.run(ctx, createRunState(ctx));
+		assert.equal(result.turn, 1);
+		assert.equal(sent.length, 1);
+		assert.equal(sent[0]?.messages.some(({ id }) => id === 'steer:oversized'), dispatched);
+		assert.ok(!result.messages.some(({ id }) => id === 'steer:oversized'));
+		assert.deepEqual(rejected, dispatched ? [] : ['oversized']);
+		assert.equal(result.status, dispatched ? 'failed' : 'done');
+	}
+});
+
 void test('thinking arrives before the reply completes and keeps its id and duration after reopening', async (t) => {
 	const { app } = await fixture(t);
 	const response = emptyModelResponse('回答');
-	response.raw.content.unshift({ type: 'thinking', thinking: '整理线索' });
+	const thinking = '## 正在整理线索\n具体分析';
+	response.raw.content.unshift({ type: 'thinking', thinking });
 	const { raw } = response;
 	let finished = false;
 	let notifyCheckpoint!: () => void;
@@ -100,9 +243,9 @@ void test('thinking arrives before the reply completes and keeps its id and dura
 		stream: () => ({
 			async *[Symbol.asyncIterator]() {
 				yield { type: 'thinking_start', contentIndex: 0, partial: raw };
-				yield { type: 'thinking_delta', contentIndex: 0, partial: raw, delta: '整理' };
-				yield { type: 'thinking_delta', contentIndex: 0, partial: raw, delta: '线索' };
-				yield { type: 'thinking_end', contentIndex: 0, partial: raw, content: '整理线索' };
+				yield { type: 'thinking_delta', contentIndex: 0, partial: raw, delta: '## 正在整理线索\n' };
+				yield { type: 'thinking_delta', contentIndex: 0, partial: raw, delta: '具体分析' };
+				yield { type: 'thinking_end', contentIndex: 0, partial: raw, content: thinking };
 				await waiting;
 				yield { type: 'text_delta', contentIndex: 1, partial: raw, delta: '回答' };
 			},
@@ -111,9 +254,11 @@ void test('thinking arrives before the reply completes and keeps its id and dura
 		}),
 	}, []);
 	const deltas: string[] = [];
+	const intents: string[] = [];
 	let thoughtDuration = -1;
 	const handle = sessions.submit({ conversationId: 'thinking', instruction: '梳理线索', refs: [] }, {
 		onEvent(event) {
+			if (event.type === 'model-intent') intents.push(event.intent);
 			if (event.type !== 'thinking-delta' && event.type !== 'thinking-end' && event.type !== 'text-delta') return;
 			assert.equal(finished, false);
 			assert.equal(event.messageId, `assistant:${handle.taskId}:1`);
@@ -127,15 +272,16 @@ void test('thinking arrives before the reply completes and keeps its id and dura
 	});
 	try {
 		assert.ok(await Promise.race([checkpoint.then(() => true), handle.result.then(() => false)]));
+		assert.deepEqual(intents, ['正在整理线索']);
 		const inProgress = (await sessions.openConversation('thinking'))?.runs[0]?.state.messages.at(-1);
 		assert.equal(inProgress?.id, `assistant:${handle.taskId}:1`);
 		assert.equal(inProgress.incomplete, true);
-		assert.equal(inProgress.thinkingBlocks?.[0]?.thinking, '整理线索');
+		assert.equal(inProgress.thinkingBlocks?.[0]?.thinking, thinking);
 	} finally {
 		releaseStream();
 	}
 	assert.equal((await handle.result).status, 'done');
-	assert.deepEqual(deltas, ['整理', '线索', 'end', '回答']);
+	assert.deepEqual(deltas, ['## 正在整理线索\n', '具体分析', 'end', '回答']);
 	assert.ok(thoughtDuration >= 0);
 	const savedRun = (await sessions.openConversation('thinking'))?.runs[0]?.state;
 	assert.ok(savedRun?.createdAt && savedRun.finishedAt && savedRun.finishedAt >= savedRun.createdAt);
@@ -147,14 +293,48 @@ void test('thinking arrives before the reply completes and keeps its id and dura
 	assert.equal(message.metrics.modelMs, message.metrics.firstDeltaMs + message.metrics.decodeMs);
 	assert.equal(message.metrics.contextWindow, 128_000);
 	assert.ok(message.metrics.endedAt <= savedRun.finishedAt);
-	assert.deepEqual(message?.rawAssistant?.content[0], { type: 'thinking', thinking: '整理线索', durationMs: thoughtDuration });
+	assert.deepEqual(message?.rawAssistant?.content[0], { type: 'thinking', thinking, durationMs: thoughtDuration });
+});
+
+void test('a direct reply streams its Chinese intent separately and saves only the reply text', async (t) => {
+	const { app } = await fixture(t);
+	const chunks = ['<scribe-', 'intent>正在比较两种写法。</scribe-intent>\r', '\n', '第一种更简洁。'];
+	const response = emptyModelResponse(chunks.join(''));
+	const events: string[] = [];
+	let execution = emptyExecution;
+	const sessions = sessionsFor(app, {
+		stream: (request) => ({
+			async *[Symbol.asyncIterator]() {
+				assert.match(request.system ?? '', /<scribe-intent>/u);
+				for (const delta of chunks) yield { type: 'text_delta', contentIndex: 0, partial: response.raw, delta };
+			},
+			result: async () => response,
+			cancel() {},
+		}),
+	}, []);
+	const result = await sessions.submit({ conversationId: 'reply-intent', instruction: '比较两种写法', refs: [] }, {
+		onEvent(event) {
+			execution = updateExecution(execution, event);
+			if (event.type === 'model-intent') events.push(event.intent);
+			if (event.type === 'text-delta') {
+				assert.equal(execution.modelIntent, '正在比较两种写法');
+				events.push(event.text);
+			}
+		},
+	}).result;
+	assert.equal(result.status, 'done', result.error);
+	assert.deepEqual(events, ['正在比较两种写法', '第一种更简洁。']);
+	const saved = (await sessions.openConversation('reply-intent'))?.runs[0];
+	assert.ok(saved);
+	assert.equal(saved.state.messages.at(-1)?.content, '第一种更简洁。');
+	assert.deepEqual(restoreExecution(saved).items.flatMap((item) => item.kind === 'text' ? [item.content] : []), ['第一种更简洁。']);
 });
 
 void test('a provider that marks its thinking as redacted at the end never streams that block', async (t) => {
 	const { app } = await fixture(t);
 	const response = emptyModelResponse('可以显示的回答');
 	response.raw.api = 'pi-messages';
-	const thought = { type: 'thinking' as const, thinking: '隐藏的内容', redacted: false };
+	const thought = { type: 'thinking' as const, thinking: '## 隐藏的内容\n', redacted: false };
 	response.raw.content.unshift(thought);
 	const sessions = sessionsFor(app, {
 		stream: () => ({
@@ -168,7 +348,10 @@ void test('a provider that marks its thinking as redacted at the end never strea
 		}),
 	}, []);
 	const handle = sessions.submit({ conversationId: 'redacted-thinking', instruction: '梳理线索', refs: [] }, {
-		onEvent(event) { assert.notEqual(event.type, 'thinking-delta'); },
+		onEvent(event) {
+			assert.notEqual(event.type, 'thinking-delta');
+			assert.notEqual(event.type, 'model-intent');
+		},
 	});
 	assert.equal((await handle.result).status, 'done');
 });
@@ -210,7 +393,7 @@ void test('tools keep going past 12 rounds and 8 calls and return errors to the 
 			seen.push(request);
 			const turn = seen.length;
 			const calls = turn <= 15 ? Array.from({ length: 10 }, (_, i): ToolCall => ({
-				id: `${turn}-${i}`, name: i ? 'Echo' : 'Missing', input: i ? { turn, i } : i,
+				id: `${turn}-${i}`, name: i ? 'Echo' : 'Missing', input: i ? { turn, index: i } : i,
 			})) : [];
 			return fakeStream(emptyModelResponse(calls.length ? '' : '完成', calls), request.signal);
 		},
@@ -571,12 +754,18 @@ void test('repeated tool requests stop before the fourth unchanged operation', a
 		stream(request) {
 			const id = `repeat-${++requests}`;
 			assert.ok(requests <= 4);
-			const input = requests % 2 ? { a: 1, b: { c: 2, d: 3 } } : { b: { d: 3, c: 2 }, a: 1 };
-			return fakeStream(emptyModelResponse('', [{ id, name: 'ReadStatus', input }]), request.signal);
+			const i = `Reading status ${requests}`;
+			const input = Object.freeze(requests % 2 ? { a: 1, b: { c: 2, d: 3 }, i } : { b: { d: 3, c: 2 }, a: 1, i });
+			const response = emptyModelResponse('', [{ id, name: 'ReadStatus', input }]);
+			response.raw.content.push({ type: 'toolCall', id, name: 'ReadStatus', arguments: input });
+			return fakeStream(response, request.signal);
 		},
 	}, [() => [{
 		name: 'ReadStatus', description: 'test', inputSchema: {}, isReadOnly: true,
-		prepare: () => ({ run: () => { executions++; return 'unchanged'; } }),
+		prepare: (input) => {
+			assert.deepEqual(input, { a: 1, b: { c: 2, d: 3 } });
+			return { run: () => { executions++; return 'unchanged'; } };
+		},
 	}]]);
 	const result = await sessions.submit({ conversationId: 'repeat', instruction: 'check status', refs: [] }).result;
 	assert.equal(result.status, 'limit');
@@ -585,6 +774,9 @@ void test('repeated tool requests stop before the fourth unchanged operation', a
 	assert.equal(executions, 3);
 	assert.deepEqual(result.pendingCalls, []);
 	const saved = await sessions.openConversation('repeat');
+	const reply = saved?.runs[0]?.state.messages.find(({ role }) => role === 'assistant');
+	assert.deepEqual(reply?.toolCalls?.[0]?.input, { a: 1, b: { c: 2, d: 3 }, i: 'Reading status 1' });
+	assert.deepEqual(reply?.rawAssistant?.content.find((block) => block.type === 'toolCall')?.arguments, reply?.toolCalls?.[0]?.input);
 	assert.deepEqual(saved?.runs[0]?.state.messages.filter(({ role }) => role === 'tool')
 		.map(({ toolCallId, isError }) => [toolCallId, isError]), [
 		['repeat-1', false], ['repeat-2', false], ['repeat-3', false], ['repeat-4', true],

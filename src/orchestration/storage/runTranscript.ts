@@ -22,7 +22,7 @@ function visibleThinking(blocks: Iterable<DraftBlock>, completedOnly = false): N
 		&& (!completedOnly || block.durationMs !== undefined) ? [savedThinking(block)] : []);
 }
 
-export function trackRun(store: ConversationStore, task: Task, observer: RunObserver, restored?: SavedRun) {
+export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, task: Task, observer: RunObserver, restored?: SavedRun) {
 	const taskId = task.id;
 	const conversationId = task.request.conversationId;
 	let step: RunStep = restored?.step ?? { phase: 'starting', turn: 0 };
@@ -36,7 +36,7 @@ export function trackRun(store: ConversationStore, task: Task, observer: RunObse
 		if (failure) throw failure;
 		if (!entries.length) return;
 		try {
-			await store.append(conversationId, entries);
+			await store?.append(conversationId, entries);
 		} catch (error) {
 			failure = Object.assign(new Error('无法保存对话或操作进度。'), { cause: error });
 			throw failure;

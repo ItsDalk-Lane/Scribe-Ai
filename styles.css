@@ -48,9 +48,156 @@
 	outline-offset: 1px;
 }
 
-.workspace-leaf-content[data-type="scribe-chat-view"] > .view-content {
+.workspace-leaf-content:is([data-type="scribe-chat-view"], [data-type="scribe-side-chat-view"]) > .view-content {
 	padding: 0;
 	overflow: hidden;
+}
+
+/* 聊天视图的头部比主题默认更矮，标签页行才能贴住头部内容。 */
+.workspace-leaf-content[data-type="scribe-chat-view"] {
+	--header-height: 28px;
+}
+
+.scribe-chat-tab-strip {
+	--scribe-tab-width: 144px;
+	box-sizing: border-box;
+	display: flex;
+	flex: 0 0 auto;
+	gap: 4px;
+	inline-size: 100%;
+	min-inline-size: 0;
+	padding: 0 8px 4px;
+	background: var(--background-primary);
+}
+
+.scribe-chat-tab-list,
+.scribe-chat-tab-item {
+	display: flex;
+	min-inline-size: 0;
+}
+
+.scribe-chat-tab-list {
+	gap: 4px;
+}
+
+.scribe-chat-tab-item {
+	flex: 0 1 var(--scribe-tab-width);
+	inline-size: var(--scribe-tab-width);
+	border-radius: var(--radius-s);
+	color: var(--text-muted);
+}
+
+.scribe-chat-tab-item[data-active] {
+	background: color-mix(in srgb, var(--interactive-accent) 10%, var(--background-primary));
+	box-shadow: inset 0 -2px var(--interactive-accent);
+	color: var(--text-normal);
+}
+
+.scribe-chat-tab-strip button {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	block-size: 28px;
+	padding: 0 6px;
+	border: 0;
+	border-radius: var(--radius-s);
+	background: transparent;
+	box-shadow: none;
+	color: inherit;
+	font: 12px / 18px var(--font-interface);
+}
+
+.scribe-chat-tab-strip button:focus-visible,
+.scribe-chat-tab-strip input:focus-visible {
+	outline-offset: -2px;
+}
+
+button.scribe-chat-tab-select {
+	flex: 1 1 auto;
+	justify-content: flex-start;
+	min-inline-size: 0;
+}
+
+.scribe-chat-tab-select > span:last-child {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-chat-tab-select > .scribe-chat-icon {
+	inline-size: 14px;
+	block-size: 14px;
+}
+
+.scribe-chat-tab-item[data-status="running"] .scribe-chat-tab-select > .scribe-chat-icon {
+	animation: scribe-chat-tab-spin 1s linear infinite;
+}
+
+.scribe-chat-tab-item[data-status="attention"] .scribe-chat-tab-select > .scribe-chat-icon {
+	color: var(--interactive-accent);
+}
+
+.scribe-chat-tab-item[data-status="error"] .scribe-chat-tab-select > .scribe-chat-icon {
+	color: var(--text-error);
+}
+
+@keyframes scribe-chat-tab-spin {
+	to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.scribe-chat-tab-item[data-status="running"] .scribe-chat-tab-select > .scribe-chat-icon {
+		animation: none;
+	}
+}
+
+.scribe-chat-tab-strip :is(.scribe-chat-tab-action, .scribe-chat-tab-close) {
+	flex: none;
+	justify-content: center;
+	inline-size: 28px;
+	color: var(--text-muted);
+}
+
+.scribe-chat-tab-strip .scribe-chat-tab-close {
+	inline-size: 24px;
+}
+
+.scribe-chat-tab-close .scribe-chat-icon {
+	inline-size: 13px;
+	block-size: 13px;
+}
+
+@media (hover: hover) {
+	.scribe-chat-tab-item:not([data-active], :hover, :focus-within) .scribe-chat-tab-close {
+		opacity: 0;
+	}
+}
+
+.scribe-chat-tab-strip .scribe-chat-tab-rename {
+	box-sizing: border-box;
+	inline-size: 100%;
+	min-inline-size: 0;
+	block-size: 28px;
+	padding: 0 6px;
+	border-radius: var(--radius-s);
+	font: 12px / 18px var(--font-interface);
+}
+
+.scribe-chat-workspace {
+	display: flex;
+	flex-direction: column;
+	block-size: 100%;
+	overflow: hidden;
+}
+
+.scribe-chat-tab-panel {
+	flex: 1 1 auto;
+	min-block-size: 0;
+	min-inline-size: 0;
+}
+
+.scribe-chat-tab-panel[hidden] {
+	display: none;
 }
 
 .scribe-app {
@@ -106,7 +253,7 @@
 	font: var(--scribe-type-body) var(--font-interface);
 }
 
-.scribe-app :is(.scribe-chat-column, .scribe-composer-bar, .scribe-chat-hero, .scribe-chat-recents, .scribe-task-input, .scribe-approval-view) {
+.scribe-app :is(.scribe-chat-column, .scribe-chat-hero, .scribe-chat-recents, .scribe-task-input, .scribe-approval-view, .scribe-queued-messages) {
 	box-sizing: border-box;
 	inline-size: min(100%, var(--scribe-chat-width));
 	margin-inline: auto;
@@ -199,12 +346,190 @@
 	}
 }
 
-.scribe-composer-bar {
+.scribe-compose-bar {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	padding: 4px 8px;
+	border-block-end: 1px solid var(--scribe-border);
+}
+
+.scribe-app > .scribe-queued-messages {
+	--scribe-queue-inset: min(16px, 2.5cqw);
+	--scribe-queue-overlap: 8px;
+	flex: none;
+	inline-size: max(0px, calc(var(--scribe-chat-width) - 2 * var(--scribe-queue-inset)));
+	margin-block: 4px calc(-1 * var(--scribe-queue-overlap));
+	padding-block-end: var(--scribe-queue-overlap);
+	border: 1px solid color-mix(in srgb, var(--scribe-border) 72%, transparent);
+	border-radius: 14px 14px 0 0;
+	background: color-mix(in srgb, var(--scribe-surface) 65%, var(--scribe-page));
+}
+
+.scribe-queued-messages + .scribe-task-input {
+	position: relative;
+}
+
+.scribe-app button.scribe-queue-heading {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	height: 32px;
+	padding: 0 10px;
+	border: 0;
+	border-radius: var(--scribe-radius-card);
+	background: transparent;
+	font-weight: 500;
+	text-align: start;
+}
+
+.scribe-queue-heading > span:first-child {
+	flex: 1;
+}
+
+.scribe-app button.scribe-queue-heading:focus-visible {
+	outline-offset: -3px;
+}
+
+.scribe-queue-expansion {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	grid-template-rows: 0fr;
+	transition: grid-template-rows var(--scribe-timeline-motion);
+}
+
+.scribe-queue-expansion[data-expanded="true"] {
+	grid-template-rows: 1fr;
+}
+
+.scribe-queue-list {
+	box-sizing: border-box;
+	min-height: 0;
+	max-height: 180px;
+	margin: 0;
+	padding: 0;
+	overflow: hidden auto;
+	overscroll-behavior: contain;
+	list-style: none;
+}
+
+.scribe-queue-row {
+	display: flex;
+	box-sizing: border-box;
+	align-items: center;
+	gap: 6px;
+	min-height: 34px;
+	padding-block: 3px;
+	padding-inline: 10px 4px;
+	font: var(--scribe-type-secondary) var(--font-interface);
+}
+
+.scribe-queue-row + .scribe-queue-row {
+	box-shadow: inset 0 1px var(--scribe-border);
+}
+
+.scribe-queue-files {
+	display: flex;
+	flex: 0 1 auto;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	max-width: 55%;
+	overflow: hidden;
+}
+
+.scribe-queue-image,
+.scribe-queue-file {
+	box-sizing: border-box;
+	flex: none;
+	height: 24px;
+	border: 0.5px solid var(--scribe-border);
+	border-radius: var(--scribe-radius-detail);
+}
+
+.scribe-queue-image {
+	width: 24px;
+	object-fit: cover;
+}
+
+.scribe-queue-file {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 74px;
+	max-width: 180px;
+	padding-inline: 4px;
+	background: var(--scribe-raised);
+	color: var(--scribe-muted);
+}
+
+.scribe-queue-file > .scribe-chat-icon {
+	flex: 0 0 16px;
+}
+
+.scribe-queue-file-name,
+.scribe-queue-preview,
+.scribe-queue-status {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-queue-file-name,
+.scribe-queue-preview,
+.scribe-queue-editor {
+	flex: 1 1 0;
+}
+
+.scribe-queue-file-size {
+	flex: none;
+	font-size: 10px;
+	white-space: nowrap;
+}
+
+.scribe-queue-preview {
+	pointer-events: none;
+	user-select: none;
+}
+
+.scribe-queue-status {
+	color: var(--text-faint);
+}
+
+.scribe-app textarea.scribe-queue-editor {
+	box-sizing: border-box;
+	min-width: 0;
+	min-height: 28px;
+	max-height: 96px;
+	padding: 2px 4px;
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--scribe-radius-detail);
+	background: var(--scribe-page);
+	color: var(--scribe-ink);
+	font: inherit;
+	field-sizing: content;
+	resize: none;
+}
+
+.scribe-queue-actions {
 	display: flex;
 	flex: none;
 	align-items: center;
-	gap: 8px;
-	padding: 4px;
+	justify-content: flex-end;
+}
+
+.scribe-app button.scribe-compose-action.scribe-queue-action {
+	width: clamp(24px, 8cqw, 28px);
+}
+
+.scribe-app button.scribe-queue-action[aria-disabled="true"] {
+	--scribe-hover: transparent;
+	--scribe-active: transparent;
+	opacity: .55;
+	cursor: default;
 }
 
 .scribe-chat-navigation {
@@ -249,9 +574,25 @@
 	overflow-y: auto;
 }
 
-/* Obsidian 的状态栏悬浮在底部，避免盖住输入框的按钮。 */
+/* 主对话用原有的底部空间摆放按钮，侧聊继续单独留出状态栏的位置。 */
 body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
-	padding-block-end: var(--size-4-7, 28px);
+	--scribe-chat-bottom-space: var(--size-4-7, 28px);
+}
+
+.scribe-app[data-layout="conversation"] {
+	padding-block-end: var(--scribe-chat-bottom-space, 0px);
+}
+
+.scribe-composer-metrics {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-inline-size: 0;
+}
+
+.scribe-composer-context {
+	display: flex;
+	min-inline-size: 24px;
 }
 
 .scribe-app[data-layout="landing"]::before {
@@ -420,25 +761,20 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	display: grid;
 	flex: 0 0 auto;
 	grid-template-columns: minmax(0, 1fr);
-	gap: 4px;
+	gap: 0;
 	min-width: 0;
-}
-
-.scribe-compose-disclosure {
-	margin: 0;
-	padding-inline: 4px;
-	color: var(--text-muted);
-	font: var(--scribe-type-caption) var(--font-interface);
-	overflow-wrap: anywhere;
+	border: 1px solid var(--scribe-border);
+	border-radius: calc(var(--scribe-radius-control) + 4px);
+	background: var(--scribe-raised);
+	box-shadow: var(--shadow-s);
 }
 
 .scribe-compose-form {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr);
 	gap: 2px;
+	min-width: 0;
 	padding: 8px 4px 4px;
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-m);
 }
 
 .scribe-app textarea.scribe-input {
@@ -464,8 +800,8 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	box-shadow: none;
 }
 
-.scribe-compose-form:has(.scribe-input:focus-visible) {
-	background-color: var(--background-primary-alt);
+.scribe-task-input:has(.scribe-input:focus-visible) {
+	border-color: color-mix(in srgb, var(--scribe-accent) 55%, var(--scribe-border));
 }
 
 .scribe-input::placeholder {
@@ -485,14 +821,14 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 }
 
 .scribe-compose-submit {
-	flex: 0 0 auto;
+	min-inline-size: 0;
 	margin-inline-start: auto;
 }
 
 .scribe-chat-model-picker {
 	position: relative;
 	inline-size: max-content;
-	min-inline-size: min(72px, max(0px, calc(var(--scribe-chat-width) - 104px)));
+	min-inline-size: 0;
 	max-inline-size: 240px;
 }
 
@@ -515,11 +851,25 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 }
 
 .scribe-compose-model > span:first-child,
-.scribe-chat-model-options button > span:first-child {
+.scribe-chat-model-options button > span:first-child,
+.scribe-chat-provider-row button > span:nth-child(2) {
 	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+.scribe-compose-effort {
+	flex: none;
+	max-inline-size: min(80px, 22cqw);
+	overflow: hidden;
+	color: var(--text-faint);
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-compose-effort::before {
+	content: '· ';
 }
 
 .scribe-compose-model .scribe-chat-icon {
@@ -535,14 +885,32 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	position: absolute;
 	z-index: 3;
 	inset-block-end: calc(100% + 4px);
-	inset-inline-start: 0;
+	inset-inline-end: 0;
 	display: flex;
 	flex-direction: column;
 	box-sizing: border-box;
-	width: max-content;
-	min-width: min(15rem, calc(var(--scribe-chat-width) - 52px));
-	max-width: min(26rem, calc(var(--scribe-chat-width) - 52px));
-	max-height: min(46dvh, 15rem);
+	inline-size: min(19rem, var(--scribe-model-width, 80cqw));
+	max-block-size: min(360px, var(--scribe-model-height, 50dvh));
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--radius-m);
+	background: var(--scribe-page);
+	box-shadow: var(--shadow-s);
+}
+
+.scribe-chat-provider-row {
+	flex: none;
+	padding: 3px;
+	border-block-end: 1px solid var(--scribe-border);
+}
+
+.scribe-chat-provider-options {
+	position: absolute;
+	z-index: 1;
+	inset-block-start: 0;
+	inset-inline-end: calc(100% - 2px);
+	box-sizing: border-box;
+	inline-size: min(210px, var(--scribe-provider-width));
+	max-block-size: min(295px, var(--scribe-model-height));
 	padding: 4px;
 	overflow: auto;
 	overscroll-behavior: contain;
@@ -552,36 +920,86 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	box-shadow: var(--shadow-s);
 }
 
-@supports (max-height: attr(data-available-height px, 0px)) {
-	.scribe-chat-model-panel {
-		--scribe-model-width: min(26rem, attr(data-available-width px, 0px));
-		min-width: min(15rem, var(--scribe-model-width));
-		max-width: var(--scribe-model-width);
-		max-height: min(46dvh, attr(data-available-height px, 0px));
-	}
+.scribe-chat-model-panel[data-provider-side="after"] .scribe-chat-provider-options {
+	inset-inline-end: auto;
+	inset-inline-start: calc(100% - 2px);
+}
+
+.scribe-chat-model-panel[data-provider-side="inside"] .scribe-chat-provider-options {
+	inset-block-start: 36px;
+	inset-inline: 0 24px;
+	inline-size: auto;
+}
+
+.scribe-chat-provider-icon {
+	display: grid;
+	flex: 0 0 16px;
+	width: 16px;
+	height: 16px;
+	place-items: center;
+	color: var(--scribe-muted);
+	font-weight: 600;
+}
+
+.scribe-chat-provider-icon svg {
+	width: 16px;
+	height: 16px;
+}
+
+.scribe-chat-model-body {
+	min-height: 0;
+	overflow: auto;
+	overscroll-behavior: contain;
+}
+
+.scribe-chat-model-search {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 8px 2px;
+	color: var(--scribe-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.scribe-chat-model-search > span:first-child {
+	white-space: nowrap;
+}
+
+.scribe-chat-model-search .scribe-chat-icon {
+	width: 13px;
+	height: 13px;
+	margin-inline-start: 4px;
+}
+
+.scribe-app .scribe-chat-model-search input {
+	min-width: 0;
+	width: 100%;
+	height: 28px;
+	padding: 0 3px;
+	border: 0;
+	background: transparent;
+	box-shadow: none;
+	font-size: var(--font-ui-smaller);
 }
 
 .scribe-chat-model-options {
-	min-height: min(72px, 14dvh);
-	overflow-y: auto;
-	padding: 2px;
+	padding: 4px;
 }
 
-.scribe-chat-model-group-label {
-	padding: 4px 8px 2px;
+.scribe-chat-model-options p {
+	margin: 0;
+	padding: 6px 8px;
 	color: var(--scribe-muted);
 	font-size: var(--font-ui-smaller);
-	font-weight: 600;
-	overflow-wrap: anywhere;
 }
 
-.scribe-app .scribe-chat-model-options button {
+.scribe-app :is(.scribe-chat-model-options, .scribe-chat-provider-row) button {
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
-	gap: 8px;
+	justify-content: flex-start;
+	gap: 6px;
 	width: 100%;
-	min-height: 28px;
+	min-height: 32px;
 	padding: 3px 8px;
 	border: 0;
 	border-radius: var(--radius-s);
@@ -589,9 +1007,23 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	text-align: start;
 }
 
-.scribe-app .scribe-chat-model-options button[aria-selected="true"] {
-	color: var(--scribe-accent);
+.scribe-app :is(.scribe-chat-model-options, .scribe-chat-provider-row) button > .scribe-chat-icon:last-child {
+	width: 13px;
+	height: 13px;
+	margin-inline-start: auto;
+}
+
+.scribe-chat-model-options small {
+	flex: none;
+	padding-inline: 5px;
+	border-radius: 999px;
 	background: var(--scribe-hover);
+	color: var(--scribe-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.scribe-app :is(.scribe-chat-model-options, .scribe-chat-provider-options) button[aria-current="true"] {
+	color: var(--scribe-accent);
 }
 
 .scribe-chat-model-options[aria-busy="true"] button {
@@ -601,39 +1033,40 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 
 .scribe-thinking-card-slider {
 	flex: none;
-	margin-top: 4px;
-	padding: 5px 9px 7px;
-	border: 1px solid var(--scribe-border);
-	border-radius: var(--radius-m);
-	background: var(--scribe-raised);
+	padding: 8px 11px 12px;
+	border-block-start: 1px solid var(--scribe-border);
+}
+
+.scribe-thinking-caption {
+	display: flex;
+	align-items: baseline;
+	gap: 7px;
+	margin-block-end: 7px;
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
+}
+
+.scribe-thinking-caption strong {
+	min-width: 0;
+	overflow: hidden;
+	color: var(--scribe-ink);
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .scribe-thinking-track {
-	--scribe-level-index: 0;
-	--scribe-level-intervals: 1;
-	--scribe-level-position: calc(17px + (100% - 34px) * var(--scribe-level-index) / var(--scribe-level-intervals));
+	--scribe-thinking-thumb-size: 23px;
+	--scribe-thinking-thumb-radius: calc(var(--scribe-thinking-thumb-size) / 2);
+	--scribe-level-position: calc(var(--scribe-thinking-thumb-radius) + (100% - var(--scribe-thinking-thumb-size)) * var(--scribe-level-progress));
 	position: relative;
 	height: 21px;
 	border-radius: 999px;
-	background: linear-gradient(to right, var(--scribe-accent) var(--scribe-level-position), var(--background-modifier-border) var(--scribe-level-position));
+	background: linear-gradient(to right, #008c61, #0588ef) left / var(--scribe-level-position) 100% no-repeat var(--background-modifier-border);
 	direction: ltr;
 	touch-action: none;
 	user-select: none;
 	cursor: pointer;
 }
-
-.scribe-thinking-track[data-count="1"] { --scribe-level-position: 50%; }
-.scribe-thinking-track[data-count="3"] { --scribe-level-intervals: 2; }
-.scribe-thinking-track[data-count="4"] { --scribe-level-intervals: 3; }
-.scribe-thinking-track[data-count="5"] { --scribe-level-intervals: 4; }
-.scribe-thinking-track[data-count="6"] { --scribe-level-intervals: 5; }
-.scribe-thinking-track[data-count="7"] { --scribe-level-intervals: 6; }
-.scribe-thinking-track[data-index="1"] { --scribe-level-index: 1; }
-.scribe-thinking-track[data-index="2"] { --scribe-level-index: 2; }
-.scribe-thinking-track[data-index="3"] { --scribe-level-index: 3; }
-.scribe-thinking-track[data-index="4"] { --scribe-level-index: 4; }
-.scribe-thinking-track[data-index="5"] { --scribe-level-index: 5; }
-.scribe-thinking-track[data-index="6"] { --scribe-level-index: 6; }
 
 .scribe-thinking-track[aria-disabled="true"] {
 	cursor: default;
@@ -646,7 +1079,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 
 .scribe-thinking-ticks {
 	position: absolute;
-	inset: 0 15px;
+	inset: 0 calc(var(--scribe-thinking-thumb-radius) - 2px);
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
@@ -672,8 +1105,8 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	position: absolute;
 	top: 50%;
 	left: var(--scribe-level-position);
-	width: 23px;
-	height: 23px;
+	width: var(--scribe-thinking-thumb-size);
+	height: var(--scribe-thinking-thumb-size);
 	transform: translate(-50%, -50%);
 	border-radius: 50%;
 	background: var(--text-on-accent);
@@ -702,22 +1135,32 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	height: 28px;
 }
 
-.scribe-app button:is(.scribe-compose-action, .scribe-context-chip-remove):not(:disabled):hover,
+.scribe-app button.scribe-compose-queue-resume {
+	width: auto;
+	padding-inline: 8px;
+	font-size: var(--font-ui-small);
+	white-space: nowrap;
+}
+
+.scribe-app button:is(.scribe-compose-action, .scribe-context-chip-remove):not(.scribe-compose-primary, :disabled):hover,
 .scribe-app .scribe-context-popover button:not(:disabled):hover {
 	background-color: var(--background-modifier-hover);
 	color: var(--text-normal);
 }
 
-.scribe-app button.scribe-compose-primary,
-.scribe-app button.scribe-compose-primary:disabled {
+.scribe-app button.scribe-compose-primary {
+	--scribe-hover: var(--scribe-accent);
+	--scribe-active: var(--scribe-hover);
 	border-radius: 50%;
-	background-color: var(--interactive-accent);
+	background-color: var(--scribe-hover);
 	color: var(--text-on-accent);
 }
 
-.scribe-app button.scribe-compose-primary:not(:disabled):hover {
-	background-color: var(--interactive-accent-hover);
-	color: var(--text-on-accent);
+.scribe-app button.scribe-compose-primary:disabled {
+	--scribe-hover: var(--scribe-raised);
+	border: 1px solid var(--scribe-border);
+	color: var(--scribe-muted);
+	opacity: 1;
 }
 
 .scribe-compose-primary[type="button"] .scribe-chat-icon {
@@ -825,6 +1268,10 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	height: 20px;
 }
 
+.scribe-chat-quote-chip .scribe-context-chip-remove:not(:hover, :focus-visible) .scribe-chat-icon {
+	visibility: hidden;
+}
+
 .scribe-selection-preview {
 	flex: 1;
 	min-width: 0;
@@ -842,6 +1289,10 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	font: inherit;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+.scribe-chat-quote-chip .scribe-selection-preview > summary {
+	list-style: none;
 }
 
 .scribe-selection-preview summary .scribe-chat-icon {
@@ -929,6 +1380,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	flex-direction: column;
 	gap: var(--scribe-timeline-turn-gap);
 	min-width: 0;
+	padding-block-end: var(--scribe-space-card);
 	user-select: text;
 }
 
@@ -1359,14 +1811,6 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	height: 14px;
 }
 
-.scribe-chat-metrics {
-	display: flex;
-	flex: 0 1 auto;
-	align-items: center;
-	gap: 12px;
-	min-width: 0;
-}
-
 .scribe-metric-anchor {
 	display: flex;
 	flex: 0 1 auto;
@@ -1377,6 +1821,20 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	max-width: 100%;
 	overflow: hidden;
 	color: var(--text-faint, var(--text-muted));
+}
+
+.scribe-composer-metrics .scribe-metric-anchor {
+	min-inline-size: 24px;
+}
+
+:is(.scribe-composer-metrics, .scribe-composer-context) button.scribe-metric-label {
+	padding-inline: 5px;
+}
+
+.scribe-app .scribe-composer-context button.scribe-metric-label {
+	block-size: var(--scribe-height-compact);
+	padding-block: 0;
+	font-size: var(--font-ui-small);
 }
 
 .scribe-app button.scribe-metric-label:not(:disabled):is(:hover, [aria-expanded="true"]) {
@@ -1501,10 +1959,36 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	font: var(--scribe-type-secondary) var(--font-interface);
 }
 
-.scribe-timeline-activity > span:last-child {
+.scribe-working-elapsed {
+	flex: 0 0 auto;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+
+.scribe-working-separator,
+.scribe-working-shimmer [data-band="0"] {
+	color: var(--text-faint);
+}
+
+.scribe-working-shimmer {
 	min-width: 0;
 	overflow: hidden;
+	color: color-mix(in srgb, #278dcc 65%, var(--text-normal));
 	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-working-shimmer [data-band="2"] {
+	color: color-mix(in srgb, #ad66e8 68%, var(--text-normal));
+	font-weight: bold;
+}
+
+.scribe-working-announcement {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
 	white-space: nowrap;
 }
 
@@ -2926,50 +3410,97 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	min-width: 0;
 }
 
-/* 推理档位：可多选的下拉 */
-.scribe-multi-select {
-	position: relative;
-	width: 100%;
-}
-
-.scribe-multi-select-trigger {
-	width: 100%;
-	padding: 4px 8px;
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-s);
-	background: var(--interactive-normal);
-	color: var(--text-normal);
-	font-size: var(--font-ui-small);
-	text-align: left;
-	cursor: pointer;
-}
-
-.scribe-multi-select-panel {
-	position: absolute;
-	top: calc(100% + 4px);
-	left: 0;
-	right: 0;
-	z-index: 20;
+.scribe-thinking-chips,
+.scribe-thinking-entry {
 	display: flex;
-	max-height: 220px;
-	overflow-y: auto;
-	flex-direction: column;
-	padding: 4px;
+	align-items: center;
+	gap: 5px;
+}
+
+.scribe-thinking-chips {
+	flex-wrap: wrap;
+}
+
+.scribe-thinking-chip,
+.scribe-model-config-modal button.scribe-thinking-add {
+	display: inline-flex;
+	align-items: center;
+	box-sizing: border-box;
+	min-height: 32px;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-m);
 	background: var(--background-primary);
-	box-shadow: var(--shadow-l);
+	box-shadow: none;
 }
 
-.scribe-multi-select-option {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 4px 6px;
+.scribe-thinking-chip {
+	gap: 3px;
+	min-width: 0;
+	max-width: 100%;
+	padding-inline: 8px 4px;
 	font-size: var(--font-ui-small);
-	cursor: pointer;
 }
 
-.scribe-multi-select-option:hover {
-	background: var(--scribe-hover);
+.scribe-thinking-chip > span {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.scribe-model-config-modal .scribe-thinking-chip button,
+.scribe-model-config-modal button.scribe-thinking-add {
+	justify-content: center;
+	padding: 0;
+	color: var(--text-muted);
+}
+
+.scribe-model-config-modal .scribe-thinking-chip button {
+	width: 20px;
+	height: 22px;
+	background: transparent;
+	box-shadow: none;
+}
+
+.scribe-model-config-modal button.scribe-thinking-add {
+	width: 32px;
+}
+
+.scribe-thinking-editor {
+	display: grid;
+	gap: 8px;
+	padding: 6px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+}
+
+.scribe-thinking-entry input {
+	flex: 1;
+	min-width: 0;
+}
+
+.scribe-selection-actions {
+	position: absolute;
+	z-index: 4;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 2px;
+	box-sizing: border-box;
+	inline-size: max-content;
+	padding: 2px;
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--scribe-radius-compact);
+	background: var(--scribe-raised);
+	box-shadow: var(--scribe-shadow);
+	user-select: none;
+}
+
+.scribe-app .scribe-selection-actions > button {
+	min-height: var(--scribe-height-compact);
+	padding: 2px var(--scribe-space-action);
+	border: 0;
+	border-radius: var(--radius-s);
+	background: transparent;
+	font: var(--scribe-type-caption) var(--font-interface);
+	overflow-wrap: anywhere;
+	white-space: normal;
 }

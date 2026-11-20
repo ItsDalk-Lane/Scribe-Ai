@@ -15,6 +15,7 @@ export function createTask(request: TaskRequest): Task {
 			...request,
 			refs: selection ? [] : request.refs.map((ref) => ({ ...ref, lines: ref.lines && [...ref.lines] })),
 			selection: selection && { path: selection.path, title: selection.title, text: selection.text, lines: [...selection.lines] },
+			chatQuotes: request.chatQuotes?.slice(),
 		},
 		status: 'pending',
 		createdAt: now,

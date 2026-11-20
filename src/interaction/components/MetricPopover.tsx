@@ -45,12 +45,15 @@ export default function MetricPopover({ label, icon, heading, value, children, w
 		if (!open || !host || !button || !popup || !doc || !win) return;
 		closing.current = false;
 		const composer = host.querySelector('.scribe-task-input');
+		const inFooter = button.closest('.scribe-composer-metrics') !== null;
+		const alignEnd = button.closest('.scribe-composer-context') !== null;
 		const transcript = button.closest<HTMLElement>('.scribe-chat-scroll');
 		const position = () => {
 			const bounds = host.getBoundingClientRect();
 			const anchor = button.getBoundingClientRect();
 			const width = Math.max(0, Math.min(320, bounds.width - 12));
-			const left = Math.max(6, Math.min(anchor.left - bounds.left, bounds.width - width - 6));
+			const anchorLeft = alignEnd ? anchor.right - width : anchor.left;
+			const left = Math.max(6, Math.min(anchorLeft - bounds.left, bounds.width - width - 6));
 			popup.style.left = `${left}px`;
 			popup.style.width = `${width}px`;
 			const viewport = transcript?.getBoundingClientRect();
@@ -59,12 +62,13 @@ export default function MetricPopover({ label, icon, heading, value, children, w
 				return;
 			}
 			const inputTop = composer?.getBoundingClientRect().top ?? bounds.bottom;
-			const above = Math.floor(Math.min(anchor.top, inputTop) - bounds.top - 10);
+			const upperEdge = inFooter || alignEnd ? anchor.top : Math.min(anchor.top, inputTop);
+			const above = Math.floor(upperEdge - bounds.top - 10);
 			const below = Math.floor(inputTop - anchor.bottom - 8);
 			const fullHeight = popup.scrollHeight + popup.offsetHeight - popup.clientHeight;
 			const opensBelow = fullHeight > above && below > above;
 			popup.style.top = opensBelow ? `${anchor.bottom - bounds.top + 4}px` : '';
-			popup.style.bottom = opensBelow ? '' : `${bounds.bottom - Math.min(anchor.top, inputTop) + 4}px`;
+			popup.style.bottom = opensBelow ? '' : `${bounds.bottom - upperEdge + 4}px`;
 			popup.style.maxHeight = `${Math.max(0, opensBelow ? below : above)}px`;
 		};
 		const outside = (event: Event) => { if (!inside(event.target)) close(); };

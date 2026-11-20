@@ -5,8 +5,9 @@ import { pauseRun } from '../orchestration/runResume';
 import { isWithinPath, toolAbsolutePath } from '../tools/support/pathUtils';
 import { toolSignature } from '../tools/support/toolSignature';
 import { editTextNotFound } from '../tools/writeTools';
-import type { AgentLoop, Message, ModelCoordinator, ModelResponse, RunState, TerminalRunStatus, ToolApproval, ToolCall, ToolCoordinator, ToolResult } from '../types';
+import type { AgentLoop, Message, ModelCoordinator, ModelResponse, NoteRef, RunContext, RunState, TerminalRunStatus, ToolApproval, ToolCall, ToolCoordinator, ToolResult } from '../types';
 import { latestIncompleteReply, newContinuationText } from './continuationText';
+import { InitialContextBudgetError } from './modelCoordinator';
 import { explicitNoteTargets } from './noteTargets';
 import { assistantMessageId } from './runState';
 
@@ -93,6 +94,22 @@ function taskOutcome(
 	};
 }
 
+async function canSteerWithRefs(ctx: RunContext, refs: NoteRef[]): Promise<boolean> {
+	const { cwd, permissions } = ctx;
+	const readable = await Promise.all(refs.map(async ({ path, lines }) => {
+		try {
+			const absolute = toolAbsolutePath(cwd, path);
+			if (!permissions.canRead(absolute)) return false;
+			const canonical = await realpath(absolute);
+			const allowed = permissions.readLines?.(canonical);
+			return permissions.canRead(canonical) && (!allowed || Boolean(lines && lines[0] >= allowed[0] && lines[1] <= allowed[1]));
+		} catch {
+			return false;
+		}
+	}));
+	return readable.every(Boolean);
+}
+
 export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator): AgentLoop {
 	return {
 		async run(ctx, initialState) {
@@ -144,7 +161,7 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 
 			try {
 				signal.throwIfAborted();
-				const explicit = task.request.selection ? new Map<string, string>() : explicitNoteTargets(task.request.instruction, ctx.cwd);
+				const explicit = task.request.selection || ctx.sideChat ? new Map<string, string>() : explicitNoteTargets(task.request.instruction, ctx.cwd);
 				const vaultRoot = explicit.size || resuming ? await realpath(ctx.cwd) : ctx.cwd;
 				const notePath = (name: string) => {
 					const path = resolve(ctx.cwd, name);
@@ -269,9 +286,33 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					observer.onEvent?.(start);
 					const reminder = repairPrompt ?? (outputSoFar === undefined ? undefined : outputContinuation);
 					repairPrompt = undefined;
-					const requestState = reminder ? { ...state, messages: [...state.messages, reminder] } : state;
-					const response = await models.nextTurn(requestState, resuming || repairPaths ? continuationContext : ctx);
+					const steering: (Message & { id: string })[] = [];
+					for (const { id, request } of ctx.takeSteering?.() ?? []) {
+						if (!request.refs.length || await canSteerWithRefs(ctx, request.refs)) steering.push({ ...taskMessage(request), id: `steer:${id}` });
+						else ctx.rejectSteering?.([id]);
+					}
+					const requestContext = resuming || repairPaths ? continuationContext : ctx;
+					const baseRequest = reminder ? { ...state, messages: [...state.messages, reminder] } : state;
+					const requestState = steering.length ? { ...baseRequest, messages: [...baseRequest.messages, ...steering] } : baseRequest;
+					let response: ModelResponse;
+					try {
+						response = await models.nextTurn(requestState, requestContext);
+					} catch (error) {
+						// 只在模型请求尚未发出时移除插话并继续原任务。
+						if (!(error instanceof InitialContextBudgetError) || !steering.length) throw error;
+						ctx.rejectSteering?.(steering.map(({ id }) => id.slice('steer:'.length)));
+						steering.length = 0;
+						response = await models.nextTurn(baseRequest, requestContext);
+					}
 					signal.throwIfAborted();
+					if (steering.length) {
+						// 只有模型请求成功后才把插话写入本轮记录，并在同一次写入中移出队列。
+						const checkpoint = { type: 'state' as const, state: { ...state, messages: [...state.messages, ...steering] } };
+						await ctx.record?.(checkpoint);
+						state = checkpoint.state;
+						observer.onEvent?.(checkpoint);
+						signal.throwIfAborted();
+					}
 					const truncated = response.stopReason === 'limit';
 					const calls = truncated ? [] : response.toolCalls;
 					const content = outputSoFar === undefined ? response.content : newContinuationText(outputSoFar, response.content);

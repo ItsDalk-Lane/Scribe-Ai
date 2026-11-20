@@ -15,8 +15,9 @@ import ChatIcon from './ChatIcon';
 import ChatMarkdown from './ChatMarkdown';
 import { chatDuration, UsagePopover } from './ChatMetrics';
 import { ToolActivityGroup, ToolActivityRow } from './ToolActivityRow';
+import WorkingRow from './WorkingRow';
 
-type SubmittedPrompt = Pick<TaskRequest, 'instruction' | 'refs' | 'selection'>;
+type SubmittedPrompt = Pick<TaskRequest, 'instruction' | 'refs' | 'selection' | 'chatQuotes'>;
 
 function Timestamp({ timestamp }: { timestamp?: number }) {
 	if (!timestamp) return null;
@@ -29,8 +30,8 @@ function Timestamp({ timestamp }: { timestamp?: number }) {
 	</time>;
 }
 
-function UserMessage({ app, content, request, timestamp, editing, onEdit }: {
-	app: App; content: string; request?: SubmittedPrompt; timestamp?: number; editing?: boolean; onEdit?: () => void;
+function UserMessage({ app, content, request, timestamp, editing, onEdit, readOnly }: {
+	app: App; content: string; request?: SubmittedPrompt; timestamp?: number; editing?: boolean; onEdit?: () => void; readOnly?: boolean;
 }) {
 	const text = uiText();
 	const id = useId();
@@ -42,6 +43,7 @@ function UserMessage({ app, content, request, timestamp, editing, onEdit }: {
 	const mounted = useRef(false);
 	const selection = request?.selection;
 	const refs = request?.refs ?? [];
+	const quotes = request?.chatQuotes ?? [];
 	useEffect(() => {
 		mounted.current = true;
 		return () => {
@@ -82,8 +84,16 @@ function UserMessage({ app, content, request, timestamp, editing, onEdit }: {
 
 	return (
 		<div className="scribe-chat-message is-user" role="group" aria-label={text.chatYou}>
-			{(selection || refs.length > 0) && (
+			{(selection || refs.length > 0 || quotes.length > 0) && (
 				<ul className="scribe-message-context" aria-label={text.chatContextLabel}>
+					{quotes.length > 0 && <li>
+						<details className="scribe-message-selection">
+							<summary className="scribe-message-chip"><ChatIcon name="quote" />
+								<span>{text.chatQuotedText.replace('{n}', String(quotes.length))}</span>
+							</summary>
+							<pre className="scribe-chat-pre" tabIndex={0} aria-label={text.chatSelectionPreview}>{quotes.join('\n\n')}</pre>
+						</details>
+					</li>}
 					{selection ? <li>
 						<details className="scribe-message-selection">
 							<summary className="scribe-message-chip" title={selection.path}>
@@ -110,9 +120,9 @@ function UserMessage({ app, content, request, timestamp, editing, onEdit }: {
 				<button type="button" className="scribe-message-action" onClick={() => void copy()}>
 					<ChatIcon name={copied ? 'check' : 'copy'} /><span aria-live="polite">{copied ? text.chatMessageCopied : text.chatCopyMessage}</span>
 				</button>
-				<button type="button" className="scribe-message-action" disabled={!onEdit} onClick={onEdit}>
+				{!readOnly && <button type="button" className="scribe-message-action" disabled={!onEdit} onClick={onEdit}>
 					<ChatIcon name={editing ? 'x' : 'pencil'} /><span>{editing ? text.chatCancelEdit : text.chatEditFromHere}</span>
-				</button>
+				</button>}
 				<Timestamp timestamp={timestamp} />
 			</div>
 		</div>
@@ -169,10 +179,10 @@ function lastStepLabel(step: RunStep, items: readonly TimelineItem[]): string {
 }
 
 export default memo(function ChatTurn({
-	app, execution, live, request, step, model, editing, onEdit, onFork, expanded, toggleExpanded,
+	app, execution, live, request, step, model, editing, onEdit, onFork, expanded, toggleExpanded, readOnly,
 }: {
 	app: App; execution: ChatExecution; live?: boolean; request?: SubmittedPrompt; step?: RunStep;
-	model?: SavedRun['model']; editing?: boolean; onEdit?: () => void; onFork?: () => void;
+	model?: SavedRun['model']; editing?: boolean; onEdit?: () => void; onFork?: () => void; readOnly?: boolean;
 	expanded: ReadonlySet<string>; toggleExpanded: (id: string) => void;
 }) {
 	const text = uiText();
@@ -248,19 +258,19 @@ export default memo(function ChatTurn({
 	return (
 		<article className="scribe-chat-run" data-task-id={state?.taskId} tabIndex={-1}>
 			{(request?.instruction || user) && <UserMessage app={app} request={request} content={request?.instruction || user}
-				timestamp={state?.createdAt} editing={editing} onEdit={onEdit} />}
+				timestamp={state?.createdAt} editing={editing} onEdit={onEdit} readOnly={readOnly} />}
 			{!editing && <div className="scribe-assistant-turn" role="group" aria-label={text.chatAssistant}>
 				{hasProcess && (hasReply && !running ? <TurnProcess summary={summary} render={renderTimeline} /> : renderTimeline())}
 				{hasReply && <AnswerContent app={app} content={answer} />}
-				{running && live && <div className="scribe-timeline-activity" role="status">
-					<ChatIcon name="loader-circle" /><span>{statusLabel}</span>
-				</div>}
+				{state && running && live && <WorkingRow key={state.taskId} state={state}
+					modelIntent={execution.modelIntent}
+					override={status === 'awaiting-approval' || modelRetry ? statusLabel : undefined} />}
 				{showCompletion && <div className="scribe-timeline-notice" role={live ? 'status' : undefined}>
 					<ChatIcon name="circle-check" /><span>{text.phaseDone}</span>
 				</div>}
 				{!running && Boolean(copyText.trim()) && <div className="scribe-message-actions scribe-assistant-actions">
 					<Timestamp timestamp={messageTime(answerMessage) ?? answerMessage?.rawAssistant?.timestamp} />
-					{hasReply && <button type="button" className="scribe-message-action" aria-label={text.chatForkReply} title={text.chatForkReply}
+					{hasReply && !readOnly && <button type="button" className="scribe-message-action" aria-label={text.chatForkReply} title={text.chatForkReply}
 						disabled={!onFork} onClick={onFork}><ChatIcon name="git-branch" /><span>{text.chatForkReply}</span></button>}
 					{hasReply && usage && <UsagePopover usage={usage} model={model} turn />}
 					<button type="button" className="scribe-message-action scribe-reply-copy" aria-label={text.chatCopyReply} title={text.chatCopyReply}

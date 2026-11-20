@@ -1,4 +1,5 @@
 import { truncate } from './support/truncate';
+import { toolExecutionInput } from './support/toolInput';
 import type { ToolExecutor, ToolRegistry } from '../types';
 
 /** 执行前校验、取得授权，再返回可直接配对的工具结果。 */
@@ -12,7 +13,7 @@ export function createToolExecutor(registry: ToolRegistry): ToolExecutor {
 				const tool = registry.find(call.name);
 				if (!tool) return failure(`工具不可用：${call.name}`);
 				if (!permissions.canCallTool(tool)) return failure(`未授权使用工具：${call.name}`);
-				const prepared = await tool.prepare(call.input, ctx);
+				const prepared = await tool.prepare(toolExecutionInput(call.input), ctx);
 				signal.throwIfAborted();
 				if (!tool.isReadOnly && !prepared.approval) return failure('工具未提供操作预览，无法批准。');
 				if (prepared.approval && !await approve?.(prepared.approval)) {

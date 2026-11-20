@@ -15,8 +15,10 @@ import { createToolCoordinator } from '../../runtime/toolCoordinator';
 import { createToolRegistry } from '../../tools';
 import { createToolExecutor } from '../../tools/executor';
 import { readTools } from '../../tools/readTools';
+import { searchTools } from '../../tools/searchTools';
 import { writeTools } from '../../tools/writeTools';
-import type { ModelRequest, ModelService, ModelStream, RuntimeLayer, ScribeSettings, Task, ToolCall } from '../../types';
+import { MissingConversationError } from '../../types';
+import type { ModelRequest, ModelService, ModelStream, RunState, RuntimeLayer, ScribeSettings, Task, ToolCall } from '../../types';
 import { createContextBuilder } from '../context/contextBuilder';
 import { createSessionController } from '../sessionController';
 import { normalizeSettings } from '../settings/defaults';
@@ -77,7 +79,7 @@ async function fixture(t: TestContext) {
 		directory,
 		connect: (stream: (request: ModelRequest) => ModelStream, model: Partial<ScribeSettings> = firstModel,
 			thinkingOptions?: ModelService['thinkingOptions']) => {
-			const registry = createToolRegistry([readTools, writeTools]);
+			const registry = createToolRegistry([readTools, searchTools, writeTools]);
 			const models = createModelCoordinator({ stream }, createContextBuilder(registry));
 			const tools = createToolCoordinator(app, createToolExecutor(registry));
 			const runtime: RuntimeLayer = {
@@ -96,7 +98,8 @@ void test('after reopening, the same conversation sends prior messages and tool 
 	let requests = 0;
 	const before = connect(() => ++requests === 1 ? reply('', [read]) : reply(`第一轮结论是${fact}。`));
 	const id = await before.createConversation();
-	const start = await before.submit({ conversationId: id, instruction: '读取笔记并记住其中的地点。', refs: [{ path: 'fact.md' }] }).result;
+	const start = await before.submit({ conversationId: id, instruction: '读取笔记并记住其中的地点。', refs: [{ path: 'fact.md' }],
+		chatQuotes: ['来自主聊天的引文'] }).result;
 	assert.equal(start.status, 'done', start.error);
 	assert.equal(requests, 2);
 	before.dispose();
@@ -107,6 +110,7 @@ void test('after reopening, the same conversation sends prior messages and tool 
 	assert.equal(saved?.id, id);
 	assert.equal(saved.runs[0]?.state.status, 'done');
 	assert.deepEqual(saved.runs[0]?.request.refs, [{ path: 'fact.md' }]);
+	assert.deepEqual(saved.runs[0]?.request.chatQuotes, ['来自主聊天的引文']);
 	assert.equal(saved.runs[0]?.state.messages[1]?.rawAssistant?.model, firstModel.model);
 	assert.ok((await reopened.listConversations()).some((entry) => entry.id === id));
 
@@ -118,6 +122,7 @@ void test('after reopening, the same conversation sends prior messages and tool 
 	assert.equal(request.sessionId, id);
 	assert.deepEqual(request.messages.map(({ role }) => role), ['user', 'assistant', 'tool', 'assistant', 'user']);
 	assert.match(request.messages[0]?.content ?? '', /读取笔记/);
+	assert.match(request.messages[0]?.content ?? '', /来自主聊天的引文/);
 	assert.equal(request.messages[1]?.toolCalls?.[0]?.id, read.id);
 	assert.equal(request.messages[2]?.toolCallId, read.id);
 	assert.match(request.messages[2]?.content ?? '', /银杏灯塔-733/);
@@ -132,6 +137,188 @@ void test('after reopening, the same conversation sends prior messages and tool 
 	assert.equal((await reopened.submit({ conversationId: newId, instruction: '这是一次全新的对话。', refs: [] }).result).status, 'done');
 	assert.deepEqual(sent[1]?.messages.map(({ content }) => content), ['这是一次全新的对话。']);
 	reopened.dispose();
+});
+
+void test('a side chat reads notes while the main chat runs, then closes without saving or writing', { timeout: 5_000 }, async (t) => {
+	const { cwd, connect, directory } = await fixture(t);
+	const note = join(cwd, 'fact.md');
+	await writeFile(note, '临时笔记事实-733');
+	const requests: ModelRequest[] = [];
+	const read = { id: 'side-read', name: 'Read', input: { file_path: 'fact.md' } };
+	const write = { id: 'side-write', name: 'Write', input: { file_path: 'forbidden.md', content: '不可写入' } };
+	let mainStarted = () => {};
+	let finishMain = () => {};
+	const mainReady = new Promise<void>((resolve) => { mainStarted = resolve; });
+	const mainWaiting = new Promise<void>((resolve) => { finishMain = resolve; });
+	const sessions = connect((request) => {
+		requests.push(request);
+		const prompt = request.messages.filter(({ role }) => role === 'user').at(-1)?.content ?? '';
+		if (prompt.includes('主聊天继续')) {
+			mainStarted();
+			const answer = reply('主聊天完成。');
+			return { ...answer, async *[Symbol.asyncIterator]() { await mainWaiting; yield* answer; } };
+		}
+		if (prompt.includes('侧聊读取')) {
+			return request.messages.some(({ toolCallId }) => toolCallId === read.id) ? reply('侧聊读完。') : reply('', [read]);
+		}
+		if (prompt.includes('侧聊追问') && !request.messages.some(({ toolCallId }) => toolCallId === write.id)) {
+			return reply('', [write]);
+		}
+		return reply('收到。');
+	}, { ...firstModel, providerModels: { [secondModel.providerId]: [secondModel.model] } });
+	t.after(() => { finishMain(); sessions.dispose(); });
+	const id = await sessions.createConversation();
+	const refs = [{ path: 'fact.md' }];
+	await sessions.submit({ conversationId: id, instruction: '主聊天起点', refs }).result;
+	const parent = await sessions.openConversation();
+	assert.ok(parent);
+	const mainRequest = { conversationId: id, instruction: '主聊天继续', refs: [] };
+	let live: RunState | undefined;
+	const main = sessions.submit(mainRequest, { onEvent: (event) => { if (event.type === 'state') live = event.state; } });
+	await mainReady;
+	assert.ok(live);
+	const side = sessions.createSideChat([...parent.runs, { request: mainRequest, model: firstModel, state: live }]);
+	const readState = await side.submit({ instruction: '侧聊读取', model: secondModel, refs,
+		chatQuotes: ['这里是所选文字'] }).result;
+	assert.equal(readState.status, 'done', readState.error);
+	assert.match(readState.messages.find(({ toolCallId }) => toolCallId === read.id)?.content ?? '', /临时笔记事实-733/);
+	const sideRequests = requests.filter(({ sessionId }) => sessionId === side.id);
+	assert.deepEqual(sideRequests[0]?.tools.map(({ name }) => name).sort(), ['Glob', 'Grep', 'Read']);
+	assert.equal(sideRequests[0]?.model, secondModel.model);
+	assert.match(sideRequests[0]?.messages.at(-1)?.content ?? '', /本次任务的资料引用.*fact\.md/);
+	const context = sideRequests[0]?.messages.map(({ content }) => content).join('\n') ?? '';
+	assert.match(sideRequests[0]?.messages.find(({ content }) => content.startsWith('主聊天起点'))?.content ?? '', /fact\.md/);
+	assert.match(context, /这里是所选文字/);
+	assert.match(context, /打开侧聊时，主任务仍在进行/);
+
+	let approvals = 0;
+	const follow = await side.submit({ instruction: '侧聊追问' }, { approve: async () => { approvals++; return true; } }).result;
+	assert.ok(follow.messages.some(({ toolCallId, isError }) => toolCallId === write.id && isError));
+	assert.equal(approvals, 0);
+	await assert.rejects(access(join(cwd, 'forbidden.md')), { code: 'ENOENT' });
+	assert.equal(await readFile(note, 'utf8'), '临时笔记事实-733');
+	const followRequest = requests.filter(({ sessionId }) => sessionId === side.id)[2];
+	assert.equal(followRequest?.model, firstModel.model);
+	assert.match(followRequest?.messages.map(({ content }) => content).join('\n') ?? '', /侧聊读完/);
+
+	const stopped = await side.submit({ instruction: '关闭侧聊' }, { onEvent: (event) => { if (event.type === 'text-delta') side.close(); } }).result;
+	assert.equal(stopped.status, 'cancelled');
+	assert.throws(() => side.submit({ instruction: '已关闭的侧聊不能发送' }));
+	finishMain();
+	assert.equal((await main.result).status, 'done');
+	const saved = await sessions.openConversation();
+	assert.equal(saved?.id, id);
+	assert.deepEqual(saved?.runs.map(({ request }) => request.instruction), ['主聊天起点', '主聊天继续']);
+	assert.deepEqual((await sessions.listConversations()).map(({ id }) => id), [id]);
+	await assert.rejects(access(join(directory, `${side.id}.jsonl`)), { code: 'ENOENT' });
+});
+
+void test('a side chat can read only the external file attached to its current question', async (t) => {
+	const { cwd, connect } = await fixture(t);
+	const allowed = join(cwd, '..', 'allowed.md');
+	const sibling = join(cwd, '..', 'sibling.md');
+	await Promise.all([writeFile(allowed, '所选库外文件'), writeFile(sibling, '不应读取的文件')]);
+	const calls = [allowed, sibling].map((path, index) => ({ id: `external-${index}`, name: 'Read', input: { file_path: path } }));
+	const side = connect((request) => request.messages.at(-1)?.role === 'tool' ? reply('已检查。') : reply('', calls)).createSideChat([]);
+
+	const first = await side.submit({ instruction: '读取这次的资料', refs: [{ path: allowed, kind: 'file', addedExternal: true }] }).result;
+	assert.match(first.messages.find(({ toolCallId }) => toolCallId === calls[0]?.id)?.content ?? '', /所选库外文件/);
+	assert.ok(first.messages.some(({ toolCallId, isError }) => toolCallId === calls[1]?.id && isError));
+
+	const follow = await side.submit({ instruction: '再次读取同一份资料' }).result;
+	assert.ok(follow.messages.filter(({ toolCallId }) => toolCallId).every(({ isError }) => isError));
+	assert.equal(follow.messages.filter(({ toolCallId }) => toolCallId).length, 2);
+	side.close();
+});
+
+void test('a queued turn leaves the saved queue only once the next transcript starts', async (t) => {
+	const { connect, directory } = await fixture(t);
+	const sessions = connect(() => reply('已回答。'));
+	const store = createConversationStore(directory);
+	const conversationId = await sessions.createConversation();
+	const first = { id: 'queued-first', request: { conversationId, instruction: '排在最前面\n第二行', refs: [] } };
+	const second = { id: 'queued-second', request: { conversationId, instruction: '稍后执行', refs: [] } };
+	await store.enqueue(conversationId, first);
+	await store.enqueue(conversationId, first);
+	await store.enqueue(conversationId, second);
+	await assert.rejects(sessions.submitQueued(second, {}, () => assert.fail('后入队的消息先执行')).result);
+	assert.deepEqual(await store.getQueued(conversationId), [first, second]);
+
+	let whenStarted: ReturnType<typeof store.load> | undefined;
+	const run = sessions.submitQueued(first, {}, () => { whenStarted = store.load(conversationId); });
+	assert.equal((await run.result).status, 'done');
+	const saved = await whenStarted;
+	assert.deepEqual(saved?.queue, [second]);
+	assert.equal(saved?.runs[0]?.request.instruction, first.request.instruction);
+	sessions.dispose();
+});
+
+void test('main chats run and save independently while only the foreground chat is remembered', { timeout: 5_000 }, async (t) => {
+	const { connect, directory } = await fixture(t);
+	const requests: ModelRequest[] = [];
+	const releases = new Map<string, () => void>();
+	let started = () => {};
+	const bothRunning = new Promise<void>((resolve) => { started = resolve; });
+	const sessions = connect((request) => {
+		requests.push(request);
+		const conversationId = request.sessionId;
+		assert.ok(conversationId);
+		const response = reply('已回答。');
+		return { ...response, async *[Symbol.asyncIterator]() {
+			await new Promise<void>((release) => {
+				releases.set(conversationId, release);
+				if (releases.size === 2) started();
+			});
+			yield* response;
+		} };
+	}, { ...firstModel, providerModels: { [firstModel.providerId]: [firstModel.model], [secondModel.providerId]: [secondModel.model] } },
+	(_model, preferred) => ({ levels: ['low', 'high'], level: preferred ?? 'low' }));
+	t.after(() => {
+		sessions.dispose();
+		for (const release of releases.values()) release();
+	});
+	const store = createConversationStore(directory);
+	const backgroundId = await sessions.createConversation();
+	const foregroundId = await sessions.createConversation();
+	const foregroundRequest = { conversationId: foregroundId, instruction: '前台任务', refs: [] };
+	const backgroundMessage = { id: 'background-queued', request: { conversationId: backgroundId, instruction: '后台排队任务', refs: [] } };
+	await store.enqueue(backgroundId, backgroundMessage);
+	const foregroundChoice = { ...firstModel, reasoning: 'high' };
+	const backgroundChoice = { ...secondModel, reasoning: null };
+	const foreground = sessions.submit(foregroundRequest, {}, undefined, { model: foregroundChoice });
+	const background = sessions.submitQueued(backgroundMessage, {}, () => {}, { model: backgroundChoice, rememberConversation: false });
+	await bothRunning;
+	assert.equal(await store.lastOpened(), foregroundId);
+	assert.throws(() => sessions.submit({ ...foregroundRequest, conversationId: foregroundId.toUpperCase() }), /正在运行/);
+	assert.throws(() => sessions.submit({ ...foregroundRequest, conversationId: 'unconfigured-model-chat' }, {}, undefined,
+		{ model: { ...firstModel, model: 'unconfigured' } }), /模型已不可用/);
+	assert.ok(sessions.canSteer(foregroundId.toUpperCase(), foreground.taskId));
+	assert.ok(sessions.canSteer(backgroundId, background.taskId));
+	await assert.rejects(sessions.steer(foreground.taskId, backgroundMessage), /无法接受/);
+	await assert.rejects(sessions.deleteConversation(backgroundId.toUpperCase()), /先停止/);
+	await assert.rejects(sessions.forkConversation(backgroundId, background.taskId), /正在运行/);
+	const frontRequest = requests.find(({ sessionId }) => sessionId === foregroundId);
+	const backRequest = requests.find(({ sessionId }) => sessionId === backgroundId);
+	assert.deepEqual([frontRequest?.providerId, frontRequest?.model, frontRequest?.reasoning],
+		[foregroundChoice.providerId, foregroundChoice.model, foregroundChoice.reasoning]);
+	assert.deepEqual([backRequest?.providerId, backRequest?.model, backRequest?.reasoning],
+		[backgroundChoice.providerId, backgroundChoice.model, backgroundChoice.reasoning]);
+	await sessions.cancel(foreground.taskId);
+	assert.equal(frontRequest?.signal?.aborted, true);
+	assert.equal(backRequest?.signal?.aborted, false);
+	releases.get(foregroundId)?.();
+	assert.equal((await foreground.result).status, 'cancelled');
+	const branch = await sessions.forkConversation(foregroundId, foreground.taskId, false);
+	assert.equal(await store.lastOpened(), foregroundId);
+	await sessions.deleteConversation(branch.id);
+	releases.get(backgroundId)?.();
+	assert.equal((await background.result).status, 'done');
+	assert.equal((await store.load(foregroundId)).runs[0]?.state.status, 'cancelled');
+	const saved = await store.load(backgroundId);
+	assert.deepEqual(saved.runs.map(({ request, model, state }) => [request.instruction, model, state.status]),
+		[[backgroundMessage.request.instruction, backgroundChoice, 'done']]);
+	assert.equal(saved.queue?.length ?? 0, 0);
+	assert.equal(await store.lastOpened(), foregroundId);
 });
 
 void test('branching copies through the selected reply and editing replaces only the original tail', async (t) => {
@@ -177,12 +364,26 @@ void test('deleting a saved conversation rejects an active run and prevents stal
 	assert.equal((await sessions.listConversations())[0]?.title, '新标题');
 	await sessions.deleteConversation(id);
 	assert.equal(await sessions.openConversation(), null);
-	await assert.rejects(sessions.openConversation(id), /对话已删除|对话不存在/);
+	await assert.rejects(sessions.openConversation(id), MissingConversationError);
 	assert.equal((await sessions.submit(request).result).status, 'failed');
 	assert.equal(requests, 1);
 	assert.deepEqual(await sessions.listConversations(), []);
 	const next = await sessions.createConversation();
 	assert.deepEqual(await connect(() => reply('')).openConversation(), { id: next, runs: [] });
+});
+
+void test('opening a stale history entry removed outside the session preserves the last opened chat', async (t) => {
+	const { connect, directory } = await fixture(t);
+	const sessions = connect(() => reply('已保存。'));
+	const stale = await sessions.createConversation();
+	await sessions.submit({ conversationId: stale, instruction: '会被移除的对话', refs: [] }).result;
+	const current = await sessions.createConversation();
+	await sessions.submit({ conversationId: current, instruction: '保留的对话', refs: [] }).result;
+	assert.ok((await sessions.listConversations()).some(({ id }) => id === stale));
+	await rm(join(directory, `${stale}.jsonl`));
+	await assert.rejects(sessions.openConversation(stale), MissingConversationError);
+	assert.equal((await sessions.openConversation())?.id, current);
+	assert.deepEqual((await sessions.listConversations()).map(({ id }) => id), [current]);
 });
 
 void test('resumed runs retain their saved effort and legacy runs ignore the current chat choice', async (t) => {

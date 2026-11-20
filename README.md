@@ -8,11 +8,19 @@ Open **Scribe Ai** and submit a task. The agent starts in the current vault. Und
 
 You can expand saved text selections in older conversations to review the exact excerpts sent with those messages.
 
-Chats and tool results are saved locally in the Scribe Ai plugin folder for this vault. Reopening Obsidian restores your last chat, including any partial reply saved when you stopped or closed the chat. Send a follow-up to pick up from it, or select **Review before resuming** to inspect the saved task's outgoing content and destination before continuing it. Select **New chat** for a fresh conversation.
+Chats and tool results are saved locally in the Scribe Ai plugin folder for this vault. Reopening Obsidian restores your last chat, including any partial reply saved when you stopped or closed the chat view. Send a follow-up to pick up from it, or select **Review before resuming** to inspect the saved task's outgoing content and destination before continuing it.
+
+Select **+** above the chat to open another conversation. Each tab keeps its own draft, queue, model, and running task. Right-click a tab to rename or close it. A task keeps running after you close its tab, and **Chat history** reopens the conversation.
 
 When you send a task, the current chat history, instructions, file references, and tool results it uses can be sent to the selected model provider. Select **Stop** to cancel pending work. Tools from a previous task only run again when a new task requests them and any required approval is granted.
 
 `Read`, `Glob`, and `Grep` retrieve information. `Write`, `Edit`, and `NotebookEdit` preview changes for approval. An overwrite requires the model to receive every line of the file's current version in this task. For long notes, request smaller pages or use a local edit. Chat does not run shell commands. Turning off **Tool calling** for the selected model also blocks local tool execution.
+
+## Side chat
+
+Select **Ask in side chat** on a queued message to send its text, references and quotes to side chat. The message leaves the queue after the question starts, and your main draft stays in the input box. Enter `/side` to open side chat, or `/side your question` to send a question immediately. **Add to chat** attaches selected passages to the current input. Each main conversation has its own side chat in Obsidian's right sidebar. It uses the main conversation as it was when you first opened it. The main task can keep running while you ask follow-up questions.
+
+Side chat can read and search notes in the current vault using `Read`, `Glob`, and `Grep`. Use **Add context** to attach a vault file or folder, and choose a model for that side chat from the input box. The selected provider can receive the inherited conversation, attached text and paths, and note contents it reads. Closing the side chat tab cancels its current response and clears its messages. Side chats are separate from the saved chat history.
 
 ## Development
 

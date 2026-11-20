@@ -121,7 +121,10 @@ const server = http.createServer((request, response) => {
 			const prompt = model === 'with-zero' ? 0 : 810;
 			const usage = model === 'output-only' ? { completion_tokens: 42 } : {
 				prompt_tokens: prompt, completion_tokens: 42,
-				prompt_tokens_details: { cached_tokens: prompt ? 800 : 0, cache_write_tokens: prompt ? 2 : 0 },
+				prompt_tokens_details: {
+					cached_tokens: prompt ? 800 : 0,
+					...(model === 'with-cache-read' ? {} : { cache_write_tokens: prompt ? 2 : 0 }),
+				},
 			};
 			const chunk = { id: 'chat-usage-test', object: 'chat.completion.chunk', created: 1, model };
 			response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -476,7 +479,7 @@ void test('provider usage distinguishes real zeros, reported totals and missing 
 	const providerId = 'usage-test';
 	const service = createModelService(credentials, transport, {
 		customProviders: () => [{ id: providerId, label: 'Usage fixture', baseUrl: `${baseUrl}/reported-usage`,
-			protocol: 'openai-completions', models: ['with-counts', 'output-only', 'with-zero'] }],
+			protocol: 'openai-completions', models: ['with-counts', 'with-cache-read', 'output-only', 'with-zero'] }],
 	});
 	async function measure(model: string) {
 		const response = await service.send({ providerId, model, messages: [], tools: [] });
@@ -490,6 +493,11 @@ void test('provider usage distinguishes real zeros, reported totals and missing 
 	assert.deepEqual(complete.report, { input: 8, cacheRead: 800, cacheWrite: 2, prompt: 810, output: 42 });
 	assert.deepEqual(complete.metrics.context, { prompt: 810, capacity: 1000, remaining: 190, percent: 81 });
 	assert.equal(complete.metrics.usage?.total, 852);
+	const withCacheRead = await measure('with-cache-read');
+	assert.deepEqual(withCacheRead.report, { prompt: 810, cacheRead: 800, output: 42 });
+	assert.equal(withCacheRead.metrics.usage?.input, 10);
+	assert.equal(withCacheRead.metrics.usage?.cacheWrite, undefined);
+	assert.equal(withCacheRead.metrics.usage?.total, 852);
 	const partial = await measure('output-only');
 	assert.deepEqual(partial.report, { output: 42 });
 	assert.equal(partial.metrics.context, undefined);
@@ -781,6 +789,31 @@ void test('optional reasoning has an off choice without setting an effort, and r
 	assert.equal(saved.level, 'high');
 	await service.send({ ...required, messages: [], tools: [], reasoning: saved.level });
 	assert.equal(openAIBody.reasoning_effort, 'high');
+});
+
+void test('new thinking settings remember custom English values and send them literally', async () => {
+	const target = { providerId: 'custom-efforts', model: 'local-model' };
+	const key = chatModelKey(target.providerId, target.model);
+	const settings = normalizeSettings({
+		...target,
+		providerModels: { [target.providerId]: [target.model] },
+		thinkingByModel: { [key]: 'Ultra-fast' },
+		modelOverrides: { [target.providerId]: { [target.model]: {
+			capabilities: { reasoning: true }, literalThinkingLevels: true,
+			thinkingLevels: ['off', 'minimal', 'low', 'max', 'Ultra-fast', '中文'],
+		} } },
+	});
+	const service = createModelService(credentials, transport, {
+		customProviders: () => [{ id: target.providerId, label: 'Custom', baseUrl: `${baseUrl}/openai`,
+			protocol: 'openai-completions', models: [target.model] }],
+		modelOverrides: () => settings.modelOverrides,
+	});
+	const options = service.thinkingOptions(target, settings.thinkingByModel[key]);
+	assert.deepEqual(options, { levels: ['off', 'minimal', 'low', 'max', 'Ultra-fast'], level: 'Ultra-fast' });
+	await service.send({ ...target, messages: [], tools: [], reasoning: options.level });
+	assert.equal(openAIBody.reasoning_effort, 'Ultra-fast');
+	await service.send({ ...target, messages: [], tools: [], reasoning: 'max' });
+	assert.equal(openAIBody.reasoning_effort, 'max');
 });
 
 void test('New provider model configuration updates only an isolated draft', () => {

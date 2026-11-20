@@ -1,7 +1,7 @@
 import { ItemView, WorkspaceLeaf } from 'obsidian';
 import type { IconName } from 'obsidian';
 import { createRoot } from 'react-dom/client';
-import App from './App';
+import ChatTabs from './ChatTabs';
 import { CHAT_VIEW_DISPLAY, CHAT_VIEW_ICON, CHAT_VIEW_TYPE } from '../constants';
 import type ScribeAiPlugin from '../main';
 
@@ -30,7 +30,7 @@ export class ChatView extends ItemView {
 
 	override async onOpen(): Promise<void> {
 		this.root = createRoot(this.contentEl);
-		this.root.render(<App plugin={this.plugin} />);
+		this.root.render(<ChatTabs plugin={this.plugin} />);
 	}
 
 	override async onClose(): Promise<void> {

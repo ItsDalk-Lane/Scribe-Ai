@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { normalizeSettings } from '../../orchestration/settings/defaults';
 import { chatModelOptions } from '../useChatModel';
 
-void test('only configured models appear, and identical model IDs remain distinct across providers', () => {
+void test('configured providers include empty model lists, and identical model IDs remain distinct across providers', () => {
 	const settings = normalizeSettings({
 		providerId: 'local-2',
 		model: 'model-a',
@@ -22,9 +22,13 @@ void test('only configured models appear, and identical model IDs remain distinc
 	assert.deepEqual(groups.map(({ label, models }) => [label, models.map(({ id }) => id)]), [
 		['Local · local-1', ['model-a', 'model-b']],
 		['Local · local-2', ['model-a']],
+		['empty', []],
 	]);
 	assert.notEqual(groups[0]?.models[0]?.value, groups[1]?.models[0]?.value);
 	assert.equal(value, groups[1]?.models[0]?.value);
+	const otherTab = { providerId: 'local-1', model: 'model-a' };
+	assert.equal(chatModelOptions(settings, providers, otherTab).value, groups[0]?.models[0]?.value);
+	assert.equal(chatModelOptions(settings, providers).value, value);
 
 	delete settings.providerModels['local-2'];
 	assert.equal(chatModelOptions(settings, providers).value, '');

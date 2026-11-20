@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import fs, { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -100,6 +101,45 @@ void test('File tools read and write vault files and authorized external files',
 	await run('Read', { file_path: external });
 	await run('Write', { file_path: external, content: 'confirmed replacement' });
 	assert.equal(await readFile(external, 'utf8'), 'confirmed replacement');
+});
+
+void test('concurrent external edits cannot both replace the same approved file', { timeout: 5_000 }, async (testContext) => {
+	const { outside, prepare, run } = await fileToolsFixture(testContext);
+	const shared = join(outside, 'shared.txt');
+	const independent = join(outside, 'independent.txt');
+	await Promise.all([writeFile(shared, 'old'), writeFile(independent, 'old')]);
+	await Promise.all([run('Read', { file_path: shared }), run('Read', { file_path: independent })]);
+	const edit = (path: string, replacement: string) => prepare('Edit', { file_path: path, old_string: 'old', new_string: replacement });
+	const [first, conflicting, other] = await Promise.all([edit(shared, 'first'), edit(shared, 'second'), edit(independent, 'other')]);
+	let reachedRename = () => {};
+	let releaseRename = () => {};
+	const ready = new Promise<void>((resolve) => { reachedRename = resolve; });
+	const waiting = new Promise<void>((resolve) => { releaseRename = resolve; });
+	const rename = fs.rename;
+	let hold = true;
+	const mock = testContext.mock.method(fs, 'rename', async (...args: Parameters<typeof rename>) => {
+		if (hold && args[1] === shared) {
+			hold = false;
+			reachedRename();
+			await waiting;
+		}
+		return rename(...args);
+	});
+	syncBuiltinESMExports();
+	const writing = Promise.resolve(first.run());
+	try {
+		await Promise.race([ready, writing]);
+		await assert.rejects(async () => conflicting.run(), /正在修改/);
+		await other.run();
+		assert.equal(await readFile(independent, 'utf8'), 'other');
+		assert.equal(await readFile(shared, 'utf8'), 'old');
+	} finally {
+		releaseRename();
+		mock.mock.restore();
+		syncBuiltinESMExports();
+		await writing;
+	}
+	assert.equal(await readFile(shared, 'utf8'), 'first');
 });
 
 void test('Read bounds oversized results and gives a continuation line', async (testContext) => {

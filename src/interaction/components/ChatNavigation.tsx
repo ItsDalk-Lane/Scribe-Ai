@@ -87,14 +87,22 @@ export function ConversationList({ conversations, conversationId, ...actions }: 
 	);
 }
 
-export default function ChatNavigation({ conversations, conversationId, disabled, managing, onSelect, onNew, onRename, onDelete }:
-	ConversationListProps & { managing: boolean; onNew: () => void }) {
+export default function ChatNavigation({ conversations, conversationId, disabled, managing, onSelect, onNew, onRename, onDelete, onRefresh }:
+	ConversationListProps & { managing: boolean; onNew: () => void; onRefresh: () => Promise<void> }) {
 	const text = uiText();
 	const group = useRef<HTMLDivElement>(null);
 	const trigger = useRef<HTMLButtonElement>(null);
 	const panelId = useId();
 	const [open, setOpen] = useState(false);
-	const showHistory = open && !disabled && conversations.length > 0;
+	const [refreshing, setRefreshing] = useState(false);
+	const showHistory = open && !disabled;
+
+	function toggleHistory() {
+		setOpen(!open);
+		if (open || refreshing) return;
+		setRefreshing(true);
+		void onRefresh().finally(() => setRefreshing(false));
+	}
 
 	useEffect(() => {
 		if (disabled) setOpen(false);
@@ -122,19 +130,21 @@ export default function ChatNavigation({ conversations, conversationId, disabled
 				setOpen(false);
 				trigger.current?.focus();
 			}}>
-				<button type="button" className="scribe-chat-icon-button" ref={trigger} disabled={disabled || !conversations.length}
+				<button type="button" className="scribe-chat-icon-button" ref={trigger} disabled={disabled || managing}
 					aria-label={text.chatHistory} title={text.chatHistory} aria-expanded={showHistory}
-					aria-controls={showHistory ? panelId : undefined} onClick={() => setOpen(!showHistory)}>
+					aria-controls={showHistory ? panelId : undefined} onClick={toggleHistory}>
 					<ChatIcon name="history" />
 				</button>
 				{showHistory && <section className="scribe-history-panel" id={panelId} aria-label={text.chatHistory}>
-					<ConversationList conversations={conversations} conversationId={conversationId} disabled={disabled || managing}
+					{refreshing || !conversations.length ? <p className="scribe-chat-loading" role="status">
+						{refreshing ? text.chatLoadingHistory : text.chatNoSavedConversations}
+					</p> : <ConversationList conversations={conversations} conversationId={conversationId} disabled={disabled || managing}
 						onRename={onRename} onDelete={onDelete}
 						onSelect={(id) => {
 							setOpen(false);
 							trigger.current?.focus();
-							if (id !== conversationId) onSelect(id);
-						}} />
+							onSelect(id);
+						}} />}
 				</section>}
 			</div>
 		</nav>

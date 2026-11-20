@@ -1,5 +1,6 @@
 import { getLanguage } from 'obsidian';
 import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
+import { isBuiltInThinkingLevel } from '../orchestration/settings/thinking';
 
 export interface UiText {
 	openChatCommand: string;
@@ -85,6 +86,12 @@ export interface UiText {
 	capabilityStructured: string;
 	thinkingLevel: string;
 	thinkingLevelNames: Record<ModelThinkingLevel, string>;
+	addThinkingLevel: string;
+	removeThinkingLevel: string;
+	customThinkingLevel: string;
+	invalidThinkingLevel: string;
+	chatChooseProvider: string;
+	chatVisionModel: string;
 	chatChooseModel: string;
 	chatNoModelSelected: string;
 	chatResumeThinkingUnavailable: string;
@@ -136,6 +143,8 @@ export interface UiText {
 	chatPickVaultItem: string;
 	chatSelectionPreview: string;
 	chatRemoveSelection: string;
+	chatAddSelection: string;
+	chatQuotedText: string;
 	chatAddExternalPath: string;
 	chatPickExternalFile: string;
 	chatPickExternalFolder: string;
@@ -154,8 +163,16 @@ export interface UiText {
 	chatRenameError: string;
 	chatDeleteError: string;
 	chatNewConversation: string;
+	chatNewTab: string;
+	chatTabs: string;
+	chatCloseTab: string;
+	chatMoreTabs: string;
+	chatTabRunning: string;
+	chatTabAttention: string;
+	chatTabError: string;
 	chatUntitled: string;
 	chatLoadingHistory: string;
+	chatNoSavedConversations: string;
 	chatHistoryError: string;
 	chatInterrupted: string;
 	chatLastStep: string;
@@ -210,6 +227,10 @@ export interface UiText {
 	chatToolGroupGeneric: string;
 	chatOpenToolTarget: string;
 	chatResponding: string;
+	chatWorkingThinking: string;
+	chatWorkingSeconds: string;
+	chatWorkingMinutes: string;
+	chatWorkingHours: string;
 	chatCopyReply: string;
 	chatCitationUnavailable: string;
 	chatCopiedReply: string;
@@ -244,9 +265,36 @@ export interface UiText {
 	chatCancelEdit: string;
 	chatForkReply: string;
 	chatForkFailed: string;
+	sideChatOpen: string;
+	sideChatTitle: string;
+	sideChatClose: string;
+	sideChatPlaceholder: string;
+	sideChatOpenFailed: string;
+	queueCount: string;
+	queueSending: string;
+	queueEnterHint: string;
+	queueImage: string;
+	queueFile: string;
+	queueEdit: string;
+	queueSave: string;
+	queueCancel: string;
+	queueDelete: string;
+	queueSteer: string;
+	queueSteerUnavailable: string;
+	queueSideChat: string;
+	queueActionPending: string;
+	queueMessageChanged: string;
+	queueEditAttachment: string;
+	queueEditFailed: string;
+	queueDeleteFailed: string;
+	queueSteerFailed: string;
+	queueResume: string;
+	queueSendFailed: string;
+	queueStartFailed: string;
+	sideChatBusy: string;
+	sideChatExternalFolder: string;
 	chatProcessSummary: string;
 	chatActivitySummary: string;
-	chatAverageSpeed: string;
 	chatSpeedValue: string;
 	chatActivityStats: string;
 	chatModelDuration: string;
@@ -265,12 +313,10 @@ export interface UiText {
 	chatOutputTokens: string;
 	chatTotalTokens: string;
 	chatReportedCost: string;
-	chatMissingUsage: string;
 	chatIncompleteUsage: string;
 	chatContextUsed: string;
 	chatContextPending: string;
 	chatContextStats: string;
-	chatContextSource: string;
 	chatPromptTokens: string;
 	chatWindowCapacity: string;
 	chatRemainingCapacity: string;
@@ -363,6 +409,12 @@ const EN: UiText = {
 	capabilityStructured: 'Structured output',
 	thinkingLevel: 'Thinking level',
 	thinkingLevelNames: { off: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Very high', max: 'Maximum' },
+	addThinkingLevel: 'Add a thinking level',
+	removeThinkingLevel: 'Remove {level}',
+	customThinkingLevel: 'Custom English level',
+	invalidThinkingLevel: 'Enter a new level in English using letters, numbers, hyphens or underscores.',
+	chatChooseProvider: 'Choose a provider',
+	chatVisionModel: 'Vision',
 	chatChooseModel: 'Choose a model',
 	chatNoModelSelected: 'No model selected',
 	chatResumeThinkingUnavailable: 'The saved thinking level ({level}) is unavailable.',
@@ -409,11 +461,13 @@ const EN: UiText = {
 	taskPlaceholder: 'Describe the task to complete',
 	submit: 'Submit',
 	noExecution: 'No execution records yet',
-	chatContextLabel: 'Task files and folders',
+	chatContextLabel: 'Attached context',
 	chatAddContext: 'Add context',
 	chatPickVaultItem: 'Select a vault file or folder',
 	chatSelectionPreview: 'Selected text preview',
 	chatRemoveSelection: 'Remove selection',
+	chatAddSelection: 'Add to chat',
+	chatQuotedText: 'Selected text ({n})',
 	chatAddExternalPath: 'Path outside the vault',
 	chatPickExternalFile: 'Choose file…',
 	chatPickExternalFolder: 'Choose folder…',
@@ -432,8 +486,16 @@ const EN: UiText = {
 	chatRenameError: 'Could not save the chat title.',
 	chatDeleteError: 'Could not delete the chat.',
 	chatNewConversation: 'New conversation',
+	chatNewTab: 'New tab',
+	chatTabs: 'Conversation tabs',
+	chatCloseTab: 'Close tab',
+	chatMoreTabs: 'More tabs',
+	chatTabRunning: 'Running',
+	chatTabAttention: 'Needs attention',
+	chatTabError: 'Task failed',
 	chatUntitled: 'Untitled conversation',
 	chatLoadingHistory: 'Loading conversation…',
+	chatNoSavedConversations: 'No saved chats',
 	chatHistoryError: 'Could not load the saved conversation.',
 	chatInterrupted: 'Interrupted',
 	chatLastStep: 'Last saved step',
@@ -488,6 +550,10 @@ const EN: UiText = {
 	chatToolGroupGeneric: 'Called {name} {count} times',
 	chatOpenToolTarget: 'Open {target}',
 	chatResponding: 'Writing a reply…',
+	chatWorkingThinking: 'Thinking…',
+	chatWorkingSeconds: '{s}s',
+	chatWorkingMinutes: '{m}m {s}s',
+	chatWorkingHours: '{h}h {m}m {s}s',
 	chatCopyReply: 'Copy reply',
 	chatCitationUnavailable: 'Could not open the cited note.',
 	chatCopiedReply: 'Reply copied',
@@ -522,9 +588,36 @@ const EN: UiText = {
 	chatCancelEdit: 'Cancel',
 	chatForkReply: 'Branch',
 	chatForkFailed: 'Could not branch the conversation.',
-	chatProcessSummary: 'Messages {messages} · Tool calls {tools}',
-	chatActivitySummary: 'Turns {rounds} · Messages {messages}',
-	chatAverageSpeed: 'Average {n} tokens/s',
+	sideChatOpen: 'Open side chat',
+	sideChatTitle: 'Side chat',
+	sideChatClose: 'Close side chat',
+	sideChatPlaceholder: 'Ask a side question',
+	sideChatOpenFailed: 'Could not open side chat in the right sidebar.',
+	queueCount: '{n} queued messages',
+	queueSending: 'Sending…',
+	queueEnterHint: 'Press Enter in the message field to add a message to the queue.',
+	queueImage: 'Queued message image',
+	queueFile: 'Queued file {name}',
+	queueEdit: 'Edit queued message',
+	queueSave: 'Save queued message',
+	queueCancel: 'Cancel edit',
+	queueDelete: 'Delete queued message',
+	queueSteer: 'Send into current task',
+	queueSteerUnavailable: 'You can only send into a running task',
+	queueSideChat: 'Ask in side chat',
+	queueActionPending: 'An action on this message is in progress…',
+	queueMessageChanged: 'This queued message has changed.',
+	queueEditAttachment: 'Messages with non-text content cannot be edited yet',
+	queueEditFailed: 'Could not edit. The message may have started sending.',
+	queueDeleteFailed: 'Could not delete. The message may have started sending.',
+	queueSteerFailed: 'Could not send into the current task. Try again.',
+	queueResume: 'Continue queue',
+	queueSendFailed: 'Could not save the message to the queue.',
+	queueStartFailed: 'Could not start the next queued message. Try continuing the queue again.',
+	sideChatBusy: 'Side chat is already answering. Try again when it finishes.',
+	sideChatExternalFolder: 'Side chat can only receive individual files from outside the vault.',
+	chatProcessSummary: 'Steps {messages} · Tool calls {tools}',
+	chatActivitySummary: 'Turns {rounds} · Steps {messages}',
 	chatSpeedValue: '{n} tokens/s',
 	chatActivityStats: 'Conversation activity',
 	chatModelDuration: 'Model time',
@@ -543,12 +636,10 @@ const EN: UiText = {
 	chatOutputTokens: 'Output',
 	chatTotalTokens: 'Total',
 	chatReportedCost: 'Reported cost',
-	chatMissingUsage: 'Some usage was not reported. Figures shown are based on reported data.',
 	chatIncompleteUsage: 'Partial usage',
-	chatContextUsed: '{n}% used',
+	chatContextUsed: '{n}%',
 	chatContextPending: 'Updates on next request',
 	chatContextStats: 'Context {n}% used',
-	chatContextSource: 'From the most recent request.',
 	chatPromptTokens: 'Prompt tokens',
 	chatWindowCapacity: 'Model context window',
 	chatRemainingCapacity: 'Remaining capacity',
@@ -640,7 +731,13 @@ const ZH_CN: UiText = {
 	capabilityTools: '工具调用',
 	capabilityStructured: '结构化输出',
 	thinkingLevel: '推理档位',
-	thinkingLevelNames: { off: '关闭', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高' },
+	thinkingLevelNames: { off: '关闭', minimal: '极低', low: '轻度', medium: '中', high: '高', xhigh: '极高', max: '最高' },
+	addThinkingLevel: '添加推理档位',
+	removeThinkingLevel: '移除 {level}',
+	customThinkingLevel: '输入自定义英文档位',
+	invalidThinkingLevel: '请输入尚未添加的英文档位，可使用字母、数字、连字符或下划线。',
+	chatChooseProvider: '选择服务商',
+	chatVisionModel: '视觉',
 	chatChooseModel: '选择模型',
 	chatNoModelSelected: '未选择模型',
 	chatResumeThinkingUnavailable: '原任务使用的「{level}」推理档位已不可用。',
@@ -687,11 +784,13 @@ const ZH_CN: UiText = {
 	taskPlaceholder: '描述要完成的任务',
 	submit: '提交',
 	noExecution: '暂无执行记录',
-	chatContextLabel: '任务文件和文件夹',
+	chatContextLabel: '已添加的资料',
 	chatAddContext: '添加参考资料',
 	chatPickVaultItem: '选择库内文件或文件夹',
 	chatSelectionPreview: '选区预览',
 	chatRemoveSelection: '移除选区',
+	chatAddSelection: '添加到对话',
+	chatQuotedText: '{n} 个已选文本片段',
 	chatAddExternalPath: '库外路径',
 	chatPickExternalFile: '选择文件…',
 	chatPickExternalFolder: '选择文件夹…',
@@ -710,8 +809,16 @@ const ZH_CN: UiText = {
 	chatRenameError: '无法保存对话标题。',
 	chatDeleteError: '无法删除对话。',
 	chatNewConversation: '新建对话',
+	chatNewTab: '新建标签页',
+	chatTabs: '对话标签页',
+	chatCloseTab: '关闭标签页',
+	chatMoreTabs: '更多标签页',
+	chatTabRunning: '正在运行',
+	chatTabAttention: '有新进度或需要处理',
+	chatTabError: '任务失败',
 	chatUntitled: '未命名对话',
 	chatLoadingHistory: '正在加载对话…',
+	chatNoSavedConversations: '暂无已保存的对话',
 	chatHistoryError: '无法加载已保存的对话。',
 	chatInterrupted: '已中断',
 	chatLastStep: '上次停在',
@@ -766,6 +873,10 @@ const ZH_CN: UiText = {
 	chatToolGroupGeneric: '调用了 {name} {count} 次',
 	chatOpenToolTarget: '打开 {target}',
 	chatResponding: '正在回复…',
+	chatWorkingThinking: '正在思考…',
+	chatWorkingSeconds: '{s}秒',
+	chatWorkingMinutes: '{m}分{s}秒',
+	chatWorkingHours: '{h}时{m}分{s}秒',
 	chatCopyReply: '复制回复',
 	chatCitationUnavailable: '无法打开这篇来源笔记。',
 	chatCopiedReply: '已复制回复',
@@ -800,9 +911,36 @@ const ZH_CN: UiText = {
 	chatCancelEdit: '取消',
 	chatForkReply: '分支',
 	chatForkFailed: '无法创建会话分支。',
-	chatProcessSummary: '{messages} 条消息 · {tools} 次工具调用',
-	chatActivitySummary: '{rounds} 轮 · {messages} 条消息',
-	chatAverageSpeed: '平均速度 {n} 字/秒',
+	sideChatOpen: '打开侧聊',
+	sideChatTitle: '侧聊',
+	sideChatClose: '关闭侧聊',
+	sideChatPlaceholder: '输入侧聊问题',
+	sideChatOpenFailed: '无法在右侧边栏打开侧聊。',
+	queueCount: '{n} 条排队消息',
+	queueSending: '发送中…',
+	queueEnterHint: '在输入框按 Enter 可将消息加入队列。',
+	queueImage: '排队消息图片',
+	queueFile: '排队文件 {name}',
+	queueEdit: '编辑排队消息',
+	queueSave: '保存排队消息',
+	queueCancel: '取消编辑',
+	queueDelete: '删除排队消息',
+	queueSteer: '插话发送',
+	queueSteerUnavailable: '仅运行中可插话发送',
+	queueSideChat: '在侧聊提问',
+	queueActionPending: '这条消息的操作正在处理…',
+	queueMessageChanged: '这条排队消息已变更。',
+	queueEditAttachment: '包含非文本内容，暂不支持编辑',
+	queueEditFailed: '编辑失败：这条消息可能已经开始发送。',
+	queueDeleteFailed: '删除失败：这条消息可能已经开始发送。',
+	queueSteerFailed: '插话发送失败，请重试。',
+	queueResume: '继续队列',
+	queueSendFailed: '无法保存排队消息。',
+	queueStartFailed: '无法开始下一条排队消息，请重新继续队列。',
+	sideChatBusy: '侧聊正在回答，请等它答完后再试。',
+	sideChatExternalFolder: '侧聊一次只能读取手动附上的库外文件，无法转交库外文件夹。',
+	chatProcessSummary: '{messages} 步 · {tools} 次工具调用',
+	chatActivitySummary: '{rounds} 轮 · {messages} 步',
 	chatSpeedValue: '{n} 字/秒',
 	chatActivityStats: '会话活动',
 	chatModelDuration: '大模型耗时',
@@ -821,12 +959,10 @@ const ZH_CN: UiText = {
 	chatOutputTokens: '输出',
 	chatTotalTokens: '合计',
 	chatReportedCost: '实报成本',
-	chatMissingUsage: '服务商返回的用量不完整，此处显示已收到的读数。',
 	chatIncompleteUsage: '部分用量',
-	chatContextUsed: '已用 {n}%',
+	chatContextUsed: '{n}%',
 	chatContextPending: '待下次请求更新',
 	chatContextStats: '上下文已用 {n}%',
-	chatContextSource: '读数来自最近一次请求。',
 	chatPromptTokens: '提示词 token 总数',
 	chatWindowCapacity: '模型窗口容量',
 	chatRemainingCapacity: '剩余容量',
@@ -918,7 +1054,13 @@ const ZH_TW: UiText = {
 	capabilityTools: '工具調用',
 	capabilityStructured: '結構化輸出',
 	thinkingLevel: '推理檔位',
-	thinkingLevelNames: { off: '關閉', minimal: '極低', low: '低', medium: '中', high: '高', xhigh: '極高', max: '最高' },
+	thinkingLevelNames: { off: '關閉', minimal: '極低', low: '輕度', medium: '中', high: '高', xhigh: '極高', max: '最高' },
+	addThinkingLevel: '新增推理檔位',
+	removeThinkingLevel: '移除 {level}',
+	customThinkingLevel: '輸入自訂英文檔位',
+	invalidThinkingLevel: '請輸入尚未新增的英文檔位，可使用字母、數字、連字號或底線。',
+	chatChooseProvider: '選擇服務商',
+	chatVisionModel: '視覺',
 	chatChooseModel: '選擇模型',
 	chatNoModelSelected: '未選擇模型',
 	chatResumeThinkingUnavailable: '原任務使用的「{level}」推理檔位已無法使用。',
@@ -965,11 +1107,13 @@ const ZH_TW: UiText = {
 	taskPlaceholder: '描述要完成的任務',
 	submit: '提交',
 	noExecution: '尚無執行記錄',
-	chatContextLabel: '任務檔案和資料夾',
+	chatContextLabel: '已加入的資料',
 	chatAddContext: '加入參考資料',
 	chatPickVaultItem: '選擇庫內檔案或資料夾',
 	chatSelectionPreview: '選取文字預覽',
 	chatRemoveSelection: '移除選取的文字',
+	chatAddSelection: '新增至對話',
+	chatQuotedText: '{n} 個已選文字片段',
 	chatAddExternalPath: '庫外路徑',
 	chatPickExternalFile: '選擇檔案…',
 	chatPickExternalFolder: '選擇資料夾…',
@@ -988,8 +1132,16 @@ const ZH_TW: UiText = {
 	chatRenameError: '無法儲存對話標題。',
 	chatDeleteError: '無法刪除對話。',
 	chatNewConversation: '新建對話',
+	chatNewTab: '新建分頁',
+	chatTabs: '對話分頁',
+	chatCloseTab: '關閉分頁',
+	chatMoreTabs: '更多分頁',
+	chatTabRunning: '執行中',
+	chatTabAttention: '有新進度或需要處理',
+	chatTabError: '工作失敗',
 	chatUntitled: '未命名對話',
 	chatLoadingHistory: '正在載入對話…',
+	chatNoSavedConversations: '暫無已儲存的對話',
 	chatHistoryError: '無法載入已儲存的對話。',
 	chatInterrupted: '已中斷',
 	chatLastStep: '上次停在',
@@ -1044,6 +1196,10 @@ const ZH_TW: UiText = {
 	chatToolGroupGeneric: '呼叫了 {name} {count} 次',
 	chatOpenToolTarget: '開啟 {target}',
 	chatResponding: '正在回覆…',
+	chatWorkingThinking: '正在思考…',
+	chatWorkingSeconds: '{s}秒',
+	chatWorkingMinutes: '{m}分{s}秒',
+	chatWorkingHours: '{h}時{m}分{s}秒',
 	chatCopyReply: '複製回覆',
 	chatCitationUnavailable: '無法開啟這篇來源筆記。',
 	chatCopiedReply: '已複製回覆',
@@ -1078,9 +1234,36 @@ const ZH_TW: UiText = {
 	chatCancelEdit: '取消',
 	chatForkReply: '分支',
 	chatForkFailed: '無法建立對話分支。',
-	chatProcessSummary: '{messages} 則訊息 · {tools} 次工具呼叫',
-	chatActivitySummary: '{rounds} 輪 · {messages} 則訊息',
-	chatAverageSpeed: '平均速度 {n} 字／秒',
+	sideChatOpen: '開啟側聊',
+	sideChatTitle: '側聊',
+	sideChatClose: '關閉側聊',
+	sideChatPlaceholder: '輸入側聊問題',
+	sideChatOpenFailed: '無法在右側邊欄開啟側聊。',
+	queueCount: '{n} 則排隊訊息',
+	queueSending: '傳送中…',
+	queueEnterHint: '在輸入框按 Enter 可將訊息加入佇列。',
+	queueImage: '排隊訊息圖片',
+	queueFile: '排隊檔案 {name}',
+	queueEdit: '編輯排隊訊息',
+	queueSave: '儲存排隊訊息',
+	queueCancel: '取消編輯',
+	queueDelete: '刪除排隊訊息',
+	queueSteer: '插話傳送',
+	queueSteerUnavailable: '僅執行中可插話傳送',
+	queueSideChat: '在側聊提問',
+	queueActionPending: '這則訊息的操作正在處理…',
+	queueMessageChanged: '這則排隊訊息已變更。',
+	queueEditAttachment: '包含非文字內容，暫不支援編輯',
+	queueEditFailed: '編輯失敗：這則訊息可能已經開始傳送。',
+	queueDeleteFailed: '刪除失敗：這則訊息可能已經開始傳送。',
+	queueSteerFailed: '插話傳送失敗，請重試。',
+	queueResume: '繼續佇列',
+	queueSendFailed: '無法儲存排隊訊息。',
+	queueStartFailed: '無法開始下一則排隊訊息，請重新繼續佇列。',
+	sideChatBusy: '側聊正在回答，請等它答完後再試。',
+	sideChatExternalFolder: '側聊一次只能讀取手動附上的庫外檔案，無法轉交庫外資料夾。',
+	chatProcessSummary: '{messages} 步 · {tools} 次工具呼叫',
+	chatActivitySummary: '{rounds} 輪 · {messages} 步',
 	chatSpeedValue: '{n} 字／秒',
 	chatActivityStats: '對話活動',
 	chatModelDuration: '模型耗時',
@@ -1099,12 +1282,10 @@ const ZH_TW: UiText = {
 	chatOutputTokens: '輸出',
 	chatTotalTokens: '合計',
 	chatReportedCost: '實報成本',
-	chatMissingUsage: '服務商回傳的用量不完整，此處顯示已收到的讀數。',
 	chatIncompleteUsage: '部分用量',
-	chatContextUsed: '已用 {n}%',
+	chatContextUsed: '{n}%',
 	chatContextPending: '待下次請求更新',
 	chatContextStats: '上下文已用 {n}%',
-	chatContextSource: '讀數來自最近一次請求。',
 	chatPromptTokens: '提示詞 token 總數',
 	chatWindowCapacity: '模型視窗容量',
 	chatRemainingCapacity: '剩餘容量',
@@ -1119,4 +1300,8 @@ export function uiText(): UiText {
 		return ZH_TW;
 	}
 	return language.startsWith('zh') ? ZH_CN : EN;
+}
+
+export function thinkingLabel(text: UiText, level: string): string {
+	return isBuiltInThinkingLevel(level) ? text.thinkingLevelNames[level] : level;
 }

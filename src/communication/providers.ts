@@ -7,7 +7,6 @@ import type {
 	JsonObject,
 	Message as PiMessage,
 	Model,
-	ModelThinkingLevel,
 	MutableModels,
 	Provider,
 	SimpleStreamOptions,
@@ -33,6 +32,7 @@ import { modelNodeFetch, nodeFetch } from './nodeFetch';
 import { nodeRequire } from './nodeRequire';
 import { captureReportedUsage } from './reportedUsage';
 import { ContextOverflowError, RetryableModelError } from '../types';
+import { isBuiltInThinkingLevel, isThinkingLevel } from '../orchestration/settings/thinking';
 import type {
 	CredentialStore,
 	Message,
@@ -105,22 +105,25 @@ function toContext(request: ModelRequest, toolsEnabled: boolean): Context {
 	};
 }
 
-function configuredThinking(override: ModelOverride | undefined): ModelThinkingLevel[] | undefined {
+function configuredThinking(override: ModelOverride | undefined): string[] | undefined {
 	return Array.isArray(override?.thinkingLevels) ? override.thinkingLevels : override?.thinkingLevel ? [override.thinkingLevel] : undefined;
 }
 
-function reasoningLevels(model: Model<Api>, override: ModelOverride | undefined): ModelThinkingLevel[] {
+function reasoningLevels(model: Model<Api>, override: ModelOverride | undefined): string[] {
 	const required = model.thinkingLevelMap?.off === null;
 	const enabled = override?.capabilities?.reasoning;
 	if ((!model.reasoning && enabled !== true) || (enabled === false && !required)) return [];
 	const supported = getSupportedThinkingLevels({ ...model, reasoning: true });
 	const configured = configuredThinking(override);
 	if (!configured) return supported;
-	const allowed = [...new Set(configured.filter((level) => supported.includes(level)))];
+	const allowed = [...new Set(configured.filter((level) => isThinkingLevel(level) && (
+		(isBuiltInThinkingLevel(level) && supported.includes(level))
+		|| (override?.literalThinkingLevels && level !== 'off' && level !== 'minimal')
+	)))];
 	return required && !allowed.length ? supported : allowed;
 }
 
-function defaultReasoning(model: Model<Api>, override: ModelOverride | undefined, levels: ModelThinkingLevel[]): ModelThinkingLevel | undefined {
+function defaultReasoning(model: Model<Api>, override: ModelOverride | undefined, levels: string[]): string | undefined {
 	const configured = configuredThinking(override)?.find((level) => levels.includes(level));
 	if (configured) return configured;
 	if (model.thinkingLevelMap?.off !== null && override?.capabilities?.reasoning !== true) return undefined;
@@ -128,16 +131,30 @@ function defaultReasoning(model: Model<Api>, override: ModelOverride | undefined
 	return low !== 'off' && levels.includes(low) ? low : levels.find((level) => level !== 'off');
 }
 
-function selectedReasoning(model: Model<Api>, override: ModelOverride | undefined, levels: ModelThinkingLevel[], preferred?: ModelThinkingLevel | null): ModelThinkingLevel | undefined {
+function selectedReasoning(model: Model<Api>, override: ModelOverride | undefined, levels: string[], preferred?: string | null): string | undefined {
 	if (preferred && levels.includes(preferred)) return preferred;
 	return defaultReasoning(model, override, levels) ?? (preferred ? levels[0] : undefined);
 }
 
-function resolveReasoning(model: Model<Api>, override: ModelOverride | undefined, requested?: ModelThinkingLevel | null): ThinkingLevel | undefined {
+function resolveReasoning(model: Model<Api>, override: ModelOverride | undefined, requested?: string | null): string | undefined {
 	if (requested === null && model.thinkingLevelMap?.off !== null) return undefined;
 	const levels = reasoningLevels(model, override);
 	const level = selectedReasoning(model, override, levels, requested);
 	return level === 'off' ? undefined : level;
+}
+
+function payloadIncludesEffort(payload: unknown, effort: string): boolean {
+	const fields = payload as {
+		reasoning_effort?: unknown;
+		reasoningEffort?: unknown;
+		reasoning?: { effort?: unknown };
+		thinking?: unknown;
+		output_config?: { effort?: unknown };
+		additionalModelRequestFields?: unknown;
+	} | undefined;
+	return !!fields && (fields.reasoning_effort === effort || fields.reasoningEffort === effort
+		|| fields.reasoning?.effort === effort || fields.thinking === effort || fields.output_config?.effort === effort
+		|| payloadIncludesEffort(fields.additionalModelRequestFields, effort));
 }
 
 function toResponse(message: AssistantMessage, reportedUsage: ReportedUsage): ModelResponse {
@@ -432,6 +449,20 @@ export function createModelService(
 		if (override?.maxTokens) model = { ...model, maxTokens: override.maxTokens };
 		// 保留目录里的推理标记，支持的接口才能发送明确的关闭指令。
 		if (override?.capabilities?.reasoning === true && !model.reasoning) model = { ...model, reasoning: true };
+		const level = resolveReasoning(model, override, request.reasoning);
+		let reasoning: ThinkingLevel | undefined;
+		let onPayload: SimpleStreamOptions['onPayload'];
+		if (level) {
+			const native = isBuiltInThinkingLevel(level) && level !== 'off' && getSupportedThinkingLevels(model).includes(level);
+			if (override?.literalThinkingLevels && level !== 'minimal' && configuredThinking(override)?.includes(level)) {
+				// 让 SDK 按服务商自己的参数格式发送原值，任意英文档位共用一个内部档位。
+				reasoning = native ? level : 'low';
+				model = { ...model, thinkingLevelMap: { ...model.thinkingLevelMap, [reasoning]: level } };
+				if (!native) onPayload = (payload) => {
+					if (!payloadIncludesEffort(payload, level)) throw new Error(`The model does not accept a text reasoning effort (${level}).`);
+				};
+			} else if (native) reasoning = level;
+		}
 		const controller = new AbortController();
 		const onAbort = () => controller.abort(request.signal?.reason);
 		if (request.signal?.aborted) onAbort();
@@ -456,7 +487,8 @@ export function createModelService(
 				? Math.min(request.maxTokens, override.maxTokens)
 				: request.maxTokens,
 			temperature: request.temperature,
-			reasoning: resolveReasoning(model, override, request.reasoning),
+			reasoning,
+			onPayload,
 			sessionId: request.sessionId,
 			maxRetries: request.maxRetries ?? 2,
 			maxRetryDelayMs: 60_000,

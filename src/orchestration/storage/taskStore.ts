@@ -1,4 +1,5 @@
-import type { ConversationEntry, ConversationSnapshot, SavedRun, TaskRequest } from '../../types';
+import type { ConversationEntry, ConversationSnapshot, QueuedMessage, SavedRun, TaskRequest } from '../../types';
+import { assistantMessageId } from '../../runtime/runState';
 import { isThinkingLevel } from '../settings/thinking';
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -58,7 +59,8 @@ const phases = new Set<unknown>(['starting', 'model', 'tool', 'approval', 'tool-
 
 function message(value: unknown): boolean {
 	return record(value) && roles.has(value.role) && text(value.content)
-		&& (value.id === undefined || (value.role === 'assistant' && text(value.id)))
+		&& (value.id === undefined || (text(value.id) && (value.role === 'assistant'
+			|| (value.role === 'user' && value.id.startsWith('steer:')))))
 		&& (value.textIndex === undefined || (value.role === 'assistant' && count(value.textIndex)))
 		&& (value.thinkingBlocks === undefined || (value.role === 'assistant' && Array.isArray(value.thinkingBlocks)
 			&& value.thinkingBlocks.every((block: unknown) => record(block) && thinkingBlock(block) && count(block.contentIndex))))
@@ -83,7 +85,8 @@ function request(value: unknown): value is TaskRequest {
 			&& (ref.kind === undefined || ref.kind === 'file' || ref.kind === 'folder')
 			&& (ref.addedExternal === undefined || ref.addedExternal === true)
 			&& (ref.lines === undefined || (Array.isArray(ref.lines) && ref.lines.length === 2 && ref.lines.every(count))))
-		&& (value.selection === undefined || validSelection(value.selection));
+		&& (value.selection === undefined || validSelection(value.selection))
+		&& (value.chatQuotes === undefined || (Array.isArray(value.chatQuotes) && value.chatQuotes.every(text)));
 }
 
 function validSelection(value: unknown): boolean {
@@ -100,6 +103,18 @@ function step(value: unknown): boolean {
 
 function entry(value: unknown): value is ConversationEntry {
 	if (!record(value)) return false;
+	switch (value.type) {
+		case 'queue-add':
+			return record(value.message) && text(value.message.id) && value.message.id.length > 0
+				&& request(value.message.request) && Boolean(value.message.request.instruction.trim());
+		case 'queue-edit':
+			return text(value.messageId) && text(value.instruction) && Boolean(value.instruction.trim());
+		case 'queue-delete':
+			return text(value.messageId);
+	}
+	const consumed = value.consumedQueueIds;
+	if (consumed !== undefined && (!Array.isArray(consumed) || !consumed.every(text)
+		|| (value.type !== 'start' && value.type !== 'messages'))) return false;
 	if (value.type === 'start') {
 		return record(value.task) && text(value.task.id) && request(value.task.request)
 			&& record(value.model) && text(value.model.providerId) && text(value.model.model)
@@ -142,14 +157,47 @@ export function parseConversationEntry(line: string, number: number): Conversati
 
 export class ConversationRecordError extends Error {}
 
+export function isQueueEntry(item: ConversationEntry): item is Extract<ConversationEntry, { type: 'queue-add' | 'queue-edit' | 'queue-delete' }> {
+	return item.type === 'queue-add' || item.type === 'queue-edit' || item.type === 'queue-delete';
+}
+
+export function replayQueueEntry(id: string, queue: Map<string, QueuedMessage>, item: ConversationEntry): void {
+	if (item.type === 'start' && item.task.request.conversationId !== id) throw new ConversationRecordError('任务不属于此对话。');
+	switch (item.type) {
+		case 'queue-add':
+			if (item.message.request.conversationId !== id || queue.has(item.message.id)) {
+				throw new ConversationRecordError('排队消息不属于此对话或编号重复。');
+			}
+			queue.set(item.message.id, item.message);
+			break;
+		case 'queue-edit': {
+			const previous = queue.get(item.messageId);
+			if (!previous) throw new ConversationRecordError('找不到要编辑的排队消息。');
+			queue.set(item.messageId, { ...previous, request: { ...previous.request, instruction: item.instruction } });
+			break;
+		}
+		case 'queue-delete':
+			if (!queue.delete(item.messageId)) throw new ConversationRecordError('找不到要删除的排队消息。');
+			break;
+		case 'start':
+		case 'messages':
+			for (const messageId of item.consumedQueueIds ?? []) {
+				if (!queue.delete(messageId)) throw new ConversationRecordError('找不到已发送的排队消息。');
+			}
+	}
+}
+
 /** 恢复历史和停留位置。未写入结束状态的任务显示为中断。 */
 export async function replayConversation(id: string, entries: AsyncIterable<ConversationEntry> | Iterable<ConversationEntry>): Promise<ConversationSnapshot> {
 	const runs = new Map<string, SavedRun>();
+	const queue = new Map<string, QueuedMessage>();
 	const finished = new Set<string>();
 	for await (const item of entries) {
+		replayQueueEntry(id, queue, item);
+		if (isQueueEntry(item)) continue;
 		if (item.type === 'start') {
 			const { task, model } = item;
-			if (task.request.conversationId !== id || runs.has(task.id)) throw new Error('对话中的任务编号无效或重复。');
+			if (runs.has(task.id)) throw new Error('对话中的任务编号无效或重复。');
 			runs.set(task.id, {
 				request: task.request,
 				model,
@@ -163,7 +211,13 @@ export async function replayConversation(id: string, entries: AsyncIterable<Conv
 		if (!run || finished.has(item.taskId)) throw new Error('对话中的任务记录顺序无效。');
 		const { state } = run;
 		switch (item.type) {
-			case 'messages':
+			case 'messages': {
+				const last = state.messages.at(-1);
+				const currentReplyId = assistantMessageId(state);
+				// 流式思考可能先于插话写入。同轮的回复仍需排在插话之后。
+				const draft = last?.incomplete && item.messages.some(({ role, id }) => role === 'user' && id?.startsWith('steer:'))
+					&& (last.id === currentReplyId || last.id?.startsWith(`${currentReplyId}:retry:`))
+					? state.messages.pop() : undefined;
 				for (const message of item.messages) {
 					const previous = state.messages.at(-1);
 					if (message.id && previous?.id === message.id && previous.incomplete) state.messages[state.messages.length - 1] = message;
@@ -173,11 +227,13 @@ export async function replayConversation(id: string, entries: AsyncIterable<Conv
 						state.pendingCalls = state.pendingCalls.filter((tool) => tool.id !== message.toolCallId);
 					}
 				}
+				if (draft) state.messages.push(draft);
 				if (item.step) {
 					run.step = item.step;
 					state.turn = item.step.turn;
 				}
 				break;
+			}
 			case 'step':
 				run.step = item.step;
 				state.turn = item.step.turn;
@@ -208,5 +264,5 @@ export async function replayConversation(id: string, entries: AsyncIterable<Conv
 				break;
 		}
 	}
-	return { id, runs: [...runs.values()] };
+	return { id, runs: [...runs.values()], ...(queue.size ? { queue: [...queue.values()] } : {}) };
 }

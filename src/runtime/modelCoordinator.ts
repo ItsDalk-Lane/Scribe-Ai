@@ -1,10 +1,13 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { inputBytes } from '../orchestration/context/contextBuilder';
+import { ContextBudgetError, inputBytes } from '../orchestration/context/contextBuilder';
 import { ContextOverflowError, RetryableModelError } from '../types';
 import type { ContextBuilder, ModelCoordinator, ModelRequest, ModelService } from '../types';
+import { splitResponseIntent, thinkingHeadingIntent } from './responseIntent';
 import { assistantMessageId } from './runState';
 
 const reconnectDelays = [1_000, 3_000, 8_000];
+
+export class InitialContextBudgetError extends ContextBudgetError {}
 
 export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'contextLimits'>, context: ContextBuilder): ModelCoordinator {
 	return {
@@ -17,7 +20,13 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 			const output = Math.min(Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 8_000, window / 3);
 			// shortcut: 按字节保守估算输入量，服务商有可用的计数接口时改用精确计数。
 			const maxBytes = Math.floor((window * 0.85 - output) * 2);
-			let request = await context.build(ctx, state.messages, maxBytes);
+			let request: ModelRequest;
+			try {
+				request = await context.build(ctx, state.messages, maxBytes);
+			} catch (error) {
+				if (error instanceof ContextBudgetError) throw new InitialContextBudgetError(error.message);
+				throw error;
+			}
 			let visibleText = false;
 			let visibleThinking = false;
 			let shortened = false;
@@ -44,7 +53,29 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 						}
 					} } : {}),
 				});
-				const thinking = new Map<number, { start: number; shown?: boolean; durationMs?: number }>();
+				let modelIntent: string | undefined;
+				const publishIntent = (intent: string | undefined) => {
+					if (!intent || intent === modelIntent) return;
+					modelIntent = intent;
+					ctx.observer.onEvent?.({ type: 'model-intent', intent });
+				};
+				let firstTextIndex: number | undefined;
+				let textLead: string | undefined = '';
+				const showText = (contentIndex: number, delta: string, complete = false) => {
+					firstTextIndex ??= contentIndex;
+					if (contentIndex === firstTextIndex && textLead !== undefined) {
+						textLead += delta;
+						const parsed = splitResponseIntent(textLead, complete);
+						if (!parsed) return;
+						textLead = undefined;
+						publishIntent(parsed.intent);
+						delta = parsed.content;
+					}
+					if (!delta) return;
+					visibleText = true;
+					ctx.observer.onEvent?.({ type: 'text-delta', messageId, contentIndex, text: delta });
+				};
+				const thinking = new Map<number, { start: number; shown?: boolean; durationMs?: number; hasIntent?: boolean }>();
 				const blockAt = (index: number) => {
 					let block = thinking.get(index);
 					if (!block) thinking.set(index, block = { start: performance.now() });
@@ -68,9 +99,9 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 							firstDelta = performance.now();
 							firstDeltaMs = firstDelta - started - reviewMs;
 						}
-						if (event.type === 'text_delta' && event.delta) {
-							visibleText = true;
-							ctx.observer.onEvent?.({ type: 'text-delta', messageId, contentIndex: event.contentIndex, text: event.delta });
+						if (event.type === 'text_delta' && event.delta) showText(event.contentIndex, event.delta);
+						if (event.type === 'text_end' && event.contentIndex === firstTextIndex && textLead !== undefined) {
+							showText(event.contentIndex, '', true);
 						}
 						if (event.type === 'thinking_start' || event.type === 'thinking_delta' || event.type === 'thinking_end') {
 							const { contentIndex } = event;
@@ -78,6 +109,12 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 							if (block?.type === 'thinking' && block.redacted) continue;
 							const progress = blockAt(contentIndex);
 							// Pi Messages 到思考结束才公开是否隐藏这个块。
+							if (!progress.hasIntent && (event.type === 'thinking_end' || event.partial.api !== 'pi-messages')) {
+								const heading = event.type === 'thinking_end' ? event.content : block?.type === 'thinking' ? block.thinking : '';
+								const intent = thinkingHeadingIntent(heading, event.type === 'thinking_end');
+								progress.hasIntent = Boolean(intent);
+								publishIntent(intent);
+							}
 							if (event.type === 'thinking_delta' && event.partial.api !== 'pi-messages') showThinking(contentIndex, event.delta);
 							if (event.type === 'thinking_end') {
 								if (!progress.shown) showThinking(contentIndex, event.content);
@@ -86,8 +123,17 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 						}
 					}
 					const result = await stream.result();
+					ctx.signal.throwIfAborted();
+					const parsed = splitResponseIntent(result.content, true);
+					publishIntent(parsed?.intent);
+					if (!modelIntent) {
+						for (const block of result.raw.content) {
+							if (block.type === 'thinking' && !block.redacted) publishIntent(thinkingHeadingIntent(block.thinking, true));
+							if (modelIntent) break;
+						}
+					}
 					const ended = performance.now();
-					const response = { ...result, metrics: {
+					const response = { ...result, content: parsed?.content ?? result.content, metrics: {
 						endedAt: Date.now(),
 						modelMs: ended - started - reviewMs,
 						firstDeltaMs,

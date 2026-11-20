@@ -37,11 +37,13 @@ class VaultPicker extends FuzzySuggestModal<TAbstractFile> {
 export interface ContextPickerProps {
 	app: App;
 	refs: NoteRef[];
-	selection: NoteSelection | null;
+	selection?: NoteSelection | null;
+	quotes?: string[];
 	disabled: boolean;
 	onAdd: (ref: NoteRef) => void;
 	onRemove: (path: string) => void;
-	onRemoveSelection: () => void;
+	onRemoveSelection?: () => void;
+	onRemoveQuotes?: () => void;
 	onFocusInput?: () => void;
 }
 
@@ -75,13 +77,24 @@ export function useVaultPicker(app: App, onAdd: ContextPickerProps['onAdd']): (a
 	};
 }
 
-export function ContextChips({ refs, selection, disabled, onRemove, onRemoveSelection, onFocusInput }: Pick<
-	ContextPickerProps, 'refs' | 'selection' | 'disabled' | 'onRemove' | 'onRemoveSelection' | 'onFocusInput'
+export function ContextChips({ refs, selection, quotes, disabled, onRemove, onRemoveSelection, onRemoveQuotes, onFocusInput }: Pick<
+	ContextPickerProps, 'refs' | 'selection' | 'quotes' | 'disabled' | 'onRemove' | 'onRemoveSelection' | 'onRemoveQuotes' | 'onFocusInput'
 >) {
 	const text = uiText();
-	if (!selection && refs.length === 0) return null;
+	if (!selection && !quotes?.length && refs.length === 0) return null;
 	return (
 		<ul className="scribe-context-chips" aria-label={text.chatContextLabel}>
+			{Boolean(quotes?.length) && <li className="scribe-context-chip scribe-chat-quote-chip">
+				<details className="scribe-selection-preview">
+					<summary><ChatIcon name="quote" />{text.chatQuotedText.replace('{n}', String(quotes?.length))}</summary>
+					<pre className="scribe-chat-pre" tabIndex={0} aria-label={text.chatSelectionPreview}>{quotes?.join('\n\n')}</pre>
+				</details>
+				<button type="button" className="scribe-context-chip-remove" aria-label={text.chatRemoveSelection}
+					title={text.chatRemoveSelection} disabled={disabled} onClick={() => {
+						onFocusInput?.();
+						onRemoveQuotes?.();
+					}}><ChatIcon name="x" /></button>
+			</li>}
 			{selection ? (
 				<li className="scribe-context-chip">
 					<details className="scribe-selection-preview">
@@ -96,7 +109,7 @@ export function ContextChips({ refs, selection, disabled, onRemove, onRemoveSele
 						disabled={disabled}
 						onClick={() => {
 							onFocusInput?.();
-							onRemoveSelection();
+							onRemoveSelection?.();
 						}}
 					><ChatIcon name="x" /></button>
 				</li>
@@ -133,11 +146,12 @@ export function ContextChips({ refs, selection, disabled, onRemove, onRemoveSele
 interface ContextActionsProps extends Pick<ContextPickerProps, 'onAdd' | 'disabled'> {
 	onPick: () => void;
 	onFocusInput: () => void;
+	vaultOnly?: boolean;
 }
 
 type ContextMenu = 'closed' | 'open' | 'outside' | 'picking' | ExternalReferenceMode;
 
-export function ContextActions({ onPick, onAdd, disabled, onFocusInput }: ContextActionsProps) {
+export function ContextActions({ onPick, onAdd, disabled, onFocusInput, vaultOnly }: ContextActionsProps) {
 	const text = uiText();
 	const trigger = useRef<HTMLButtonElement>(null);
 	const pending = useRef<symbol | null>(null);
@@ -190,8 +204,12 @@ export function ContextActions({ onPick, onAdd, disabled, onFocusInput }: Contex
 		}}>
 			<button type="button" ref={trigger} className="scribe-compose-action" disabled={disabled || menu === 'picking'}
 				aria-label={text.chatAddContext} title={text.chatAddContext}
-				aria-expanded={menuOpen} aria-controls={menuOpen ? id : undefined}
+				aria-expanded={vaultOnly ? undefined : menuOpen} aria-controls={menuOpen ? id : undefined}
 				onClick={(event) => {
+					if (vaultOnly) {
+						onPick();
+						return;
+					}
 					event.currentTarget.focus({ preventScroll: true });
 					setMenu(menuOpen ? 'closed' : 'open');
 				}}><ChatIcon name="plus" /></button>

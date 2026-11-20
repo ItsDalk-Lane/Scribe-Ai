@@ -1,4 +1,5 @@
 import type { Message, RunState, RunStep, SavedRetry, SavedRun, ToolCall } from '../types';
+import { isSteeringMessage } from '../runtime/continuationText';
 import { blockId, retryNotice, timelineRows } from './chatTimeline';
 import type { NoticeRow, TextRow, TimelineItem, ToolRow } from './chatTimeline';
 import type { ChatExecution } from './context';
@@ -19,6 +20,10 @@ function finalAnswerStart(state: RunState): number | undefined {
 	let start = state.messages.length - 1;
 	while (start > 0) {
 		const previous = state.messages[start - 1];
+		if (isSteeringMessage(previous)) {
+			start--;
+			continue;
+		}
 		if (previous?.role !== 'assistant') break;
 		// 旧版续写保留空的工具列表，但去掉原始响应。补做提示则没有工具列表。
 		const legacyTruncation = !previous.metrics && !previous.rawAssistant && previous.toolCalls?.length === 0;

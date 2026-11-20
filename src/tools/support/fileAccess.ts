@@ -7,6 +7,7 @@ import { authorizedLineRange, resolveToolPath } from './pathUtils';
 import type { ResolvedToolPath } from './pathUtils';
 
 export const MAX_TEXT_BYTES = 2 * 1024 * 1024;
+const committingExternalFiles = new Set<string>();
 
 export function fileFingerprint(text: string): string {
 	return createHash('sha256').update(text).digest('hex');
@@ -114,13 +115,21 @@ async function replaceExternalFile(
 		const temp = join(staging, 'content');
 		await writeFile(temp, after, { mode: 0o600 });
 		await chmod(temp, (path.stat?.mode ?? 0o600) & 0o777);
-		const current = await resolveToolPath(ctx, path.requestedPath, 'write');
-		if (current.absolutePath !== path.absolutePath || current.stat?.ino !== path.stat?.ino
-			|| current.stat?.dev !== path.stat?.dev || await readToolFile(ctx, current) !== before) {
-			throw new Error('文件已变化，请重新读取和确认。');
+		// 库外文件没有原子读取后修改的接口，按文件身份保护最终核对和替换。
+		const key = path.stat ? `${path.stat.dev}:${path.stat.ino}` : path.absolutePath;
+		if (committingExternalFiles.has(key)) throw new Error('另一个任务正在修改此文件，请稍后重新读取和确认。');
+		committingExternalFiles.add(key);
+		try {
+			const current = await resolveToolPath(ctx, path.requestedPath, 'write');
+			if (current.absolutePath !== path.absolutePath || current.stat?.ino !== path.stat?.ino
+				|| current.stat?.dev !== path.stat?.dev || await readToolFile(ctx, current) !== before) {
+				throw new Error('文件已变化，请重新读取和确认。');
+			}
+			ctx.signal.throwIfAborted();
+			await rename(temp, path.absolutePath);
+		} finally {
+			committingExternalFiles.delete(key);
 		}
-		ctx.signal.throwIfAborted();
-		await rename(temp, path.absolutePath);
 	} finally {
 		await rm(staging, { recursive: true, force: true });
 	}

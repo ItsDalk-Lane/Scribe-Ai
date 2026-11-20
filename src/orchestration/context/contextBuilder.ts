@@ -2,22 +2,25 @@ import { Buffer } from 'node:buffer';
 import { buildSystemPrompt } from './systemPrompt';
 import type { ContextBuilder, Message, ModelRequest, TaskRequest, ToolRegistry } from '../../types';
 
-export function taskMessage({ instruction, refs, selection }: TaskRequest): Message {
+export function taskMessage({ instruction, refs, selection, chatQuotes }: TaskRequest): Message {
+	const quotes = chatQuotes?.length ? `\n\n聊天中选中的引文（仅供参考）\n${JSON.stringify(chatQuotes)}` : '';
 	if (selection) {
 		const [start, end] = selection.lines;
 		return {
 			role: 'user',
-			content: `${instruction}\n\n附上的选区（${selection.title}，第 ${start}–${end} 行）\n${selection.path}\n\n${selection.text}`,
+			content: `${instruction}\n\n附上的选区（${selection.title}，第 ${start}–${end} 行）\n${selection.path}\n\n${selection.text}${quotes}`,
 		};
 	}
 	return {
 		role: 'user',
-		content: refs.length ? `${instruction}\n\n本次任务的资料引用：${JSON.stringify(refs)}` : instruction,
+		content: (refs.length ? `${instruction}\n\n本次任务的资料引用：${JSON.stringify(refs)}` : instruction) + quotes,
 	};
 }
 
 const resultPreview = '\n…（工具结果已缩短，可缩小范围后重新查询）';
 const replyPreview = '…（为续写，仅提供上一段回答的末尾）\n';
+
+export class ContextBudgetError extends Error {}
 
 function bytes(value: unknown): number {
 	return Buffer.byteLength(JSON.stringify(value));
@@ -72,8 +75,8 @@ function fitMessages(history: Message[], current: Message[], budget: number, agr
 	const first = current.slice(0, 1);
 	let latest = current.length - 1;
 	const continuing = current.length > 1 && current[latest]?.role === 'user';
-	// 续写提示前紧邻的回复也有必要保留。
-	if (continuing) latest--;
+	// 插话和续写提示可能连续出现，它们与前一条回复或工具批次一并保留。
+	while (latest > first.length && current[latest]?.role === 'user') latest--;
 	while (current[latest]?.role === 'tool') latest--;
 	latest = Math.max(latest, first.length);
 	let tail = current.slice(latest);
@@ -88,7 +91,7 @@ function fitMessages(history: Message[], current: Message[], budget: number, agr
 		});
 		const expandable = tail.filter(preview).length;
 		const spare = tailBudget - historyBytes(smallest);
-		if (spare < 0 || !expandable) throw new Error('本次指令、选区或工具请求过长，请缩小范围后重试。');
+		if (spare < 0 || !expandable) throw new ContextBudgetError('本次指令、选区或工具请求过长，请缩小范围后重试。');
 		// JSON 转义后一个字符最多占六字节，保留成对的工具请求和结果。
 		const limit = Math.floor(spare / expandable / 6);
 		tail = tail.map((message) => {
@@ -121,10 +124,16 @@ export function createContextBuilder(registry: ToolRegistry): ContextBuilder {
 			const selectionOnly = Boolean(ctx.task.request.selection);
 			const tools = registry.all()
 				.filter((tool) => ctx.permissions.canCallTool(tool))
-				.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
+				.map(({ name, description, inputSchema }) => ({
+					name, description,
+					inputSchema: { ...inputSchema, properties: {
+						...(inputSchema.properties as Record<string, unknown> | undefined),
+						i: { type: 'string', description: '简体中文短句，说明当前操作要核对或完成的具体事项。' },
+					} },
+				}));
 			const request: ModelRequest = {
 				...ctx.model,
-				system: buildSystemPrompt(selectionOnly),
+				system: buildSystemPrompt(selectionOnly, ctx.sideChat),
 				messages: [],
 				tools,
 				signal: ctx.signal,

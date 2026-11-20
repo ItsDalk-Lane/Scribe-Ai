@@ -15,6 +15,7 @@ export interface ChatExecution {
 	messageId?: string;
 	answerMessage?: Message;
 	modelRetry?: 'automatic' | 'manual';
+	modelIntent?: string;
 }
 
 export type DisplayedRun = SavedRun & { displayed?: ChatExecution };
@@ -83,7 +84,9 @@ function acceptState(previous: ChatExecution, state: RunState, step?: RunStep, r
 	});
 	const notice = terminalNotice(state);
 	const next = notice ? put(resolved, notice) : resolved;
-	return { state, turn: state.turn, items: resolveTools(next), messageId, answerMessage };
+	const modelIntent = !state.pendingCalls.length && previous.state?.taskId === state.taskId && previous.turn === state.turn
+		? previous.modelIntent : undefined;
+	return { state, turn: state.turn, items: resolveTools(next), messageId, answerMessage, modelIntent };
 }
 
 export function restoreExecution(run: DisplayedRun): ChatExecution {
@@ -107,14 +110,16 @@ export function restoreExecution(run: DisplayedRun): ChatExecution {
 export function updateExecution(previous: ChatExecution, event: RunEvent): ChatExecution {
 	switch (event.type) {
 		case 'turn-start':
-			return { ...previous, turn: event.turn, modelRetry: undefined };
+			return { ...previous, turn: event.turn, modelRetry: undefined, modelIntent: undefined };
+		case 'model-intent':
+			return previous.modelIntent === event.intent ? previous : { ...previous, modelIntent: event.intent, modelRetry: undefined };
 		case 'model-retry': {
 			const items = previous.items.map((row): TimelineItem => {
 				if (row.kind === 'thinking' && row.messageId === event.messageId && row.pending) return { ...row, pending: false };
 				if (row.kind === 'text' && row.messageId === event.messageId && row.draft) return { ...row, abandoned: true };
 				return row;
 			});
-			return { ...previous, items: put(items, retryNotice(event)), modelRetry: event.waiting ? 'manual' : 'automatic' };
+			return { ...previous, items: put(items, retryNotice(event)), modelRetry: event.waiting ? 'manual' : 'automatic', modelIntent: undefined };
 		}
 		case 'text-delta':
 		case 'thinking-delta': {

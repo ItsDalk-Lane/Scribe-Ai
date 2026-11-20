@@ -23,6 +23,10 @@ export function messageUsage(message: Message) {
 			prompt: input === undefined ? undefined : input + (cacheRead ?? 0) + (cacheWrite ?? 0) };
 	}
 	if (cost === undefined && !Object.values(reported ?? {}).some(nonNegative)) return;
+	if (reported && reported.input === undefined && reported.prompt !== undefined && reported.cacheRead !== undefined) {
+		const input = reported.prompt - reported.cacheRead - (reported.cacheWrite ?? 0);
+		if (nonNegative(input)) reported = { ...reported, input };
+	}
 	return { ...reported, cost };
 }
 
@@ -44,7 +48,6 @@ export function usageTotals(messages: readonly Message[]) {
 	return { input: sum(fields('input')), cacheRead: sum(cacheReads), cacheWrite: sum(fields('cacheWrite')),
 		output: sum(fields('output')), total: sum(total), hit: prompt && read !== undefined ? read / prompt : undefined,
 		cost: sum(entries.map((entry) => entry?.cost)),
-		missing: partialTotal || entries.some((entry) => entry?.input === undefined || entry.cacheRead === undefined || entry.cacheWrite === undefined),
 		...(partialTotal ? { partialTotal: true } : {}),
 	};
 }
@@ -76,7 +79,7 @@ export function conversationMetrics(runs: readonly RunState[]) {
 		speed: outputTokens !== undefined && decodeMs && decodeMs > 0 ? outputTokens * 1000 / decodeMs : undefined,
 		usage,
 		context: prompt !== undefined && capacity && capacity > 0
-			? { prompt, capacity, remaining: Math.max(0, capacity - prompt), percent: Math.ceil(prompt * 100 / capacity) } : undefined,
+			? { prompt, capacity, remaining: Math.max(0, capacity - prompt), percent: Math.ceil(prompt * 10_000 / capacity) / 100 } : undefined,
 	};
 }
 

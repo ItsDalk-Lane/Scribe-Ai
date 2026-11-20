@@ -5,6 +5,11 @@ export function isImeComposing(event: Pick<ComposerKey, 'isComposing' | 'keyCode
 	return event.isComposing || event.keyCode === 229;
 }
 
+export function sideChatCommand(draft: string): string | null {
+	const command = /^\/side(?:\s+([\s\S]+))?$/u.exec(draft.trim());
+	return command ? command[1] ?? '' : null;
+}
+
 export function composerShortcut(event: ComposerKey, draft = '', start = -1, end = start) {
 	if (isImeComposing(event) || event.altKey || event.ctrlKey || event.metaKey) return;
 	if (event.key === 'Enter' && !event.shiftKey) return event.repeat ? 'ignore' : 'send';

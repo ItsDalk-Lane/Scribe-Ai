@@ -1,7 +1,7 @@
 import { Plugin } from 'obsidian';
-import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
-import { CHAT_VIEW_ICON, CHAT_VIEW_TYPE } from './constants';
+import { CHAT_VIEW_ICON, CHAT_VIEW_TYPE, SIDE_CHAT_VIEW_TYPE } from './constants';
 import { ChatView } from './interaction/ChatView';
+import { SideChatView } from './interaction/SideChatView';
 import { ScribeAiSettingTab } from './interaction/SettingsTab';
 import { uiText } from './interaction/uiText';
 import { normalizeSettings } from './orchestration/settings/defaults';
@@ -19,6 +19,9 @@ export default class ScribeAiPlugin extends Plugin {
 		this.services = createServices(this.app, settings, this.manifest);
 
 		this.registerView(CHAT_VIEW_TYPE, (leaf) => new ChatView(leaf, this));
+		this.registerView(SIDE_CHAT_VIEW_TYPE, (leaf) => new SideChatView(leaf, this));
+		this.app.workspace.onLayoutReady(() => this.app.workspace.detachLeavesOfType(SIDE_CHAT_VIEW_TYPE));
+		this.register(() => this.app.workspace.detachLeavesOfType(SIDE_CHAT_VIEW_TYPE));
 
 		this.addRibbonIcon(CHAT_VIEW_ICON, uiText().openChatCommand, () => {
 			void this.activateChatView();
@@ -60,22 +63,25 @@ export default class ScribeAiPlugin extends Plugin {
 		return () => { this.settingsListeners.delete(listener); };
 	}
 
-	async saveSettings(selection?: Pick<ScribeSettings, 'providerId' | 'model'> & { thinkingLevel?: ModelThinkingLevel }): Promise<void> {
+	async saveSettings(selection?: Pick<ScribeSettings, 'providerId' | 'model'> & { thinkingLevel?: string; keepDefault?: boolean }): Promise<void> {
 		const save = this.settingsSave.then(async () => {
 			const { settings, communication } = this.services;
 			const target = selection ?? settings;
 			const current = { providerId: settings.providerId, model: settings.model };
 			const hasModel = () => settings.providerModels[target.providerId]?.includes(target.model);
-			if (selection && (!hasModel() || (selection.thinkingLevel !== undefined
+			if (selection && (!hasModel() || (!selection.keepDefault && selection.thinkingLevel !== undefined
 				&& (selection.providerId !== current.providerId || selection.model !== current.model)))) {
 				throw new Error(uiText().chatModelChanged);
 			}
 			const thinkingByModel = hasModel() ? updateChatThinking(settings, target, communication.models.thinkingOptions)
 				: settings.thinkingByModel;
-			const selected = { providerId: target.providerId, model: target.model, thinkingByModel };
+			const selected = selection?.keepDefault ? { ...current, thinkingByModel }
+				: { providerId: target.providerId, model: target.model, thinkingByModel };
 			await this.saveData({ ...settings, ...selected });
 			// 写入期间如有更新的设置操作，保留其选择。
-			if (settings.providerId === current.providerId && settings.model === current.model && (!selection || hasModel())) {
+			if (selection?.keepDefault && hasModel()) {
+				settings.thinkingByModel = thinkingByModel;
+			} else if (settings.providerId === current.providerId && settings.model === current.model && (!selection || hasModel())) {
 				Object.assign(settings, selected);
 			}
 		});

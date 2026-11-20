@@ -8,7 +8,7 @@ import {
 import { API_PROTOCOLS } from '../communication/providers';
 import { providerCategory, type ProviderCategory } from './providerCategories';
 import { groupProviders } from './providerGroups';
-import { providerIcon } from './providerIcons';
+import { paintProviderIcon } from './paintProviderIcon';
 import type ScribeAiPlugin from '../main';
 import type { ModelProviderInfo } from '../types';
 import { confirmAction } from './ConfirmModal';
@@ -16,29 +16,6 @@ import { ScribeModelConfigModal } from './ModelConfigModal';
 import { ConfigureProviderModal } from './ProviderConfigModal';
 import { removeProviderSettings } from './providerSettings';
 import type { UiText } from './uiText';
-
-/** 品牌图标优先，其次内置图标，最后退回首字母 */
-function paintProviderIcon(el: HTMLElement, providerId: string, label: string): void {
-	const icon = providerIcon(providerId);
-	if (icon?.svg) {
-		// 品牌 SVG 内联在代码里，这里只做解析和挂载，不发起网络请求
-		const parsed = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg">${icon.svg}</svg>`, 'image/svg+xml');
-		const root = parsed.documentElement;
-		if (root.nodeName === 'svg' && !root.querySelector('parsererror')) {
-			const svg = el.createSvg('svg', {
-				attr: { viewBox: icon.viewBox ?? '0 0 24 24', fill: 'currentColor', 'aria-hidden': 'true' },
-			});
-			if (icon.color) svg.style.color = icon.color;
-			for (const child of Array.from(root.childNodes)) svg.appendChild(el.ownerDocument.importNode(child, true));
-			return;
-		}
-	}
-	if (icon?.icon) {
-		setIcon(el, icon.icon);
-		return;
-	}
-	el.setText((label.trim()[0] ?? '?').toUpperCase());
-}
 
 /** 显示名可改，索引始终是 provider.id */
 function providerLabel(plugin: ScribeAiPlugin, providerId: string, fallback: string): string {

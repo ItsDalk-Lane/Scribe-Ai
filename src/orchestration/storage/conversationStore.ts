@@ -5,8 +5,9 @@ import { mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-import type { ConversationEntry, ConversationStore, ConversationSummary } from '../../types';
-import { ConversationRecordError, parseConversationEntry, replayConversation } from './taskStore';
+import { MissingConversationError } from '../../types';
+import type { ConversationEntry, ConversationStore, ConversationSummary, QueuedMessage } from '../../types';
+import { ConversationRecordError, isQueueEntry, parseConversationEntry, replayConversation, replayQueueEntry } from './taskStore';
 
 const idPattern = /^(?!(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$)[A-Z0-9][A-Z0-9-]{0,95}$/i;
 const titleLimit = 120;
@@ -23,13 +24,14 @@ function isMissing(error: unknown): boolean {
 }
 
 async function enqueue<T>(path: string, write: () => Promise<T>): Promise<T> {
-	const pending = writeQueue.get(path) ?? Promise.resolve();
+	const key = path.toLowerCase();
+	const pending = writeQueue.get(key) ?? Promise.resolve();
 	const next = pending.catch(() => {}).then(write);
-	writeQueue.set(path, next);
+	writeQueue.set(key, next);
 	try {
 		return await next;
 	} finally {
-		if (writeQueue.get(path) === next) writeQueue.delete(path);
+		if (writeQueue.get(key) === next) writeQueue.delete(key);
 	}
 }
 
@@ -117,12 +119,14 @@ async function readThroughTask(path: string, id: string, taskId: string, inclusi
 	let found = false;
 	try {
 		for await (const entry of readRecords(file, stat.size)) {
+			if (isQueueEntry(entry)) continue;
 			if (entry.type === 'start') {
 				if (found) break;
 				if (entry.task.request.conversationId !== id) throw new Error('任务不属于此对话。');
 				found = entry.task.id === taskId;
 				if (found && !inclusive) break;
 			}
+			if (entry.type === 'start' || entry.type === 'messages') delete entry.consumedQueueIds;
 			entries.push(entry);
 		}
 	} finally {
@@ -159,18 +163,63 @@ async function appendRecords(path: string, payload: string): Promise<void> {
 	}
 }
 
+async function readQueued(path: string, id: string): Promise<Map<string, QueuedMessage>> {
+	const queue = new Map<string, QueuedMessage>();
+	const opened = await openIfExists(path);
+	if (!opened) return queue;
+	try {
+		for await (const entry of readRecords(opened.file, opened.stat.size)) replayQueueEntry(id, queue, entry);
+		return queue;
+	} finally {
+		await opened.file.close();
+	}
+}
+
+function findQueued(queue: Map<string, QueuedMessage>, messageId: string): QueuedMessage {
+	const message = queue.get(messageId);
+	if (!message) throw new Error('找不到排队消息。');
+	return message;
+}
+
+function consumeQueued(entries: ConversationEntry[], queue: Map<string, QueuedMessage>, { messages, fifo }: {
+	messages: QueuedMessage[]; fifo?: boolean;
+}): ConversationEntry[] {
+	const [first, ...remaining] = entries;
+	if (first?.type !== 'start' && first?.type !== 'messages') throw new Error('排队消息缺少已发送的记录。');
+	const ids = messages.map(({ id }) => id);
+	if (new Set(ids).size !== ids.length) throw new Error('排队消息重复。');
+	const matches = first.type === 'start'
+		? ids.length === 1 && first.task.request.instruction === messages[0]?.request.instruction
+		: ids.every((id) => first.messages.some((message) => message.role === 'user' && message.id === `steer:${id}`));
+	if (!matches) throw new Error('记录与排队消息不匹配。');
+	if (fifo && Array.from(queue.keys()).slice(0, ids.length).some((id, index) => id !== ids[index])) {
+		throw new Error('排队消息的顺序已经变更。');
+	}
+	for (const message of messages) {
+		const current = findQueued(queue, message.id);
+		if (JSON.stringify(current.request) !== JSON.stringify(message.request)) throw new Error('排队消息已经变更。');
+	}
+	// 与开始任务或插话正文写在同一行，重开时不会只恢复其中一半。
+	return [{ ...first, consumedQueueIds: ids }, ...remaining];
+}
+
 async function conversationSummary(path: string, id: string): Promise<ConversationSummary | undefined> {
 	const opened = await openIfExists(path);
 	if (!opened) return undefined;
 	const { file, stat } = opened;
 	try {
+		const queue = new Map<string, QueuedMessage>();
+		const summary = (instruction: string) => ({ id, title: instruction.trim().replace(/\s+/g, ' ').slice(0, 80), updatedAt: stat.mtimeMs });
 		for await (const entry of readRecords(file, stat.size)) {
-			if (entry.type !== 'start' || entry.task.request.conversationId !== id) {
+			replayQueueEntry(id, queue, entry);
+			if (isQueueEntry(entry)) continue;
+			if (entry.type !== 'start') {
 				throw new ConversationRecordError('对话记录缺少起始任务。');
 			}
-			return { id, title: entry.task.request.instruction.trim().replace(/\s+/g, ' ').slice(0, 80), updatedAt: stat.mtimeMs };
+			return summary(entry.task.request.instruction);
 		}
-		return undefined;
+		const first = queue.values().next().value;
+		return first ? summary(first.request.instruction) : undefined;
 	} catch (error) {
 		if (!(error instanceof ConversationRecordError)) throw error;
 		return { id, title: '无法读取对话标题', updatedAt: stat.mtimeMs };
@@ -188,6 +237,16 @@ export function createConversationStore(directory: string): ConversationStore {
 		return join(root, `${id}.jsonl`);
 	};
 	const titlePath = (id: string) => join(root, `${id}.title`);
+	function write(id: string, update: (path: string) => Promise<ConversationEntry[]>) {
+		const path = logPath(id);
+		return enqueue(path, async () => {
+			if (deletedLogs.has(path.toLowerCase())) throw new MissingConversationError('对话已删除。');
+			const entries = await update(path);
+			if (!entries.length) return;
+			await mkdir(root, { recursive: true, mode: 0o700 });
+			await appendRecords(path, serialize(entries));
+		});
+	}
 
 	return {
 		async list() {
@@ -209,7 +268,7 @@ export function createConversationStore(directory: string): ConversationStore {
 		},
 		async load(id) {
 			const path = logPath(id);
-			await writeQueue.get(path)?.catch(() => {});
+			await writeQueue.get(path.toLowerCase())?.catch(() => {});
 			const opened = await openIfExists(path);
 			if (!opened) return { id, runs: [] };
 			try {
@@ -217,6 +276,35 @@ export function createConversationStore(directory: string): ConversationStore {
 			} finally {
 				await opened.file.close();
 			}
+		},
+		async getQueued(id) {
+			const path = logPath(id);
+			await writeQueue.get(path.toLowerCase())?.catch(() => {});
+			return [...(await readQueued(path, id)).values()];
+		},
+		async enqueue(id, message) {
+			return write(id, async (path) => {
+				const entry = parseConversationEntry(JSON.stringify({ type: 'queue-add', message }), 1);
+				const queue = await readQueued(path, id);
+				const previous = queue.get(message.id);
+				if (previous && JSON.stringify(previous) === JSON.stringify(message)) return [];
+				replayQueueEntry(id, queue, entry);
+				return [entry];
+			});
+		},
+		async editQueued(id, messageId, instruction) {
+			return write(id, async (path) => {
+				const { request } = findQueued(await readQueued(path, id), messageId);
+				if (request.refs.length || request.selection) throw new Error('包含非文本内容，暂不支持编辑。');
+				if (!instruction.trim()) throw new Error('请输入任务。');
+				return [{ type: 'queue-edit', messageId, instruction }];
+			});
+		},
+		async deleteQueued(id, messageId) {
+			return write(id, async (path) => {
+				findQueued(await readQueued(path, id), messageId);
+				return [{ type: 'queue-delete', messageId }];
+			});
 		},
 		async fork(id, taskId) {
 			const path = logPath(id);
@@ -236,7 +324,8 @@ export function createConversationStore(directory: string): ConversationStore {
 			if (entries[0]?.type !== 'start') throw new Error('改写对话缺少新的起始任务。');
 			await enqueue(path, async () => {
 				const kept = await readThroughTask(path, id, taskId, false);
-				const replacement = [...kept, ...entries];
+				const pending = [...(await readQueued(path, id)).values()].map((message): ConversationEntry => ({ type: 'queue-add', message }));
+				const replacement = [...kept, ...entries, ...pending];
 				await replayConversation(id, replacement);
 				await writeAtomically(path, serialize(replacement));
 			});
@@ -264,29 +353,27 @@ export function createConversationStore(directory: string): ConversationStore {
 			}));
 		},
 		async lastOpened() {
-			await writeQueue.get(pointer)?.catch(() => {});
+			await writeQueue.get(pointer.toLowerCase())?.catch(() => {});
 			return readPointer(pointer);
 		},
 		async setLastOpened(id) {
 			const path = logPath(id);
 			await enqueue(pointer, async () => {
-				if (deletedLogs.has(path.toLowerCase())) throw new Error('对话已删除。');
+				if (deletedLogs.has(path.toLowerCase())) throw new MissingConversationError('对话已删除。');
 				await mkdir(root, { recursive: true, mode: 0o700 });
 				await writeAtomically(pointer, `${id}\n`);
 			});
 		},
-		async append(id, entries) {
-			const path = logPath(id);
-			if (!entries.length) return;
+		async append(id, entries, consumption) {
+			if (!entries.length) {
+				checkId(id);
+				return;
+			}
 			if (entries.some((entry) => entry.type === 'start' && entry.task.request.conversationId !== id)) {
 				throw new Error('任务不属于此对话。');
 			}
-			const payload = serialize(entries);
-			await enqueue(path, async () => {
-				if (deletedLogs.has(path.toLowerCase())) throw new Error('对话已删除。');
-				await mkdir(root, { recursive: true, mode: 0o700 });
-				await appendRecords(path, payload);
-			});
+			await write(id, async (path) => consumption?.messages.length
+				? consumeQueued(entries, await readQueued(path, id), consumption) : entries);
 		},
 	};
 }

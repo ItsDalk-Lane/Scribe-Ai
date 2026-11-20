@@ -1,7 +1,6 @@
-import { useId } from 'react';
-import type { RefObject } from 'react';
-import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
-import { composerShortcut } from '../composerKeyboard';
+import type { ReactNode, RefObject } from 'react';
+import { SIDE_CHAT_ICON } from '../../constants';
+import { composerShortcut, sideChatCommand } from '../composerKeyboard';
 import { uiText } from '../uiText';
 import type { ChatModelGroup } from '../useChatModel';
 import ChatIcon from './ChatIcon';
@@ -16,52 +15,69 @@ interface TaskInputProps {
 	disabled: boolean;
 	conversationId: string | null;
 	context: Omit<ContextPickerProps, 'disabled'>;
+	contextMetric?: ReactNode;
+	vaultOnly?: boolean;
+	placeholder?: string;
 	modelGroups: ChatModelGroup[];
 	modelValue: string;
-	modelSaving: boolean;
-	modelSelecting: boolean;
+	modelSaving?: boolean;
+	modelSelecting?: boolean;
 	thinking: ThinkingSelection;
 	error: string;
 	instruction: string;
 	onChange: (instruction: string) => void;
 	onModelChange: (value: string) => Promise<boolean>;
-	onThinkingChange: (level: ModelThinkingLevel) => void;
+	onThinkingChange: (level: string) => void;
 	onSubmit: (instruction: string) => void;
 	onStop: () => void;
+	queueDuringRun?: boolean;
+	onContinueQueue?: () => void;
+	queueContinuingDisabled?: boolean;
+	onClose?: () => void;
 	onResume?: () => void;
 	onRetryConnection?: () => void;
+	toolbar?: ReactNode;
 }
 
 export default function TaskInput({
-	inputRef, busy, disabled, conversationId, context, modelGroups, modelValue, modelSaving, modelSelecting, thinking, error, instruction,
-	onChange, onModelChange, onThinkingChange, onSubmit, onStop, onResume, onRetryConnection,
+	inputRef, busy, disabled, conversationId, context, contextMetric, vaultOnly, placeholder,
+	modelGroups, modelValue, modelSaving = false, modelSelecting = false, thinking, error, instruction,
+	onChange, onModelChange, onThinkingChange, onSubmit, onStop, queueDuringRun = false,
+	onContinueQueue, queueContinuingDisabled, onClose, onResume, onRetryConnection, toolbar,
 }: TaskInputProps) {
 	const text = uiText();
-	const disclosureId = useId();
 	const provider = modelGroups.find(({ models }) => models.some(({ value }) => value === modelValue))?.label;
-	const disclosure = context.selection ? text.chatSelectionDisclosure : text.chatSubmitDisclosure;
+	const disclosure = provider
+		? (context.selection ? text.chatSelectionDisclosure : text.chatSubmitDisclosure).replace('{provider}', () => provider)
+		: text.chatModelMissing;
 	const locked = busy || disabled;
-	const blocked = locked || modelSaving || !modelValue || !instruction.trim();
+	const draftLocked = disabled || (busy && !queueDuringRun);
+	const isSideCommand = queueDuringRun && sideChatCommand(instruction) !== null;
+	const blocked = disabled || (!isSideCommand && (draftLocked || modelSaving || !modelValue || !instruction.trim()));
+	const actionLabel = busy ? text.chatStop : isSideCommand ? text.sideChatOpen : text.submit;
+	const queueHint = busy && queueDuringRun ? text.queueEnterHint : undefined;
+	const actionDescription = busy ? queueHint : disclosure;
 	const pick = useVaultPicker(context.app, context.onAdd);
 	const focusInput = () => inputRef.current?.focus({ preventScroll: true });
 
 	return (
 		<div className="scribe-task-input">
+			{toolbar && <div className="scribe-compose-bar">{toolbar}</div>}
 			<form className="scribe-compose-form" onSubmit={(event) => {
 				event.preventDefault();
 				if (!blocked) onSubmit(instruction);
 			}}>
-				<ContextChips refs={context.refs} selection={context.selection} disabled={locked} onRemove={context.onRemove}
-					onRemoveSelection={context.onRemoveSelection} onFocusInput={focusInput} />
+				<ContextChips refs={context.refs} selection={context.selection} quotes={context.quotes} disabled={draftLocked} onRemove={context.onRemove}
+					onRemoveSelection={context.onRemoveSelection} onRemoveQuotes={context.onRemoveQuotes} onFocusInput={focusInput} />
 				<textarea
 					ref={inputRef}
 					className="scribe-input"
-					placeholder={text.taskPlaceholder}
-					aria-label={text.taskPlaceholder}
-					aria-describedby={disclosureId}
+					placeholder={placeholder ?? text.taskPlaceholder}
+					aria-label={placeholder ?? text.taskPlaceholder}
+					aria-description={queueHint ? `${queueHint} ${disclosure}` : disclosure}
 					value={instruction}
 					rows={3}
-					readOnly={locked}
+					readOnly={draftLocked}
 					onChange={(event) => onChange(event.currentTarget.value)}
 					onKeyDown={(event) => {
 						if (event.defaultPrevented) return;
@@ -70,7 +86,7 @@ export default function TaskInput({
 						if (shortcut === 'send' || shortcut === 'ignore') {
 							event.preventDefault();
 							if (shortcut === 'send' && !blocked) input.form?.requestSubmit();
-						} else if (shortcut === 'reference' && !locked && !context.selection) {
+						} else if (shortcut === 'reference' && !draftLocked && !context.selection) {
 							event.preventDefault();
 							pick(focusInput);
 						}
@@ -78,11 +94,11 @@ export default function TaskInput({
 				/>
 				{error && <div className="scribe-chat-error" role="alert">{error}</div>}
 				<div className="scribe-compose-toolbar">
-					<ContextActions key={conversationId} disabled={locked || Boolean(context.selection)}
+					<ContextActions key={conversationId} disabled={draftLocked || Boolean(context.selection)} vaultOnly={vaultOnly}
 						onPick={() => pick(focusInput)} onAdd={context.onAdd} onFocusInput={focusInput} />
-					<ChatModelPicker groups={modelGroups} value={modelValue} provider={provider} disabled={locked} saving={modelSaving}
-						selecting={modelSelecting} thinking={thinking} onSelect={onModelChange} onThinkingChange={onThinkingChange} />
 					<div className="scribe-compose-submit">
+						{onClose && <button type="button" className="scribe-compose-action" onClick={onClose}
+							aria-label={text.sideChatClose} title={text.sideChatClose}><ChatIcon name="x" /></button>}
 						{onResume && <button type="button" className="scribe-compose-action" disabled={modelSaving} onClick={() => { focusInput(); onResume(); }}
 							aria-label={text.chatResumeReview} title={text.chatResumeReview}>
 							<ChatIcon name="play" />
@@ -91,19 +107,21 @@ export default function TaskInput({
 							aria-label={text.chatRetryConnection} title={text.chatRetryConnection}>
 							<ChatIcon name="rotate-cw" />
 						</button>}
-						{busy ? <button type="button" className="scribe-compose-action scribe-compose-primary" onClick={() => { focusInput(); onStop(); }}
-							aria-label={text.chatStop} title={`${text.chatStop} (Esc)`} aria-keyshortcuts="Escape">
-							<ChatIcon name="square" />
-						</button> : <button type="submit" className="scribe-compose-action scribe-compose-primary" disabled={blocked}
-							aria-label={text.submit} aria-describedby={disclosureId} title={`${text.submit} (Enter)`}>
-							<ChatIcon name="arrow-up" />
-						</button>}
+						{onContinueQueue && <button type="button" className="scribe-compose-action scribe-compose-queue-resume"
+							disabled={locked || modelSaving || queueContinuingDisabled} onClick={() => { focusInput(); onContinueQueue(); }}
+							title={text.queueResume}>{text.queueResume}</button>}
+						{contextMetric && <div className="scribe-composer-context">{contextMetric}</div>}
+						<ChatModelPicker groups={modelGroups} value={modelValue} disabled={locked} saving={modelSaving}
+							selecting={modelSelecting} thinking={thinking} onSelect={onModelChange} onThinkingChange={onThinkingChange} />
+						<button type={busy ? 'button' : 'submit'} className="scribe-compose-action scribe-compose-primary"
+							disabled={!busy && blocked} onClick={busy ? () => { focusInput(); onStop(); } : undefined}
+							aria-label={actionLabel} aria-description={actionDescription} aria-keyshortcuts={busy ? 'Escape' : undefined}
+							title={`${actionLabel} (${busy ? 'Esc' : 'Enter'})${actionDescription ? `\n${actionDescription}` : ''}`}>
+							<ChatIcon name={busy ? 'square' : isSideCommand ? SIDE_CHAT_ICON : 'arrow-up'} />
+						</button>
 					</div>
 				</div>
 			</form>
-			<p className="scribe-compose-disclosure" id={disclosureId}>
-				{provider ? disclosure.replace('{provider}', () => provider) : text.chatModelMissing}
-			</p>
 		</div>
 	);
 }

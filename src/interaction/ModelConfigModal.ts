@@ -1,15 +1,15 @@
-import { App, ButtonComponent, DropdownComponent, Modal, Notice } from 'obsidian';
-import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
+import { App, ButtonComponent, DropdownComponent, Modal, Notice, setIcon } from 'obsidian';
 import { createCredentialStore } from '../communication/credentials';
 import { createModelService } from '../communication/providers';
 import type ScribeAiPlugin from '../main';
+import { isThinkingLevel, THINKING_LEVEL_PRESETS } from '../orchestration/settings/thinking';
 import type { ModelOverride, ModelProviderInfo } from '../types';
 import { applyModelDraft, type ModelDraftChange } from './modelDraft';
 import type { UiText } from './uiText';
 
 const CONTEXT_PRESETS = [64000, 128000, 200000, 256000, 512000, 1000000];
 const OUTPUT_PRESETS = [8000, 16000, 32000, 64000, 128000, 256000];
-const DEFAULT_THINKING: ModelThinkingLevel[] = ['minimal', 'low', 'medium', 'high'];
+const DEFAULT_THINKING = ['minimal', 'low', 'medium', 'high'];
 const DEFAULT_CONTEXT = 128000;
 const DEFAULT_OUTPUT = 8000;
 type Caps = { reasoning: boolean; tools: boolean };
@@ -46,9 +46,10 @@ export class ScribeModelConfigModal extends Modal {
 	private draftContext: number;
 	private draftMaxTokens: number;
 	private caps: Caps;
-	private draftThinking: ModelThinkingLevel[];
-	private defaultThinking: ModelThinkingLevel[];
-	private availableThinking: ModelThinkingLevel[];
+	private draftThinking: string[];
+	private initialThinking: string[];
+	private defaultThinking: string[];
+	private availableThinking: readonly string[];
 	private catalog?: ModelProviderInfo['models'][number];
 	private defaultBaseUrl: string;
 	private defaultProtocol: string;
@@ -57,7 +58,6 @@ export class ScribeModelConfigModal extends Modal {
 	private defaultCaps: Caps;
 	private savedOverride?: ModelOverride;
 	private testController: AbortController | null = null;
-	private thinkingOutside?: (event: MouseEvent) => void;
 
 	constructor(
 		app: App,
@@ -88,9 +88,12 @@ export class ScribeModelConfigModal extends Modal {
 		};
 		const levels = this.catalog?.thinkingLevels;
 		this.defaultThinking = levels?.length ? levels : DEFAULT_THINKING;
-		this.availableThinking = this.catalog?.requiresReasoning ? this.defaultThinking : ['off', ...this.defaultThinking];
-		this.draftThinking = (override?.thinkingLevels ?? (override?.thinkingLevel ? [override.thinkingLevel] : this.defaultThinking))
-			.filter((level) => this.availableThinking.includes(level));
+		const supported = this.catalog?.requiresReasoning ? this.defaultThinking : ['off', ...this.defaultThinking];
+		this.availableThinking = THINKING_LEVEL_PRESETS.filter((level) => (level !== 'off' && level !== 'minimal') || supported.includes(level));
+		const saved = Array.isArray(override?.thinkingLevels) ? override.thinkingLevels : override?.thinkingLevel ? [override.thinkingLevel] : this.defaultThinking;
+		this.initialThinking = this.draftThinking = [...new Set(saved.filter((level) => isThinkingLevel(level) && (
+			supported.includes(level) || (override?.literalThinkingLevels && level !== 'off' && level !== 'minimal')
+		)))];
 	}
 
 	onOpen(): void {
@@ -101,7 +104,6 @@ export class ScribeModelConfigModal extends Modal {
 
 	onClose(): void {
 		this.testController?.abort();
-		if (this.thinkingOutside) this.contentEl.ownerDocument.removeEventListener('mousedown', this.thinkingOutside);
 		this.contentEl.empty();
 	}
 
@@ -122,7 +124,10 @@ export class ScribeModelConfigModal extends Modal {
 		if (!this.caps.tools) caps.tools = false;
 		else delete caps.tools;
 		if (Object.keys(caps).length) override.capabilities = caps;
-		if (this.caps.reasoning && this.draftThinking.join() !== this.defaultThinking.join()) override.thinkingLevels = [...this.draftThinking];
+		if (this.caps.reasoning && (this.savedOverride?.literalThinkingLevels || this.draftThinking.join() !== this.defaultThinking.join())) {
+			override.thinkingLevels = [...this.draftThinking];
+			if (this.savedOverride?.literalThinkingLevels || this.draftThinking.join() !== this.initialThinking.join()) override.literalThinkingLevels = true;
+		}
 		return override;
 	}
 
@@ -205,37 +210,75 @@ export class ScribeModelConfigModal extends Modal {
 		new ButtonComponent(actions).setCta().setButtonText(this.text.save).onClick(() => void this.save());
 	}
 
-	/** 推理档位：只列出该模型支持的档位 */
 	private renderThinkingPicker(container: HTMLElement): void {
-		const picker = container.createDiv({ cls: 'scribe-multi-select' });
-		const trigger = picker.createEl('button', { cls: 'scribe-multi-select-trigger', attr: { type: 'button' } });
-		const renderTrigger = () => {
-			trigger.setText(this.draftThinking.length
-				? this.draftThinking.map((level) => this.text.thinkingLevelNames[level]).join(' / ') : this.text.thinkingLevel);
+		const chips = container.createDiv({ cls: 'scribe-thinking-chips' });
+		const trigger = chips.createEl('button', { cls: 'scribe-thinking-add', attr: {
+			type: 'button', 'aria-label': this.text.addThinkingLevel, 'aria-expanded': 'false', title: this.text.addThinkingLevel,
+		} });
+		setIcon(trigger, 'plus');
+		const panel = container.createDiv({ cls: 'scribe-thinking-editor scribe-hidden' });
+		const presets = panel.createDiv({ cls: 'scribe-thinking-chips' });
+		const entry = panel.createDiv({ cls: 'scribe-thinking-entry' });
+		const input = entry.createEl('input', { attr: {
+			type: 'text', placeholder: this.text.customThinkingLevel, 'aria-label': this.text.customThinkingLevel,
+			spellcheck: 'false', autocapitalize: 'off',
+		} });
+		const add = entry.createEl('button', { text: this.text.add, attr: { type: 'button' } });
+		const setOpen = (open: boolean) => {
+			panel.toggleClass('scribe-hidden', !open);
+			trigger.setAttribute('aria-expanded', String(open));
+			if (open) (presets.querySelector('button') ?? input).focus();
 		};
-		renderTrigger();
-		const panel = picker.createDiv({ cls: 'scribe-multi-select-panel scribe-hidden' });
-		for (const level of this.availableThinking) {
-			const row = panel.createEl('label', { cls: 'scribe-multi-select-option' });
-			const checkbox = row.createEl('input', { attr: { type: 'checkbox' } });
-			checkbox.checked = this.draftThinking.includes(level);
-			row.createSpan({ text: this.text.thinkingLevelNames[level] });
-			checkbox.addEventListener('change', () => {
-				if (!checkbox.checked && this.draftThinking.length === 1) {
-					checkbox.checked = true;
-					return;
-				}
-				this.draftThinking = checkbox.checked
-					? this.availableThinking.filter((item) => this.draftThinking.includes(item) || item === level)
-					: this.draftThinking.filter((item) => item !== level);
-				renderTrigger();
-			});
-		}
-		trigger.addEventListener('click', () => panel.toggleClass('scribe-hidden', !panel.hasClass('scribe-hidden')));
-		this.thinkingOutside = (event) => {
-			if (!picker.contains(event.target as Node)) panel.addClass('scribe-hidden');
+		const append = (level: string) => {
+			if (!isThinkingLevel(level) || this.draftThinking.includes(level)
+				|| ((level === 'off' || level === 'minimal') && !this.availableThinking.includes(level))) {
+				input.setCustomValidity(this.text.invalidThinkingLevel);
+				input.reportValidity();
+				return;
+			}
+			this.draftThinking = [...this.draftThinking, level];
+			input.value = '';
+			render();
+			setOpen(false);
+			trigger.focus();
 		};
-		container.ownerDocument.addEventListener('mousedown', this.thinkingOutside);
+		const render = () => {
+			chips.querySelectorAll('.scribe-thinking-chip').forEach((chip) => chip.remove());
+			presets.empty();
+			for (const level of this.draftThinking) {
+				const chip = chips.createSpan({ cls: 'scribe-thinking-chip' });
+				chips.insertBefore(chip, trigger);
+				chip.createSpan({ text: level });
+				const label = this.text.removeThinkingLevel.replace('{level}', () => level);
+				const remove = chip.createEl('button', { attr: { type: 'button', 'aria-label': label, title: label } });
+				remove.disabled = this.draftThinking.length === 1;
+				setIcon(remove, 'x');
+				remove.addEventListener('click', () => {
+					this.draftThinking = this.draftThinking.filter((item) => item !== level);
+					render();
+					trigger.focus();
+				});
+			}
+			for (const level of this.availableThinking.filter((level) => !this.draftThinking.includes(level))) {
+				presets.createEl('button', { text: level, attr: { type: 'button' } }).addEventListener('click', () => append(level));
+			}
+		};
+		render();
+		trigger.addEventListener('click', () => setOpen(panel.hasClass('scribe-hidden')));
+		add.addEventListener('click', () => append(input.value.trim()));
+		input.addEventListener('input', () => input.setCustomValidity(''));
+		container.addEventListener('keydown', (event) => {
+			if (event.isComposing || panel.hasClass('scribe-hidden')) return;
+			if (event.key === 'Enter' && event.target === input) {
+				event.preventDefault();
+				append(input.value.trim());
+			}
+			if (event.key === 'Escape') {
+				event.stopPropagation();
+				setOpen(false);
+				trigger.focus();
+			}
+		});
 	}
 
 	/** 下拉预设 + 「自定义」切换为数字输入，存原始数值（128K 即 128000） */

@@ -1,0 +1,41 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { replaceActiveTabPane } from '../chatTabWorkspace';
+
+interface TestPane {
+	conversation: { id: string; runs: unknown[]; queue?: unknown[] };
+	open: boolean;
+	unread?: boolean;
+	hasDraft: boolean;
+	status?: string;
+	title?: string;
+	customTitle?: string;
+}
+
+function pane(id: string, extra: Partial<TestPane> = {}): TestPane {
+	return { conversation: { id, runs: [] }, open: true, hasDraft: false, ...extra };
+}
+
+void test('new conversation replaces the active tab position and preserves a dirty previous pane hidden', () => {
+	const next = replaceActiveTabPane({ activeId: 'a', panes: [pane('a', { hasDraft: true }), pane('b')] }, pane('c'), new Map());
+	assert.equal(next.activeId, 'c');
+	assert.deepEqual(next.panes.map(({ conversation, open }) => [conversation.id, open]), [
+		['c', true], ['b', true], ['a', false],
+	]);
+});
+
+void test('new conversation discards an empty previous pane instead of stacking hidden tabs', () => {
+	const next = replaceActiveTabPane({ activeId: 'a', panes: [pane('a'), pane('b')] }, pane('c'), new Map());
+	assert.equal(next.activeId, 'c');
+	assert.deepEqual(next.panes.map(({ conversation, open }) => [conversation.id, open]), [
+		['c', true], ['b', true],
+	]);
+});
+
+void test('a queued message keeps the previous conversation recoverable', () => {
+	const previous = pane('a', { conversation: { id: 'a', runs: [], queue: [{ id: 'q' }] } });
+	const next = replaceActiveTabPane({ activeId: 'a', panes: [previous] }, pane('c'), new Map());
+	assert.deepEqual(next.panes.map(({ conversation, open }) => [conversation.id, open]), [
+		['c', true], ['a', false],
+	]);
+});
