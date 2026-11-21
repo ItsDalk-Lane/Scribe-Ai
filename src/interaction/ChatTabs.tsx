@@ -3,9 +3,9 @@ import { Notice } from 'obsidian';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type ScribeAiPlugin from '../main';
 import { MissingConversationError } from '../types';
-import type { ConversationSnapshot, ConversationSummary } from '../types';
+import type { ConversationSnapshot, ConversationSummary, ExecutionMode } from '../types';
 import App from './App';
-import { replaceActiveTabPane } from './chatTabWorkspace';
+import { executionModeKey, loadExecutionMode, replaceActiveTabPane } from './chatTabWorkspace';
 import ChatTabBar from './components/ChatTabBar';
 import { uiText } from './uiText';
 
@@ -17,6 +17,7 @@ export interface ChatTabActivity {
 
 interface Pane extends ChatTabActivity {
 	conversation: ConversationSnapshot;
+	executionMode: ExecutionMode;
 	open: boolean;
 	unread?: boolean;
 	customTitle?: string;
@@ -29,12 +30,13 @@ interface Workspace {
 	panes: Pane[];
 }
 
-function newPane(conversation: ConversationSnapshot = { id: randomUUID(), runs: [] }): Pane {
-	return { conversation, open: true, hasDraft: false, openedAt: Date.now() };
+function newPane(executionMode: ExecutionMode, conversation: ConversationSnapshot = { id: randomUUID(), runs: [] }): Pane {
+	return { conversation, executionMode, open: true, hasDraft: false, openedAt: Date.now() };
 }
 
 export default function ChatTabs({ plugin }: { plugin: ScribeAiPlugin }) {
 	const text = uiText();
+	const app = plugin.app;
 	const { conversations, sessions } = plugin.services.orchestration;
 	const [workspace, setWorkspace] = useState<Workspace>();
 	const [index, setIndex] = useState<ConversationSummary[]>([]);
@@ -51,17 +53,30 @@ export default function ChatTabs({ plugin }: { plugin: ScribeAiPlugin }) {
 		void Promise.allSettled([sessions.listConversations(), sessions.openConversation()]).then(([history, last]) => {
 			if (closed) return;
 			if (history.status === 'fulfilled') setIndex(history.value);
-			const pane = newPane(last.status === 'fulfilled' ? last.value ?? undefined : undefined);
+			const conversation = last.status === 'fulfilled' ? last.value ?? undefined : undefined;
+			const savedId = conversation && (conversation.runs.length || conversation.queue?.length) ? conversation.id : undefined;
+			const pane = newPane(loadExecutionMode(app, savedId), conversation);
 			if (history.status === 'rejected' || last.status === 'rejected') pane.initialError = text.chatHistoryError;
 			if (last.status === 'rejected' || !last.value) unopenedPane.current = pane.conversation.id;
 			setWorkspace({ activeId: pane.conversation.id, panes: [pane] });
 		});
 		return () => { closed = true; mounted.current = false; };
-	}, [sessions, text.chatHistoryError]);
+	}, [app, sessions, text.chatHistoryError]);
 
 	const activeId = workspace?.activeId;
 	useLayoutEffect(() => { activePane.current = activeId; }, [activeId]);
 	const active = workspace?.panes.find(({ conversation }) => conversation.id === activeId);
+	const activeMode = active?.executionMode;
+	const hasSavedConversation = Boolean(active && (active.title || active.conversation.runs.length || active.conversation.queue?.length));
+	useLayoutEffect(() => {
+		if (!activeId || !activeMode) return;
+		try {
+			app.saveLocalStorage(executionModeKey(), activeMode);
+			if (hasSavedConversation) app.saveLocalStorage(executionModeKey(activeId), activeMode);
+		} catch {
+			new Notice(text.saveFailed);
+		}
+	}, [activeId, activeMode, app, hasSavedConversation, text.saveFailed]);
 	const remember = activeId !== unopenedPane.current || Boolean(active?.status || active?.title);
 	useEffect(() => {
 		if (activeId && remember) void conversations.setLastOpened(activeId).catch(() => {
@@ -99,7 +114,7 @@ export default function ChatTabs({ plugin }: { plugin: ScribeAiPlugin }) {
 
 	function newConversationInActiveTab() {
 		selection.current++;
-		const pane = newPane();
+		const pane = newPane(activeMode ?? loadExecutionMode(app));
 		unopenedPane.current = pane.conversation.id;
 		setWorkspace((current) => current && replaceActiveTabPane(current, pane, pendingTitles.current));
 	}
@@ -117,12 +132,12 @@ export default function ChatTabs({ plugin }: { plugin: ScribeAiPlugin }) {
 			setIndex((previous) => previous.filter((row) => row.id !== id));
 			throw new MissingConversationError(text.chatHistoryError);
 		}
-		show(newPane(snapshot));
+		show(newPane(loadExecutionMode(app, id), snapshot));
 	}
 
 	function close(id: string, remove = false) {
 		selection.current++;
-		const fallback = newPane();
+		const fallback = newPane(activeMode ?? loadExecutionMode(app));
 		setWorkspace((current) => {
 			if (!current) return current;
 			const open = current.panes.filter((pane) => pane.open);
@@ -185,6 +200,11 @@ export default function ChatTabs({ plugin }: { plugin: ScribeAiPlugin }) {
 
 	async function remove(id: string) {
 		await sessions.deleteConversation(id);
+		try {
+			app.saveLocalStorage(executionModeKey(id), null);
+		} catch {
+			new Notice(text.saveFailed);
+		}
 		pendingTitles.current.delete(id);
 		refreshVersion.current++;
 		setIndex((previous) => previous.filter((row) => row.id !== id));
@@ -206,16 +226,18 @@ export default function ChatTabs({ plugin }: { plugin: ScribeAiPlugin }) {
 	}));
 
 	return <div className="scribe-chat-workspace">
-		<ChatTabBar tabs={tabs} activeId={workspace.activeId} onNew={() => show(newPane())}
+		<ChatTabBar tabs={tabs} activeId={workspace.activeId} onNew={() => show(newPane(activeMode ?? loadExecutionMode(app)))}
 			onActivate={(id) => { const pane = workspace.panes.find(({ conversation }) => conversation.id === id); if (pane) show(pane); }}
 			onClose={close} onRename={rename} />
-		{workspace.panes.map(({ conversation, initialError }) => {
+		{workspace.panes.map(({ conversation, initialError, executionMode }) => {
 			const selected = conversation.id === workspace.activeId;
 			return <div key={conversation.id} className="scribe-chat-tab-panel" id={`scribe-tab-panel-${conversation.id}`}
 				role="tabpanel" aria-labelledby={`scribe-tab-${conversation.id}`} hidden={!selected}>
-				<App plugin={plugin} conversation={conversation} selected={selected} conversations={all} initialError={initialError ?? ''}
+				<App plugin={plugin} conversation={conversation} mode={executionMode} selected={selected} conversations={all} initialError={initialError ?? ''}
+					onModeChange={(mode) => setWorkspace((current) => current && { ...current, panes: current.panes.map((pane) =>
+						pane.conversation.id === conversation.id ? { ...pane, executionMode: mode } : pane) })}
 					onNew={newConversationInActiveTab} onOpen={openHistory} onRename={rename} onDelete={remove} onRefresh={refresh}
-					onFork={(snapshot) => show(newPane(snapshot), activePane.current === conversation.id)} onActivity={updateActivity} />
+					onFork={(snapshot) => show(newPane(executionMode, snapshot), activePane.current === conversation.id)} onActivity={updateActivity} />
 			</div>;
 		})}
 	</div>;

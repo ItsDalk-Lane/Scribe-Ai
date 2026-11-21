@@ -30,12 +30,41 @@ export function messageUsage(message: Message) {
 	return { ...reported, cost };
 }
 
+export interface UsageTotals {
+	input?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+	output?: number;
+	total?: number;
+	hit?: number;
+	cost?: number;
+	partialTotal?: boolean;
+}
+
+export interface ContextUsage {
+	prompt: number;
+	capacity: number;
+	remaining: number;
+	percent: number;
+}
+
+export interface ConversationMetrics {
+	rounds: number;
+	count: number;
+	modelMs: number | undefined;
+	toolMs: number | undefined;
+	lagMs: number | undefined;
+	speed: number | undefined;
+	usage: UsageTotals | undefined;
+	context: ContextUsage | undefined;
+}
+
 function sum(values: (number | undefined)[]): number | undefined {
 	const measured = values.filter(nonNegative);
 	return measured.length ? measured.reduce((total, value) => total + value, 0) : undefined;
 }
 
-export function usageTotals(messages: readonly Message[]) {
+export function usageTotals(messages: readonly Message[]): UsageTotals | undefined {
 	const entries = messages.map(messageUsage);
 	if (!entries.some(Boolean)) return;
 	const fields = (key: keyof ReportedUsage) => entries.map((entry) => entry?.[key]);
@@ -58,7 +87,7 @@ export function messageTime(message: Message | undefined) {
 	return timestamp && nonNegative(durationMs) ? timestamp + durationMs : undefined;
 }
 
-export function conversationMetrics(runs: readonly RunState[]) {
+export function conversationMetrics(runs: readonly RunState[]): ConversationMetrics {
 	const all = runs.flatMap(({ messages }) => messages);
 	const messages = completedMessages(all);
 	const usage = usageTotals(messages);

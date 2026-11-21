@@ -7,7 +7,7 @@ export function explicitNoteTargets(instruction: string, cwd: string): Map<strin
 	const path = /(?:`[^`]+\.md`|"[^"]+\.md"|“[^”]+\.md”|\[\[[^\]|#]+\.md\]\]|[\p{L}\p{N}\p{M}_./\\:+-]+?\.md)/iyu;
 	const separator = /\s*(?:[、，,]|以及|和|与|\band\b)\s*/iyu;
 	const end = /\s*(?:(?:这)?(?:[一两三四五六七八九十]|\d+)篇(?:笔记)?|笔记)?\s*\.?\s*$/yu;
-	// shortcut: 只识别独立的明确写入句及其 .md 路径列表，自由表述的交付目标需另有可靠的确认方式。
+	// shortcut: 只用明确写入句的 .md 路径收窄续做范围，更广的表述沿用原有权限校验。
 	const prose = instruction.replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/gu, '');
 	for (const clause of prose.split(/[\r\n。；;！!？?]/u)) {
 		const prefix = writeStart.exec(clause)?.[0];

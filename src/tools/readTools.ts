@@ -1,12 +1,12 @@
 import type { ToolModule } from '../types';
 import { fileFingerprint, fileToolInput, readToolFile, requiredText } from './support/fileAccess';
-import { authorizedLineRange, resolveToolPath } from './support/pathUtils';
+import { authorizedLineRange, recheckToolPath, resolveToolPath } from './support/pathUtils';
 
 const MAX_READ_RESULT_CHARS = 100_000;
 
 export const readTools: ToolModule = () => [{
 	name: 'Read',
-	description: 'Read a UTF-8 text file with line numbers. Relative paths start in the vault, and explicitly authorized absolute paths are supported. A Jupyter notebook is returned as JSON; cells without an ID can be addressed as cell-0, cell-1, and so on.',
+	description: 'Read a UTF-8 text file with line numbers. Relative paths start in the vault. Absolute paths may require approval. A Jupyter notebook is returned as JSON; cells without an ID can be addressed as cell-0, cell-1, and so on.',
 	inputSchema: {
 		type: 'object',
 		properties: {
@@ -19,14 +19,19 @@ export const readTools: ToolModule = () => [{
 	},
 	isReadOnly: true,
 	maxResultSizeChars: MAX_READ_RESULT_CHARS,
-	prepare(input, ctx) {
+	async prepare(input, ctx) {
 		const args = fileToolInput(input, ['file_path', 'offset', 'limit']);
 		const file = requiredText(args, 'file_path');
 		const offset = positiveInteger(args.offset, 'offset', 0) ?? 1;
 		const limit = positiveInteger(args.limit, 'limit', 1);
+		const target = await resolveToolPath(ctx, file, 'read', { requestApproval: true });
 		return {
+			approval: target.requiresApproval ? {
+				kind: 'access', title: '读取库外文件', target: target.absolutePath,
+				reason: `读取库外文件，从第 ${Math.max(offset, 1)} 行开始${limit === undefined ? '。' : `，最多读取 ${limit} 行。`}`,
+			} : undefined,
 			async run() {
-				const path = await resolveToolPath(ctx, file, 'read');
+				const path = await recheckToolPath(ctx, target, 'read');
 				const content = await readToolFile(ctx, path);
 				const selection = authorizedLineRange(ctx, path);
 				const fingerprint = selection ? undefined : fileFingerprint(content);

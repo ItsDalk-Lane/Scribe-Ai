@@ -6,9 +6,13 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { App, TFile } from 'obsidian';
-import type { Message, ToolContext } from '../../types';
+import type { Message, ToolApproval, ToolContext } from '../../types';
+import { createPermissionPolicy } from '../../orchestration/policies/permissions';
 import { createReadDelivery } from '../../runtime/readDelivery';
+import { createToolExecutor } from '../executor';
+import { createToolRegistry } from '../index';
 import { readTools } from '../readTools';
+import { searchTools } from '../searchTools';
 import { isWithinPath } from '../support/pathUtils';
 import { writeTools } from '../writeTools';
 
@@ -20,6 +24,7 @@ async function fileToolsFixture(testContext: TestContext) {
 	await Promise.all([mkdir(cwd), mkdir(outside)]);
 	const usedVaultApi = new Set<string>();
 	const app = { vault: {
+		configDir: 'test-config',
 		getFileByPath: (path: string) => path === 'note.md' ? { path } : null,
 		readBinary(file: TFile) {
 			usedVaultApi.add('readBinary');
@@ -61,6 +66,66 @@ async function fileToolsFixture(testContext: TestContext) {
 	};
 	return { directory, cwd, outside, usedVaultApi, context, prepare, run };
 }
+
+void test('execution modes approve only out-of-vault file operations in restricted chats', async (testContext) => {
+	const { cwd, outside, context } = await fileToolsFixture(testContext);
+	const file = join(outside, 'draft.txt');
+	await writeFile(file, 'private opening\nprivate closing\n');
+	const executor = createToolExecutor(createToolRegistry([readTools, searchTools, writeTools]));
+	const execute = (name: string, input: Record<string, string>) => executor.execute({ id: name, name, input }, context);
+	const asked: ToolApproval[] = [];
+	let allowed = false;
+	context.permissions = await createPermissionPolicy(cwd, context.app.vault.configDir, [], () => true, 'ask');
+	context.approve = (request) => { asked.push(request); return Promise.resolve(allowed); };
+
+	assert.equal((await execute('Write', { file_path: 'new.md', content: 'local' })).isError, false);
+	assert.equal(await readFile(join(cwd, 'new.md'), 'utf8'), 'local');
+	assert.equal(asked.length, 0);
+	assert.equal((await execute('Read', { file_path: file })).isError, true);
+	assert.equal(asked.at(-1)?.target, file);
+	assert.equal(context.readFiles.has(file), false);
+	assert.equal((await execute('Grep', { path: outside, pattern: 'private' })).isError, true);
+	assert.equal(asked.at(-1)?.target, outside);
+
+	allowed = true;
+	assert.match((await execute('Read', { file_path: file })).content, /private opening/);
+	assert.match((await execute('Glob', { path: outside, pattern: '*.txt' })).content, /draft\.txt/);
+	assert.match((await execute('Grep', { path: outside, pattern: 'private' })).content, /draft\.txt/);
+	const edit = (replacement: string) => execute('Edit', { file_path: file, old_string: 'private opening', new_string: replacement });
+	allowed = false;
+	assert.equal((await edit('denied')).isError, true);
+	assert.match(await readFile(file, 'utf8'), /^private opening/);
+	assert.equal(asked.at(-1)?.after, 'denied\nprivate closing\n');
+	allowed = true;
+	assert.equal((await edit('approved')).isError, false);
+
+	context.permissions = await createPermissionPolicy(cwd, context.app.vault.configDir, [], () => true, 'full-access');
+	const approvalCount = asked.length;
+	assert.equal((await execute('Edit', { file_path: file, old_string: 'approved', new_string: 'direct' })).isError, false);
+	assert.match(await readFile(file, 'utf8'), /^direct/);
+	assert.equal(asked.length, approvalCount);
+});
+
+void test('read approval stays bound to the resolved file if a link is retargeted', async (testContext) => {
+	if (process.platform === 'win32') return testContext.skip();
+	const { cwd, outside, context } = await fileToolsFixture(testContext);
+	const file = join(outside, 'first.txt');
+	const other = join(outside, 'other.txt');
+	const link = join(cwd, 'link.txt');
+	await Promise.all([writeFile(file, 'first'), writeFile(other, 'other')]);
+	await symlink(file, link);
+	context.permissions = await createPermissionPolicy(cwd, context.app.vault.configDir, [], () => true, 'ask');
+	context.approve = async (request) => {
+		assert.equal(request.target, file);
+		await rm(link);
+		await symlink(other, link);
+		return true;
+	};
+	const executor = createToolExecutor(createToolRegistry([readTools]));
+	const result = await executor.execute({ name: 'Read', id: 'read', input: { file_path: link } }, context);
+	assert.equal(result.isError, true);
+	assert.equal(context.readFiles.has(other), false);
+});
 
 void test('File tools read and write vault files and authorized external files', async (testContext) => {
 	const { directory, cwd, outside, usedVaultApi, context, prepare, run } = await fileToolsFixture(testContext);

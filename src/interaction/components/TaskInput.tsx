@@ -1,10 +1,12 @@
 import type { ReactNode, RefObject } from 'react';
 import { SIDE_CHAT_ICON } from '../../constants';
+import type { ExecutionMode } from '../../types';
 import { composerShortcut, sideChatCommand } from '../composerKeyboard';
 import { uiText } from '../uiText';
 import type { ChatModelGroup } from '../useChatModel';
 import ChatIcon from './ChatIcon';
 import ChatModelPicker from './ChatModelPicker';
+import ExecutionModePicker from './ExecutionModePicker';
 import type { ThinkingSelection } from './ThinkingSlider';
 import { ContextActions, ContextChips, useVaultPicker } from './ContextPicker';
 import type { ContextPickerProps } from './ContextPicker';
@@ -16,6 +18,11 @@ interface TaskInputProps {
 	conversationId: string | null;
 	context: Omit<ContextPickerProps, 'disabled'>;
 	contextMetric?: ReactNode;
+	executionMode?: {
+		value: ExecutionMode;
+		queuePending: boolean;
+		onChange: (mode: ExecutionMode, trigger: HTMLButtonElement) => void;
+	};
 	vaultOnly?: boolean;
 	placeholder?: string;
 	modelGroups: ChatModelGroup[];
@@ -40,7 +47,7 @@ interface TaskInputProps {
 }
 
 export default function TaskInput({
-	inputRef, busy, disabled, conversationId, context, contextMetric, vaultOnly, placeholder,
+	inputRef, busy, disabled, conversationId, context, contextMetric, executionMode, vaultOnly, placeholder,
 	modelGroups, modelValue, modelSaving = false, modelSelecting = false, thinking, error, instruction,
 	onChange, onModelChange, onThinkingChange, onSubmit, onStop, queueDuringRun = false,
 	onContinueQueue, queueContinuingDisabled, onClose, onResume, onRetryConnection, toolbar,
@@ -96,6 +103,10 @@ export default function TaskInput({
 				<div className="scribe-compose-toolbar">
 					<ContextActions key={conversationId} disabled={draftLocked || Boolean(context.selection)} vaultOnly={vaultOnly}
 						onPick={() => pick(focusInput)} onAdd={context.onAdd} onFocusInput={focusInput} />
+					{executionMode && <ExecutionModePicker value={executionMode.value} onChange={executionMode.onChange}
+						disabled={locked || Boolean(context.selection) || executionMode.queuePending}
+						description={context.selection ? text.chatModeSelection
+							: busy || executionMode.queuePending ? text.chatModeLocked : undefined} />}
 					<div className="scribe-compose-submit">
 						{onClose && <button type="button" className="scribe-compose-action" onClick={onClose}
 							aria-label={text.sideChatClose} title={text.sideChatClose}><ChatIcon name="x" /></button>}

@@ -148,7 +148,6 @@ function TimelineNotice({ item, live, lastStep }: { item: NoticeRow; live?: bool
 		connection: text.chatWaitingForConnection,
 		context: text.chatTimelineContextRetry,
 		skipped: text.chatToolSkipped,
-		partial: text.chatPartiallyDone,
 		failed: text.chatFailed,
 		cancelled: text.chatStopped,
 		interrupted: text.chatInterrupted,
@@ -179,21 +178,22 @@ function lastStepLabel(step: RunStep, items: readonly TimelineItem[]): string {
 }
 
 export default memo(function ChatTurn({
-	app, execution, live, request, step, model, editing, onEdit, onFork, expanded, toggleExpanded, readOnly,
+	app, execution, live, request, step, model, editing, onEdit, onFork, expanded, toggleExpanded, readOnly, automaticReview,
 }: {
 	app: App; execution: ChatExecution; live?: boolean; request?: SubmittedPrompt; step?: RunStep;
-	model?: SavedRun['model']; editing?: boolean; onEdit?: () => void; onFork?: () => void; readOnly?: boolean;
+	model?: SavedRun['model']; editing?: boolean; onEdit?: () => void; onFork?: () => void; readOnly?: boolean; automaticReview?: boolean;
 	expanded: ReadonlySet<string>; toggleExpanded: (id: string) => void;
 }) {
 	const text = uiText();
 	const { state, modelRetry } = execution;
-	const { user, rows, answer, copyText, showCompletion, hasProcess, answerMessage } = useMemo(() => chatTurnContent(execution), [execution]);
+	const { user, rows, answer, copyText, hasProcess, answerMessage } = useMemo(() => chatTurnContent(execution), [execution]);
 	const messages = useMemo(() => completedMessages(state?.messages ?? []), [state?.messages]);
 	const usage = useMemo(() => usageTotals(messages), [messages]);
 	const status = state?.status ?? 'idle';
 	const running = status === 'running' || status === 'awaiting-approval';
 	const hasReply = Boolean(answer.trim());
-	const statusLabel = status === 'awaiting-approval' ? text.chatTimelineApproval
+	const showActivity = state && running && live;
+	const statusLabel = status === 'awaiting-approval' ? (automaticReview ? text.chatTimelineAutoReview : text.chatTimelineApproval)
 		: modelRetry === 'manual' ? text.chatTimelineWaitingConnection
 		: modelRetry === 'automatic' ? text.chatReconnecting : text.chatResponding;
 	const end = state?.finishedAt ?? messageTime(answerMessage);
@@ -259,15 +259,12 @@ export default memo(function ChatTurn({
 		<article className="scribe-chat-run" data-task-id={state?.taskId} tabIndex={-1}>
 			{(request?.instruction || user) && <UserMessage app={app} request={request} content={request?.instruction || user}
 				timestamp={state?.createdAt} editing={editing} onEdit={onEdit} readOnly={readOnly} />}
-			{!editing && <div className="scribe-assistant-turn" role="group" aria-label={text.chatAssistant}>
+			{!editing && (hasProcess || hasReply || showActivity) && <div className="scribe-assistant-turn" role="group" aria-label={text.chatAssistant}>
 				{hasProcess && (hasReply && !running ? <TurnProcess summary={summary} render={renderTimeline} /> : renderTimeline())}
 				{hasReply && <AnswerContent app={app} content={answer} />}
-				{state && running && live && <WorkingRow key={state.taskId} state={state}
+				{showActivity && <WorkingRow key={state.taskId} state={state}
 					modelIntent={execution.modelIntent}
 					override={status === 'awaiting-approval' || modelRetry ? statusLabel : undefined} />}
-				{showCompletion && <div className="scribe-timeline-notice" role={live ? 'status' : undefined}>
-					<ChatIcon name="circle-check" /><span>{text.phaseDone}</span>
-				</div>}
 				{!running && Boolean(copyText.trim()) && <div className="scribe-message-actions scribe-assistant-actions">
 					<Timestamp timestamp={messageTime(answerMessage) ?? answerMessage?.rawAssistant?.timestamp} />
 					{hasReply && !readOnly && <button type="button" className="scribe-message-action" aria-label={text.chatForkReply} title={text.chatForkReply}

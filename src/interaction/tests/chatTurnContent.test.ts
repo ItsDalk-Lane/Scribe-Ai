@@ -199,7 +199,6 @@ void test('only the confirmed reply leaves the timeline, including its saved con
 		const failed = updateExecution(execution, { type: 'state', state: state([first, second], status, 2) });
 		assert.equal(chatTurnContent(failed).answer, '', status);
 		assert.equal(chatTurnContent(failed).copyText, '这是回答。', status);
-		assert.equal(chatTurnContent(failed).showCompletion, false, status);
 		assert.equal(chatTurnContent(failed).rows.filter(({ kind }) => kind === 'text').length, 2, status);
 	}
 	const done = updateExecution(execution, { type: 'state', state: state([first, second], 'done', 2) });
@@ -267,16 +266,22 @@ void test('merges an older reasoning checkpoint into the retry and preserves dis
 	assert.deepEqual(rows.map(({ kind }) => kind), ['text', 'thinking', 'notice', 'notice']);
 });
 
-void test('marks equivalent successful tool retries as resolved and indicates empty completions', () => {
+void test('shows tool records without adding a reply or a completion notice when model text is blank', () => {
 	const first = { id: 'first', name: 'Edit', input: { target: 'a.md', options: { from: 'old', to: 'new' } } };
 	const second = { id: 'second', name: 'Edit', input: { options: { to: 'new', from: 'old' }, target: 'a.md' } };
-	const result = restoreExecution(saved([
+	const messages: Message[] = [
 		{ role: 'assistant', content: '', toolCalls: [first] },
 		{ role: 'tool', content: '失败', toolCallId: first.id, isError: true },
 		{ role: 'assistant', content: '', toolCalls: [second] },
 		{ role: 'tool', content: '成功', toolCallId: second.id },
-		{ role: 'assistant', content: '  ' },
-	], 'file-changes-done'));
-	assert.equal(result.items.some((row) => row.kind === 'tool' && row.call.id === first.id && row.resolved), true);
-	assert.equal(chatTurnContent(result).showCompletion, true);
+		{ role: 'assistant', content: '' },
+	];
+	for (const status of ['done', 'file-changes-done', 'partial'] as const) {
+		const result = restoreExecution(saved(messages, status));
+		assert.equal(result.items.some((row) => row.kind === 'tool' && row.call.id === first.id && row.resolved), true, status);
+		const { answer, copyText, rows } = chatTurnContent(result);
+		assert.equal(answer.trim(), '', status);
+		assert.equal(copyText.trim(), '', status);
+		assert.ok(rows.length > 0 && rows.every(({ kind }) => kind === 'tool' || kind === 'tool-group'), status);
+	}
 });

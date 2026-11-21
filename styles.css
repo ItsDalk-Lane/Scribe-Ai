@@ -1177,6 +1177,43 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	flex: 0 0 auto;
 }
 
+.scribe-execution-picker {
+	position: relative;
+	min-inline-size: 40px;
+}
+
+.scribe-app button.scribe-compose-execution {
+	width: auto;
+	gap: 4px;
+	padding-inline: 4px;
+	white-space: nowrap;
+}
+
+.scribe-app button.scribe-compose-execution[data-full-access] {
+	color: var(--scribe-warning);
+}
+
+.scribe-compose-execution > .scribe-chat-icon:last-child {
+	width: 12px;
+	height: 12px;
+}
+
+.scribe-compose-execution[aria-expanded="true"] > .scribe-chat-icon:last-child {
+	transform: rotate(180deg);
+}
+
+.scribe-execution-label {
+	min-inline-size: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+@container (width < 290px) {
+	.scribe-execution-label {
+		display: none;
+	}
+}
+
 .scribe-context-popover {
 	position: absolute;
 	z-index: 2;
@@ -1211,6 +1248,32 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	width: 12px;
 	height: 12px;
 	margin-inline-start: auto;
+}
+
+.scribe-context-popover.scribe-execution-menu {
+	z-index: 3;
+	inline-size: min(18rem, calc(var(--scribe-chat-width) - 48px));
+}
+
+.scribe-app .scribe-execution-menu button {
+	align-items: flex-start;
+	padding-block: 6px;
+}
+
+.scribe-execution-menu button > .scribe-chat-icon {
+	margin-block-start: 2px;
+}
+
+.scribe-execution-option {
+	display: grid;
+	flex: 1;
+	gap: 2px;
+	min-inline-size: 0;
+}
+
+.scribe-execution-option > small {
+	color: var(--text-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
 }
 
 .scribe-context-outside {

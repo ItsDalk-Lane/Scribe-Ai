@@ -11,10 +11,11 @@ interface SelectedPassage {
 	height: number;
 }
 
-export default function TranscriptSelection({ scroll, content, onQuote }: {
+export default function TranscriptSelection({ scroll, content, onQuote, onSideChat }: {
 	scroll: RefObject<HTMLDivElement | null>;
 	content: RefObject<HTMLDivElement | null>;
-	onQuote: (quote: string) => void;
+	onQuote?: (quote: string) => void;
+	onSideChat?: (quote: string) => void;
 }) {
 	const text = uiText();
 	const toolbar = useRef<HTMLDivElement>(null);
@@ -129,6 +130,7 @@ export default function TranscriptSelection({ scroll, content, onQuote }: {
 			clear();
 			scroll.current?.focus({ preventScroll: true });
 		}}>
-		<button type="button" onClick={() => { clear(); onQuote(passage.quote); }}>{text.chatAddSelection}</button>
+		{onQuote && <button type="button" onClick={() => { clear(); onQuote(passage.quote); }}>{text.chatAddSelection}</button>}
+		{onSideChat && <button type="button" onClick={() => { clear(); onSideChat(passage.quote); }}>{text.sideChatAskSelection}</button>}
 	</div>;
 }

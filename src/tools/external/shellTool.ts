@@ -4,9 +4,10 @@ import type { ChildProcess } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { clearTimeout, setTimeout } from 'node:timers';
-import type { ToolContext, ToolDefinition, ToolModule } from '../../types';
+import type { PreparedTool, ToolContext, ToolDefinition, ToolModule } from '../../types';
 import { fileToolInput, requiredText } from '../support/fileAccess';
 import { resolveToolPath } from '../support/pathUtils';
+import { hasMacShellSandbox, macSandboxExecutable, macShellSandboxArgs } from './macosShellSandbox';
 
 type ShellName = 'Bash' | 'PowerShell';
 
@@ -105,15 +106,19 @@ async function runShell(
 	ctx: ToolContext,
 	cwd: string,
 	timeout: number,
+	sandboxArgs?: string[],
 ): Promise<string> {
 	ctx.signal.throwIfAborted();
 	return new Promise((resolve, reject) => {
 		const stdout = outputCapture();
 		const stderr = outputCapture();
-		const child = spawn(binary, shellArgs(name, command), {
+		const commandArgs = shellArgs(name, command);
+		const env = shellEnvironment();
+		if (sandboxArgs) env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
+		const child = spawn(sandboxArgs ? macSandboxExecutable : binary, sandboxArgs ? [...sandboxArgs, binary, ...commandArgs] : commandArgs, {
 			cwd,
 			detached: !windows,
-			env: shellEnvironment(),
+			env,
 			stdio: ['ignore', 'pipe', 'pipe'],
 			windowsHide: true,
 		});
@@ -153,6 +158,9 @@ async function runShell(
 			const output = [
 				timedOut ? '命令已超时。' : `命令退出状态 ${code ?? signal ?? '未知'}。`,
 				...(failed ? [errorOutput, stdout.text()] : [stdout.text(), errorOutput]),
+				failed && sandboxArgs && !timedOut
+					? '命令在受限环境中运行。确需访问库外或联网时，先核对已执行的步骤，再用 elevated 申请所需权限。'
+					: '',
 			].filter(Boolean).join('\n');
 			if (ctx.signal.aborted) reject(new Error('任务已停止。'));
 			else if (failed) reject(new Error(output));
@@ -174,7 +182,7 @@ function hidesCommandText(command: string): boolean {
 function shellTool(name: ShellName): ToolDefinition {
 	return {
 		name,
-		description: `使用真实的 ${name} 执行本地命令。每条命令和工作目录都需要用户确认。命令以用户的系统权限运行，文件操作优先使用专用文件工具。`,
+		description: `使用真实的 ${name} 执行无需交互输入的本地命令。普通命令优先在笔记库内离线运行，访问库外或联网需要额外权限。文件操作优先使用专用文件工具。`,
 		isReadOnly: false,
 		isAvailable: () => executable(name) !== undefined,
 		maxResultSizeChars: 30_000,
@@ -182,7 +190,8 @@ function shellTool(name: ShellName): ToolDefinition {
 			type: 'object',
 			properties: {
 				command: { type: 'string', description: '要执行的完整命令。' },
-				cwd: { type: 'string', description: '工作目录。默认是当前笔记库，也接受用户明确授权的绝对目录。' },
+				cwd: { type: 'string', description: '工作目录。省略或留空时使用当前笔记库。' },
+				elevated: { type: 'boolean', description: '仅在命令需要访问库外文件或联网时设为 true，以申请本次命令的额外权限。' },
 				timeout: { type: 'integer', minimum: 1, maximum: MAX_TIMEOUT, description: '超时毫秒数，默认 120000。' },
 				description: { type: 'string', description: '命令用途的简短说明。' },
 			},
@@ -190,28 +199,49 @@ function shellTool(name: ShellName): ToolDefinition {
 			additionalProperties: false,
 		},
 		async prepare(input, ctx) {
-			const args = fileToolInput(input, ['command', 'cwd', 'timeout', 'description']);
+			const args = fileToolInput(input, ['command', 'cwd', 'elevated', 'timeout', 'description']);
 			const command = requiredText(args, 'command');
 			if (hidesCommandText(command)) throw new Error('命令包含会妨碍确认的不可见控制符。');
 			if (args.description !== undefined) requiredText(args, 'description');
+			if (args.elevated !== undefined && typeof args.elevated !== 'boolean') throw new Error('elevated 必须是布尔值。');
 			const timeout = args.timeout === undefined ? DEFAULT_TIMEOUT : args.timeout;
 			if (typeof timeout !== 'number' || !Number.isInteger(timeout) || timeout < 1 || timeout > MAX_TIMEOUT) {
 				throw new Error('timeout 必须是 1 至 600000 之间的毫秒整数。');
 			}
 			const binary = executable(name);
 			if (!binary) throw new Error(`找不到 ${name} 解释器。`);
-			const requestedCwd = args.cwd === undefined ? ctx.cwd : requiredText(args, 'cwd');
-			const cwd = await resolveToolPath(ctx, requestedCwd, 'read');
+			const cwdArg = args.cwd;
+			const requestedCwd = cwdArg === undefined || (typeof cwdArg === 'string' && !cwdArg.trim())
+				? ctx.cwd : requiredText(args, 'cwd');
+			const { permissions } = ctx;
+			const mode = permissions.executionMode;
+			const limited = mode === 'ask' || mode === 'auto-review';
+			const cwdContext = limited ? {
+				...ctx, permissions: {
+					...permissions,
+					canRead: (path: string) => permissions.canRead(path) || permissions.canRequestPath?.(path, 'read') === true,
+				},
+			} : ctx;
+			const cwd = await resolveToolPath(cwdContext, requestedCwd, 'read');
 			if (!cwd.stat?.isDirectory()) throw new Error('命令工作目录必须是文件夹。');
+			const inVault = cwd.vaultPath !== undefined && permissions.canRead(cwd.requestedPath) && permissions.canRead(cwd.absolutePath);
+			const restricted = limited && inVault && !args.elevated && name === 'Bash' && hasMacShellSandbox();
+			const reason = limited && (!inVault || args.elevated
+				? '此命令申请访问库外资料或联网。'
+				: '此系统或命令环境无法限制在笔记库内，运行前需要确认。');
+			const permission: Pick<PreparedTool, 'approval' | 'independent'> = restricted || mode === 'full-access'
+				? { independent: true }
+				: { approval: { title: name, target: cwd.absolutePath, after: command, kind: 'shell', ...(reason ? { reason } : {}) } };
 			return {
-				approval: { title: name, target: cwd.absolutePath, after: command, kind: 'shell' },
+				...permission,
 				async run() {
-					const current = await resolveToolPath(ctx, requestedCwd, 'read');
+					const current = await resolveToolPath(cwdContext, requestedCwd, 'read');
 					if (!current.stat?.isDirectory() || current.absolutePath !== cwd.absolutePath
 						|| current.stat.ino !== cwd.stat?.ino || current.stat.dev !== cwd.stat?.dev) {
 						throw new Error('工作目录已变化，请重新确认命令。');
 					}
-					return runShell(name, binary, command, ctx, current.absolutePath, timeout);
+					const sandboxArgs = restricted ? await macShellSandboxArgs(ctx) : undefined;
+					return runShell(name, binary, command, ctx, current.absolutePath, timeout, sandboxArgs);
 				},
 			};
 		},

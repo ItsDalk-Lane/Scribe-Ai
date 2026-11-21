@@ -21,7 +21,6 @@ export function createToolRegistry(modules: ToolModule[]): ToolRegistry {
 /** 工具层的统一出口：能力清单 + 统一执行入口 */
 export function createToolLayer(): ToolLayer {
 	const external = { web: webTools, shell: shellTools, mcp: mcpTools };
-	// 原生命令无法限制在用户选定的资料范围内，因此不注册到聊天。
 	const registry = createToolRegistry([
 		readTools,
 		writeTools,
@@ -30,6 +29,7 @@ export function createToolLayer(): ToolLayer {
 		taskTools,
 		skillTools,
 		external.web,
+		external.shell,
 		external.mcp,
 	]);
 	return { registry, executor: createToolExecutor(registry), external };

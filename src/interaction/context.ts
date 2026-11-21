@@ -25,7 +25,6 @@ export const emptyExecution: ChatExecution = { state: null, turn: 0, items: [] }
 function terminalNotice(state: RunState): NoticeRow | undefined {
 	const { status } = state;
 	switch (status) {
-		case 'partial':
 		case 'failed':
 		case 'cancelled':
 		case 'interrupted':

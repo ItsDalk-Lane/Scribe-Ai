@@ -1,6 +1,6 @@
 import { realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
-import type { NoteRef, PermissionPolicy } from '../../types';
+import type { ExecutionMode, NoteRef, PermissionPolicy } from '../../types';
 
 function includesPath(root: string, target: string): boolean {
 	const child = relative(root, target);
@@ -22,13 +22,14 @@ async function canonicalPath(path: string): Promise<string> {
 	}
 }
 
-/** 笔记库是默认工作范围，库外范围只由用户提交的路径扩展。 */
 export async function createPermissionPolicy(
 	cwd: string, configDir: string, refs: NoteRef[], toolsEnabled: () => boolean = () => true,
+	executionMode?: ExecutionMode,
 ): Promise<PermissionPolicy> {
 	const vaultRoot = await realpath(cwd);
 	const roots = [cwd, vaultRoot];
 	const protectedRoots = roots.map((root) => resolve(root, configDir));
+	protectedRoots.push(await canonicalPath(resolve(vaultRoot, configDir)));
 	const inVault = (path: string) => roots.some((root) => includesPath(root, path));
 	const explicit = (await Promise.all(refs.map(async (ref) => {
 		const path = resolve(cwd, ref.path);
@@ -47,14 +48,19 @@ export async function createPermissionPolicy(
 	function access(path: string, forWrite: boolean): boolean {
 		const matches = matchingReferences(path);
 		if (matches.some(({ ref, paths }) => !ref.lines && (
-			!isProtected(path) || paths.some(isProtected)
+				executionMode === 'full-access' || !isProtected(path) || paths.some(isProtected)
 		))) return true;
-		if (!forWrite && matches.some(({ ref, paths }) => ref.lines && (!isProtected(path) || paths.some(isProtected)))) return true;
-		if (matches.some(({ ref }) => ref.lines) || isProtected(path)) return false;
-		return inVault(path);
+		if (matches.some(({ ref }) => ref.lines)) {
+			return !forWrite && matches.some(({ paths }) => executionMode === 'full-access' || !isProtected(path) || paths.some(isProtected));
+		}
+		return executionMode === 'full-access' || (!isProtected(path) && inVault(path));
 	}
 
 	return {
+		executionMode,
+		canRequestPath: executionMode && executionMode !== 'full-access'
+			? (path) => !inVault(path) && !isProtected(path) && !matchingReferences(path).some(({ ref }) => ref.lines)
+			: undefined,
 		canRead: (path) => access(path, false),
 		readLines: (path) => {
 			const matches = matchingReferences(path);

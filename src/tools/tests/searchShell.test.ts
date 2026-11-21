@@ -1,23 +1,25 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { once } from 'node:events';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
+import { createContextBuilder } from '../../orchestration/context/contextBuilder';
 import { createReadDelivery } from '../../runtime/readDelivery';
 import { createPermissionPolicy } from '../../orchestration/policies/permissions';
+import { createRunContext } from '../../orchestration/runContext';
 import type { NoteRef, ToolApproval, ToolContext } from '../../types';
-import { createToolExecutor } from '../executor';
+import { createToolLayer } from '..';
+import { hasMacShellSandbox } from '../external/macosShellSandbox';
 import { shellTools } from '../external/shellTool';
-import { searchTools } from '../searchTools';
 
-const tools = [...searchTools(), ...shellTools()];
-const available = (name: string) => tools.some((tool) => tool.name === name && (tool.isAvailable?.() ?? true));
-const executor = createToolExecutor({
-	all: () => tools.filter((tool) => available(tool.name)),
-	find: (name) => tools.find((tool) => tool.name === name && available(name)),
-});
+const { registry, executor } = createToolLayer();
+const shells = shellTools();
+const installedShells = shells.filter((tool) => tool.isAvailable?.() ?? true).map(({ name }) => name);
+const available = (name: string) => installedShells.includes(name);
 const execute = (ctx: ToolContext, name: string, input: unknown) => executor.execute({ id: name, name, input }, ctx);
 
 async function fixture(t: TestContext) {
@@ -32,7 +34,7 @@ async function fixture(t: TestContext) {
 	const ctx: ToolContext = {
 		task: { id: 'test', request: { conversationId: 'test', instruction: 'test', refs }, status: 'running', createdAt: 0, updatedAt: 0 },
 		permissions: await createPermissionPolicy(cwd, 'plugin-config', refs),
-		app: { vault: { getFileByPath: () => null } } as unknown as ToolContext['app'],
+		app: { vault: { configDir: 'plugin-config', getFileByPath: () => null } } as unknown as ToolContext['app'],
 		signal: controller.signal,
 		cwd,
 		readFiles: new Map(),
@@ -40,6 +42,18 @@ async function fixture(t: TestContext) {
 	};
 	return { ctx, controller, outside, denied };
 }
+
+void test('only main chat with tool calling enabled advertises the installed shells', async (t) => {
+	const { ctx } = await fixture(t);
+	const builder = createContextBuilder(registry);
+	const options = { cwd: ctx.cwd, signal: ctx.signal, model: { providerId: 'test', model: 'test' }, observer: {} };
+	for (const [sideChat, enabled] of [[false, true], [true, true], [false, false]] as const) {
+		const run = await createRunContext(ctx.task, options, 'plugin-config', () => enabled, sideChat);
+		const request = await builder.build(run, [], 100_000);
+		const advertised = request.tools.filter(({ name }) => shells.some((shell) => shell.name === name)).map(({ name }) => name);
+		assert.deepEqual(advertised, !sideChat && enabled ? installedShells : []);
+	}
+});
 
 void test('Glob and Grep search the vault and authorized external locations', async (t) => {
 	const { ctx, outside, denied } = await fixture(t);
@@ -84,6 +98,75 @@ void test('Bash uses the vault by default and runs the exact approved command in
 	assert.equal((await execute(ctx, 'Bash', { command, cwd: denied })).isError, true);
 	assert.equal((await execute(ctx, 'Bash', { command: 'echo text\u202E' })).isError, true);
 	assert.equal(approvals.length, 3);
+});
+
+void test('macOS Bash restricts vault commands until a single escalation is approved or full access is selected', {
+	skip: !available('Bash') || !hasMacShellSandbox(),
+}, async (t) => {
+	const { ctx, denied } = await fixture(t);
+	const config = join(ctx.cwd, 'plugin-config');
+	const secret = join(denied, 'outside.txt');
+	await mkdir(config);
+	await Promise.all([
+		writeFile(secret, 'private'),
+		writeFile(join(config, 'private.txt'), 'config'),
+		writeFile(join(ctx.cwd, 'lines.txt'), 'first\nsecond\n'),
+	]);
+	ctx.task.request.refs.push({ path: 'lines.txt', lines: [1, 1] });
+	await symlink(secret, join(ctx.cwd, 'link.txt'));
+	const server = createServer((socket) => { socket.end(); });
+	server.listen(0, '127.0.0.1');
+	await once(server, 'listening');
+	t.after(() => { server.close(); });
+	const address = server.address();
+	assert.ok(address && typeof address === 'object');
+	const connect = `< /dev/tcp/127.0.0.1/${address.port}`;
+
+	const baseline = await createPermissionPolicy(ctx.cwd, 'plugin-config', ctx.task.request.refs);
+	const approvals: ToolApproval[] = [];
+	let approved = false;
+	ctx.approve = async (approval) => {
+		approvals.push(approval);
+		return approved;
+	};
+	ctx.permissions = { ...baseline, executionMode: 'ask', canRequestPath: (path) => path === denied };
+	const local = await execute(ctx, 'Bash', { command: 'printf work > note.md && cat note.md' });
+	assert.equal(local.isError, false, local.content);
+	assert.match(local.content, /work/);
+	for (const command of ['cat link.txt', 'printf changed > link.txt', 'cat plugin-config/private.txt', 'cat lines.txt', connect]) {
+		assert.equal((await execute(ctx, 'Bash', { command })).isError, true);
+	}
+	assert.equal(await readFile(secret, 'utf8'), 'private');
+	assert.equal(approvals.length, 0);
+	assert.equal((await execute(ctx, 'Bash', { command: connect, elevated: true })).isError, true);
+	assert.equal(approvals[0]?.after, connect);
+
+	approved = true;
+	ctx.permissions = { ...ctx.permissions, executionMode: 'auto-review' };
+	const outside = await execute(ctx, 'Bash', { command: 'cat outside.txt', cwd: denied });
+	assert.equal(outside.isError, false, outside.content);
+	assert.match(outside.content, /private/);
+	assert.equal(approvals[1]?.target, denied);
+
+	ctx.permissions = { ...baseline, executionMode: 'full-access', canRead: () => true };
+	assert.equal((await execute(ctx, 'Bash', { command: connect, cwd: denied })).isError, false);
+	assert.equal(approvals.length, 2);
+});
+
+void test('Bash without a native vault boundary requires approval before running', {
+	skip: !available('Bash') || hasMacShellSandbox(),
+}, async (t) => {
+	const { ctx } = await fixture(t);
+	ctx.permissions = { ...ctx.permissions, executionMode: 'ask' };
+	const approvals: ToolApproval[] = [];
+	ctx.approve = async (approval) => {
+		approvals.push(approval);
+		return false;
+	};
+	const result = await execute(ctx, 'Bash', { command: 'printf work > note.md' });
+	assert.equal(result.isError, true);
+	assert.match(approvals[0]?.reason ?? '', /无法限制/);
+	await assert.rejects(readFile(join(ctx.cwd, 'note.md')), { code: 'ENOENT' });
 });
 
 void test('stopping Bash terminates a running command', { skip: !available('Bash') }, async (t) => {

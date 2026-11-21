@@ -140,6 +140,17 @@ export interface UiText {
 	noExecution: string;
 	chatContextLabel: string;
 	chatAddContext: string;
+	chatExecutionMode: string;
+	chatModeAsk: string;
+	chatModeAskDescription: string;
+	chatModeAutoReview: string;
+	chatModeAutoReviewDescription: string;
+	chatModeFullAccess: string;
+	chatModeFullAccessDescription: string;
+	chatModeFullAccessConfirm: string;
+	chatModeFullAccessDisclosure: string;
+	chatModeLocked: string;
+	chatModeSelection: string;
 	chatPickVaultItem: string;
 	chatSelectionPreview: string;
 	chatRemoveSelection: string;
@@ -197,7 +208,6 @@ export interface UiText {
 	chatReconnecting: string;
 	chatWaitingForConnection: string;
 	chatRetryConnection: string;
-	chatPartiallyDone: string;
 	chatStopped: string;
 	chatFailed: string;
 	chatRunLimit: string;
@@ -216,6 +226,7 @@ export interface UiText {
 	chatThinkingDuration: string;
 	chatResolved: string;
 	chatTimelineApproval: string;
+	chatTimelineAutoReview: string;
 	chatTimelineWaitingConnection: string;
 	chatTimelineContextRetry: string;
 	chatTimelineUsage: string;
@@ -244,6 +255,8 @@ export interface UiText {
 	chatApprovalHeading: string;
 	chatApprovalCreate: string;
 	chatApprovalEdit: string;
+	chatApprovalAccess: string;
+	chatApprovalPathDisclosure: string;
 	chatWorkingFolder: string;
 	chatShellDisclosure: string;
 	chatBefore: string;
@@ -267,6 +280,7 @@ export interface UiText {
 	chatForkFailed: string;
 	sideChatOpen: string;
 	sideChatTitle: string;
+	sideChatAskSelection: string;
 	sideChatClose: string;
 	sideChatPlaceholder: string;
 	sideChatOpenFailed: string;
@@ -315,7 +329,6 @@ export interface UiText {
 	chatReportedCost: string;
 	chatIncompleteUsage: string;
 	chatContextUsed: string;
-	chatContextPending: string;
 	chatContextStats: string;
 	chatPromptTokens: string;
 	chatWindowCapacity: string;
@@ -463,6 +476,17 @@ const EN: UiText = {
 	noExecution: 'No execution records yet',
 	chatContextLabel: 'Attached context',
 	chatAddContext: 'Add context',
+	chatExecutionMode: 'Execution mode',
+	chatModeAsk: 'Ask for approval',
+	chatModeAskDescription: 'Work in the vault and ask you for extra permissions.',
+	chatModeAutoReview: 'Approve for me',
+	chatModeAutoReviewDescription: 'Send requests for extra permissions to your selected model for a separate review.',
+	chatModeFullAccess: 'Full access',
+	chatModeFullAccessDescription: 'Access files outside the vault and use the internet without individual approvals.',
+	chatModeFullAccessConfirm: 'Enable full access',
+	chatModeFullAccessDisclosure: 'Scribe Ai can read and change files your computer account can access, including files outside this vault. It can also run commands and use the internet without individual approvals. This chat saves the mode, and new chats and tabs inherit it from the current chat.',
+	chatModeLocked: 'You can change modes when the current task and queue finish.',
+	chatModeSelection: 'Tasks using a text selection use only the selected text.',
 	chatPickVaultItem: 'Select a vault file or folder',
 	chatSelectionPreview: 'Selected text preview',
 	chatRemoveSelection: 'Remove selection',
@@ -520,7 +544,6 @@ const EN: UiText = {
 	chatReconnecting: 'Reconnecting to the model',
 	chatWaitingForConnection: 'Model service unavailable. Progress is saved.',
 	chatRetryConnection: 'Retry connection',
-	chatPartiallyDone: 'Some operations incomplete',
 	chatStopped: 'Stopped',
 	chatFailed: 'Task failed',
 	chatRunLimit: 'The task stopped at a limit',
@@ -539,6 +562,7 @@ const EN: UiText = {
 	chatThinkingDuration: 'Thought for {n} s',
 	chatResolved: 'Resolved',
 	chatTimelineApproval: 'Waiting for approval',
+	chatTimelineAutoReview: 'AI review in progress',
 	chatTimelineWaitingConnection: 'Waiting to reconnect',
 	chatTimelineContextRetry: 'Retrying with a shorter history',
 	chatTimelineUsage: '{n} tokens',
@@ -567,6 +591,8 @@ const EN: UiText = {
 	chatApprovalHeading: 'Approval needed',
 	chatApprovalCreate: 'Create file',
 	chatApprovalEdit: 'Edit file',
+	chatApprovalAccess: 'Access files outside the vault',
+	chatApprovalPathDisclosure: 'Access is granted for this operation only.',
 	chatWorkingFolder: 'Working folder',
 	chatShellDisclosure: 'An approved command runs with your computer account’s permissions and can access files outside this folder.',
 	chatBefore: 'Before',
@@ -590,6 +616,7 @@ const EN: UiText = {
 	chatForkFailed: 'Could not branch the conversation.',
 	sideChatOpen: 'Open side chat',
 	sideChatTitle: 'Side chat',
+	sideChatAskSelection: 'Ask in side chat',
 	sideChatClose: 'Close side chat',
 	sideChatPlaceholder: 'Ask a side question',
 	sideChatOpenFailed: 'Could not open side chat in the right sidebar.',
@@ -638,7 +665,6 @@ const EN: UiText = {
 	chatReportedCost: 'Reported cost',
 	chatIncompleteUsage: 'Partial usage',
 	chatContextUsed: '{n}%',
-	chatContextPending: 'Updates on next request',
 	chatContextStats: 'Context {n}% used',
 	chatPromptTokens: 'Prompt tokens',
 	chatWindowCapacity: 'Model context window',
@@ -786,6 +812,17 @@ const ZH_CN: UiText = {
 	noExecution: '暂无执行记录',
 	chatContextLabel: '已添加的资料',
 	chatAddContext: '添加参考资料',
+	chatExecutionMode: '执行模式',
+	chatModeAsk: '请求批准',
+	chatModeAskDescription: '在笔记库内工作，额外权限由你批准。',
+	chatModeAutoReview: '帮我批准',
+	chatModeAutoReviewDescription: '需要额外权限时，将请求详情发给当前模型单独审核。',
+	chatModeFullAccess: '完全访问',
+	chatModeFullAccessDescription: '可访问库外文件并联网，无需逐项批准。',
+	chatModeFullAccessConfirm: '启用完全访问',
+	chatModeFullAccessDisclosure: 'Scribe Ai 可以读写你的电脑账户有权访问的文件，包括库外文件，也可以直接运行命令和联网。当前聊天会保存此模式，新开的聊天和标签页会沿用它。',
+	chatModeLocked: '当前任务和队列结束后可切换模式。',
+	chatModeSelection: '选区任务只使用选中的文字。',
 	chatPickVaultItem: '选择库内文件或文件夹',
 	chatSelectionPreview: '选区预览',
 	chatRemoveSelection: '移除选区',
@@ -843,7 +880,6 @@ const ZH_CN: UiText = {
 	chatReconnecting: '正在重连模型服务',
 	chatWaitingForConnection: '模型服务暂未恢复，任务进度已保留',
 	chatRetryConnection: '重试连接',
-	chatPartiallyDone: '部分操作未完成',
 	chatStopped: '已停止',
 	chatFailed: '任务失败',
 	chatRunLimit: '任务已触发运行限制',
@@ -862,6 +898,7 @@ const ZH_CN: UiText = {
 	chatThinkingDuration: '思考了 {n} 秒',
 	chatResolved: '已解决',
 	chatTimelineApproval: '等待批准',
+	chatTimelineAutoReview: 'AI 审核中',
 	chatTimelineWaitingConnection: '等待重连',
 	chatTimelineContextRetry: '正在缩短对话记录并重试',
 	chatTimelineUsage: '{n} 个 token',
@@ -890,6 +927,8 @@ const ZH_CN: UiText = {
 	chatApprovalHeading: '等待确认',
 	chatApprovalCreate: '创建文件',
 	chatApprovalEdit: '修改文件',
+	chatApprovalAccess: '访问库外资料',
+	chatApprovalPathDisclosure: '允许后，只能在本次操作中访问这个位置。',
 	chatWorkingFolder: '工作目录',
 	chatShellDisclosure: '确认后，命令会以你的电脑账户权限运行，可以访问此文件夹之外的资料。',
 	chatBefore: '修改前',
@@ -913,6 +952,7 @@ const ZH_CN: UiText = {
 	chatForkFailed: '无法创建会话分支。',
 	sideChatOpen: '打开侧聊',
 	sideChatTitle: '侧聊',
+	sideChatAskSelection: '在侧聊中提问',
 	sideChatClose: '关闭侧聊',
 	sideChatPlaceholder: '输入侧聊问题',
 	sideChatOpenFailed: '无法在右侧边栏打开侧聊。',
@@ -961,7 +1001,6 @@ const ZH_CN: UiText = {
 	chatReportedCost: '实报成本',
 	chatIncompleteUsage: '部分用量',
 	chatContextUsed: '{n}%',
-	chatContextPending: '待下次请求更新',
 	chatContextStats: '上下文已用 {n}%',
 	chatPromptTokens: '提示词 token 总数',
 	chatWindowCapacity: '模型窗口容量',
@@ -1109,6 +1148,17 @@ const ZH_TW: UiText = {
 	noExecution: '尚無執行記錄',
 	chatContextLabel: '已加入的資料',
 	chatAddContext: '加入參考資料',
+	chatExecutionMode: '執行模式',
+	chatModeAsk: '請求批准',
+	chatModeAskDescription: '在筆記庫內工作，額外權限由你批准。',
+	chatModeAutoReview: '幫我批准',
+	chatModeAutoReviewDescription: '需要額外權限時，將請求詳情傳給目前的模型單獨審核。',
+	chatModeFullAccess: '完全存取',
+	chatModeFullAccessDescription: '可存取庫外檔案並連網，無需逐項批准。',
+	chatModeFullAccessConfirm: '啟用完全存取',
+	chatModeFullAccessDisclosure: 'Scribe Ai 可以讀寫你的電腦帳戶有權存取的檔案，包括庫外檔案，也可以直接執行指令及連網。目前對話會儲存此模式，新開的對話和分頁會沿用它。',
+	chatModeLocked: '目前任務及佇列結束後可切換模式。',
+	chatModeSelection: '選取範圍的任務只使用選取的文字。',
 	chatPickVaultItem: '選擇庫內檔案或資料夾',
 	chatSelectionPreview: '選取文字預覽',
 	chatRemoveSelection: '移除選取的文字',
@@ -1166,7 +1216,6 @@ const ZH_TW: UiText = {
 	chatReconnecting: '正在重新連線至模型服務',
 	chatWaitingForConnection: '模型服務尚未恢復，已保留任務進度',
 	chatRetryConnection: '重試連線',
-	chatPartiallyDone: '部分操作未完成',
 	chatStopped: '已停止',
 	chatFailed: '任務失敗',
 	chatRunLimit: '任務已觸發執行限制',
@@ -1185,6 +1234,7 @@ const ZH_TW: UiText = {
 	chatThinkingDuration: '思考了 {n} 秒',
 	chatResolved: '已解決',
 	chatTimelineApproval: '等待核准',
+	chatTimelineAutoReview: 'AI 審核中',
 	chatTimelineWaitingConnection: '等待重新連線',
 	chatTimelineContextRetry: '正在縮短對話記錄並重試',
 	chatTimelineUsage: '{n} 個 token',
@@ -1213,6 +1263,8 @@ const ZH_TW: UiText = {
 	chatApprovalHeading: '等待確認',
 	chatApprovalCreate: '建立檔案',
 	chatApprovalEdit: '修改檔案',
+	chatApprovalAccess: '存取庫外資料',
+	chatApprovalPathDisclosure: '允許後，只能在這次操作中存取這個位置。',
 	chatWorkingFolder: '工作目錄',
 	chatShellDisclosure: '確認後，命令會以你的電腦帳戶權限執行，可以存取此資料夾以外的資料。',
 	chatBefore: '修改前',
@@ -1236,6 +1288,7 @@ const ZH_TW: UiText = {
 	chatForkFailed: '無法建立對話分支。',
 	sideChatOpen: '開啟側聊',
 	sideChatTitle: '側聊',
+	sideChatAskSelection: '在側聊中提問',
 	sideChatClose: '關閉側聊',
 	sideChatPlaceholder: '輸入側聊問題',
 	sideChatOpenFailed: '無法在右側邊欄開啟側聊。',
@@ -1284,7 +1337,6 @@ const ZH_TW: UiText = {
 	chatReportedCost: '實報成本',
 	chatIncompleteUsage: '部分用量',
 	chatContextUsed: '{n}%',
-	chatContextPending: '待下次請求更新',
 	chatContextStats: '上下文已用 {n}%',
 	chatPromptTokens: '提示詞 token 總數',
 	chatWindowCapacity: '模型視窗容量',

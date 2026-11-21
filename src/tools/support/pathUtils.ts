@@ -9,6 +9,7 @@ export interface ResolvedToolPath {
 	vaultPath?: string;
 	displayPath: string;
 	stat?: Stats;
+	requiresApproval?: boolean;
 }
 
 /** 目录范围按路径段判断，避免同名前缀混入。 */
@@ -36,13 +37,20 @@ export async function resolveToolPath(
 	ctx: ToolContext,
 	input: string,
 	operation: 'read' | 'write',
-	options?: { allowMissing?: boolean },
+	options?: { allowMissing?: boolean; requestApproval?: boolean; approvedRoot?: string },
 ): Promise<ResolvedToolPath> {
 	ctx.signal.throwIfAborted();
 	const requestedPath = toolAbsolutePath(ctx.cwd, input);
+	let requiresApproval = false;
 	const checkPermission = (target: string) => {
 		const allowed = operation === 'read' ? ctx.permissions.canRead(target) : ctx.permissions.canWrite(target);
-		if (!allowed) throw new Error('此路径未包含在本次任务授权的资料中。');
+		if (allowed) return;
+		if ((options?.requestApproval || (options?.approvedRoot && isWithinPath(options.approvedRoot, target)))
+			&& ctx.permissions.canRequestPath?.(target, operation)) {
+			requiresApproval = true;
+			return;
+		}
+		throw new Error('此路径未包含在本次任务授权的资料中。');
 	};
 	checkPermission(requestedPath);
 	const canonicalVault = await realpath(ctx.cwd);
@@ -70,7 +78,17 @@ export async function resolveToolPath(
 	const vaultPath = isWithinPath(canonicalVault, absolutePath)
 		? relative(canonicalVault, absolutePath).split(sep).join('/')
 		: undefined;
-	return { requestedPath, absolutePath, vaultPath, displayPath: vaultPath || absolutePath, stat: fileStat };
+	return { requestedPath, absolutePath, vaultPath, displayPath: vaultPath || absolutePath, stat: fileStat, requiresApproval };
+}
+
+export async function recheckToolPath(
+	ctx: ToolContext, path: ResolvedToolPath, operation: 'read' | 'write', options?: { allowMissing?: boolean },
+): Promise<ResolvedToolPath> {
+	const current = await resolveToolPath(ctx, path.requestedPath, operation, { ...options, requestApproval: path.requiresApproval });
+	if (current.absolutePath !== path.absolutePath || current.stat?.ino !== path.stat?.ino || current.stat?.dev !== path.stat?.dev) {
+		throw new Error('文件或文件夹的位置或状态已变化，请重新确认。');
+	}
+	return current;
 }
 
 export function hasFileErrorCode(error: unknown, code: string): boolean {

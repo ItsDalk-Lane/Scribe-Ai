@@ -20,9 +20,10 @@ import { useMessageQueue } from './useMessageQueue';
 import type { ChatTabActivity } from './ChatTabs';
 import type ScribeAiPlugin from '../main';
 import { MissingConversationError } from '../types';
-import type { ConversationSnapshot, ConversationSummary, NoteRef, NoteSelection, QueuedMessage, ResumePreview, RunObserver, RunEvent, SavedRun, TaskRequest, ToolApproval } from '../types';
+import type { ConversationSnapshot, ConversationSummary, ExecutionMode, NoteRef, NoteSelection, QueuedMessage, ResumePreview, RunObserver, RunEvent, SavedRun, TaskRequest, ToolApproval } from '../types';
 
 interface ActiveSubmission {
+	executionMode: ExecutionMode;
 	taskId?: string;
 	queuedId?: string;
 	stopped?: boolean;
@@ -58,6 +59,8 @@ function vaultRefs(refs: NoteRef[]): NoteRef[] {
 interface ChatPaneProps {
 	plugin: ScribeAiPlugin;
 	conversation: ConversationSnapshot;
+	mode: ExecutionMode;
+	onModeChange: (mode: ExecutionMode) => void;
 	selected: boolean;
 	conversations: ConversationSummary[];
 	initialError: string;
@@ -70,7 +73,7 @@ interface ChatPaneProps {
 	onActivity: (id: string, activity: ChatTabActivity) => void;
 }
 
-export default function App({ plugin, conversation, selected, conversations, initialError,
+export default function App({ plugin, conversation, mode, onModeChange, selected, conversations, initialError,
 	onNew, onOpen, onRename, onDelete, onRefresh, onFork, onActivity }: ChatPaneProps) {
 	const text = uiText();
 	const services = plugin.services;
@@ -156,6 +159,26 @@ export default function App({ plugin, conversation, selected, conversations, ini
 		} catch {
 			if (mounted.current) setError(text.chatHistoryError);
 		}
+	}
+
+	function changeExecutionMode(next: ExecutionMode, trigger: HTMLButtonElement) {
+		const available = () => mounted.current && visible.current && trigger.isConnected && !trigger.disabled
+			&& !active.current && !navigating.current && !queue.rows.length;
+		if (!available()) return;
+		if (next !== 'full-access') {
+			onModeChange(next);
+			return;
+		}
+		confirmAction(services.app, {
+			title: text.chatModeFullAccessConfirm,
+			message: text.chatModeFullAccessDisclosure,
+			confirmText: text.chatModeFullAccessConfirm,
+			cancelText: text.cancel,
+			onConfirm: () => { if (available()) onModeChange(next); },
+			onClose: () => trigger.ownerDocument.defaultView?.requestAnimationFrame(() => {
+				if (available()) trigger.focus({ preventScroll: true });
+			}),
+		});
 	}
 
 	async function manageConversation(id: string, title?: string): Promise<boolean> {
@@ -275,6 +298,15 @@ export default function App({ plugin, conversation, selected, conversations, ini
 		}
 	}
 
+	async function askSideChatQuote(quote: string) {
+		try {
+			await askSideChat({ conversationId, instruction: '', refs: [], chatQuotes: [quote] }, '');
+			if (mounted.current) setError('');
+		} catch (cause) {
+			if (mounted.current) setError(cause instanceof SideChatHandoffError ? cause.message : text.sideChatOpenFailed);
+		}
+	}
+
 	async function changeModel(value: string): Promise<boolean> {
 		if (active.current || navigating.current || chatModel.isSaving()) return false;
 		setError('');
@@ -363,7 +395,7 @@ export default function App({ plugin, conversation, selected, conversations, ini
 			if (queued) queue.pause();
 			return;
 		}
-		const submission: ActiveSubmission = { queuedId: queued?.id };
+		const submission: ActiveSubmission = { queuedId: queued?.id, executionMode: mode };
 		active.current = submission;
 		setBusy(true);
 		setError('');
@@ -390,7 +422,7 @@ export default function App({ plugin, conversation, selected, conversations, ini
 			setExecution(displayed);
 			const request = resume?.request ?? queued?.request ?? (draft && draftRequest(draft, conversationId));
 			if (!request) return;
-			const options = { model: choice, rememberConversation: false };
+			const options = { model: choice, rememberConversation: false, executionMode: submission.executionMode };
 			const run = resume ? sessions.resume(conversationId, resume.state.taskId, observer, options)
 				: queued ? sessions.submitQueued(queued, observer, () => { if (active.current === submission) queue.remove(queued.id); }, options)
 					: sessions.submit(request, observer, replaceFrom, options);
@@ -541,7 +573,9 @@ export default function App({ plugin, conversation, selected, conversations, ini
 				{text.chatEmptyHeading}
 			</h1> : <ExecutionView key={conversationId} app={services.app} execution={execution} liveRequest={liveRequest} liveModel={liveModel}
 				history={visibleHistory} loading={loading} conversationId={conversationId} editingId={editing?.taskId}
+				automaticReview={active.current?.executionMode === 'auto-review'}
 				onQuoteSelection={loading || managingHistory || attachedSelection ? undefined : addQuote}
+				onSideChatSelection={loading || managingHistory ? undefined : (quote) => void askSideChatQuote(quote)}
 				onEdit={busy || loading ? undefined : editTurn} onFork={busy || loading ? undefined : (id) => void forkTurn(id)} />}
 			<ApprovalView approval={approval} />
 			<QueuedMessages app={services.app} rows={queue.rows} canSteer={canSteer} inputRef={input}
@@ -569,7 +603,8 @@ export default function App({ plugin, conversation, selected, conversations, ini
 					onRemoveSelection: () => setAttachedSelection(null),
 					onRemoveQuotes: () => setQuotes([]),
 				}}
-				contextMetric={!loading && metrics.context && <ContextMetric context={metrics.context} busy={busy} dirty={dirty} />}
+				contextMetric={!loading && metrics.context && <ContextMetric context={metrics.context} busy={busy} />}
+				executionMode={{ value: active.current?.executionMode ?? mode, queuePending: Boolean(queue.rows.length), onChange: changeExecutionMode }}
 				modelGroups={chatModel.groups}
 				modelValue={chatModel.value}
 				modelSaving={chatModel.saving}

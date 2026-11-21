@@ -15,7 +15,9 @@ export function createToolExecutor(registry: ToolRegistry): ToolExecutor {
 				if (!permissions.canCallTool(tool)) return failure(`未授权使用工具：${call.name}`);
 				const prepared = await tool.prepare(toolExecutionInput(call.input), ctx);
 				signal.throwIfAborted();
-				if (!tool.isReadOnly && !prepared.approval) return failure('工具未提供操作预览，无法批准。');
+				if (!tool.isReadOnly && !prepared.approval && !(permissions.executionMode && prepared.independent)) {
+					return failure('工具未提供操作预览，无法批准。');
+				}
 				if (prepared.approval && !await approve?.(prepared.approval)) {
 					return failure(signal.aborted ? '任务已停止。' : '用户未批准本次操作。');
 				}

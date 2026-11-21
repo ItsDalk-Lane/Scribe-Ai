@@ -133,7 +133,7 @@ export function createContextBuilder(registry: ToolRegistry): ContextBuilder {
 				}));
 			const request: ModelRequest = {
 				...ctx.model,
-				system: buildSystemPrompt(selectionOnly, ctx.sideChat),
+				system: buildSystemPrompt(selectionOnly, ctx.sideChat, ctx.permissions.executionMode),
 				messages: [],
 				tools,
 				signal: ctx.signal,

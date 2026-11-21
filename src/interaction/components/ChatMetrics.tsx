@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import type { RunState, SavedRun } from '../../types';
-import { abbreviatedNumber, conversationMetrics, usageTotals } from '../chatMetrics';
+import type { ConversationMetrics, ContextUsage, UsageTotals } from '../chatMetrics';
+import { abbreviatedNumber, conversationMetrics } from '../chatMetrics';
 import { uiText } from '../uiText';
 import MetricPopover, { ContextRing, MetricRows } from './MetricPopover';
 
@@ -27,7 +28,7 @@ function cachePercent(hit: number, turn: boolean) {
 }
 
 export function UsagePopover({ usage, model, busy, turn = false }: {
-	usage: NonNullable<ReturnType<typeof usageTotals>>; model?: SavedRun['model']; busy?: boolean; turn?: boolean;
+	usage: UsageTotals; model?: SavedRun['model']; busy?: boolean; turn?: boolean;
 }) {
 	const text = uiText();
 	const heading = turn ? text.chatRunUsage : text.chatSessionUsage;
@@ -58,7 +59,7 @@ export function useChatMetrics(history: readonly SavedRun[], live: RunState | nu
 	}, [history, live]);
 }
 
-export function ActivityMetric({ metrics, busy }: { metrics: ReturnType<typeof conversationMetrics>; busy: boolean }) {
+export function ActivityMetric({ metrics, busy }: { metrics: ConversationMetrics; busy: boolean }) {
 	const text = uiText();
 	const { rounds, count, modelMs, toolMs, lagMs, speed } = metrics;
 	if (!count) return null;
@@ -75,20 +76,19 @@ export function ActivityMetric({ metrics, busy }: { metrics: ReturnType<typeof c
 	</MetricPopover>;
 }
 
-export function ContextMetric({ context, busy, dirty }: {
-	context: NonNullable<ReturnType<typeof conversationMetrics>['context']>; busy: boolean; dirty: boolean;
+export function ContextMetric({ context, busy }: {
+	context: ContextUsage; busy: boolean;
 }) {
 	const text = uiText();
 	const percent = context.percent.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 	const heading = text.chatContextStats.replace('{n}', percent);
 	return <MetricPopover icon={<ContextRing percent={context.percent} />}
-		label={dirty ? text.chatContextPending : text.chatContextUsed.replace('{n}', percent)}
+		label={text.chatContextUsed.replace('{n}', percent)}
 		heading={heading} value={`${abbreviatedNumber(context.prompt)} / ${abbreviatedNumber(context.capacity)}`}>
 		<progress className="scribe-context-progress" aria-label={heading}
 			value={Math.min(context.prompt, context.capacity)} max={context.capacity} />
 		<MetricRows rows={[[text.chatPromptTokens, tokens(context.prompt)], [text.chatWindowCapacity, tokens(context.capacity)],
 			[text.chatRemainingCapacity, tokens(context.remaining)]]} />
-		{dirty && <p>{text.chatContextPending}</p>}
 		{busy && <p>{text.chatMetricsRunning}</p>}
 	</MetricPopover>;
 }

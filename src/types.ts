@@ -177,11 +177,13 @@ export interface ToolApproval {
 	target: string;
 	before?: string;
 	after?: string;
-	kind?: 'shell';
+	kind?: 'shell' | 'access';
+	reason?: string;
 }
 
 export interface PreparedTool {
 	approval?: ToolApproval;
+	independent?: true;
 	run(): Promise<string | { content: string; fileRead: FileReadPage }> | string;
 }
 
@@ -491,6 +493,7 @@ export interface ConversationSummary {
 export interface SessionRunOptions {
 	model?: RunContext['model'];
 	rememberConversation?: boolean;
+	executionMode?: ExecutionMode;
 }
 
 export interface SessionController {
@@ -530,7 +533,11 @@ export interface SkillRegistry {
 	load(name: string): Promise<string>;
 }
 
+export type ExecutionMode = 'ask' | 'auto-review' | 'full-access';
+
 export interface PermissionPolicy {
+	executionMode?: ExecutionMode;
+	canRequestPath?(this: void, path: string, operation: 'read' | 'write'): boolean;
 	canRead(path: string): boolean;
 	readLines?(path: string): [number, number] | undefined;
 	canWrite(path: string): boolean;
@@ -545,6 +552,7 @@ export interface RunContext {
 	cwd: string;
 	model: Pick<ModelRequest, 'providerId' | 'model' | 'reasoning'>;
 	checkModel?: () => void;
+	reviewTool?: (approval: ToolApproval) => Promise<boolean>;
 	resumeReview?: ResumeReview;
 	takeSteering?: () => readonly QueuedMessage[];
 	rejectSteering?: (ids: string[]) => void;

@@ -2,9 +2,9 @@ import { readdir } from 'node:fs/promises';
 import { basename, join, relative, sep } from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 import { RE2JS } from 're2js';
-import type { ToolContext, ToolModule } from '../types';
+import type { PreparedTool, ToolContext, ToolModule } from '../types';
 import { fileToolInput, readToolFile, requiredText } from './support/fileAccess';
-import { authorizedLineRange, resolveToolPath } from './support/pathUtils';
+import { authorizedLineRange, isWithinPath, recheckToolPath, resolveToolPath } from './support/pathUtils';
 import type { ResolvedToolPath } from './support/pathUtils';
 
 const MATCHING_FILES_LIMIT = 100;
@@ -75,12 +75,13 @@ function globMatcher(pattern: string): PathMatcher {
 
 async function* searchFiles(
 	ctx: ToolContext,
-	path: string | undefined,
+	target: ResolvedToolPath | undefined,
 	matches: PathMatcher,
 	omit: () => void,
 ): AsyncGenerator<ResolvedToolPath> {
 	const seen = new Set<string>();
-	const scopes = path === undefined ? [ctx.cwd, ...ctx.task.request.refs.map((ref) => ref.path)] : [path];
+	const scopes = target ? [target.requestedPath] : [ctx.cwd, ...ctx.task.request.refs.map((ref) => ref.path)];
+	const approvedRoot = target?.requiresApproval ? target.absolutePath : undefined;
 
 	async function* walk(directory: ResolvedToolPath, base: string): AsyncGenerator<ResolvedToolPath> {
 		if (seen.has(directory.absolutePath)) return;
@@ -92,9 +93,10 @@ async function* searchFiles(
 			const childPath = join(directory.absolutePath, entry.name);
 			const isDirectory = entry.isDirectory();
 			if (isDirectory ? VCS_DIRECTORIES.has(entry.name) : !entry.isFile() || !matches(relative(base, childPath).split(sep).join('/'))) continue;
-			if (!ctx.permissions.canRead(childPath)) continue;
+			if (!ctx.permissions.canRead(childPath) && !(approvedRoot && ctx.permissions.canRequestPath?.(childPath, 'read'))) continue;
 			try {
-				const child = await resolveToolPath(ctx, childPath, 'read');
+				const child = await resolveToolPath(ctx, childPath, 'read', { approvedRoot });
+				if (approvedRoot && !isWithinPath(approvedRoot, child.absolutePath)) continue;
 				if (isDirectory && child.stat?.isDirectory()) yield* walk(child, base);
 				else if (child.stat?.isFile() && !seen.has(child.absolutePath)) {
 					seen.add(child.absolutePath);
@@ -109,7 +111,7 @@ async function* searchFiles(
 
 	for (const scope of scopes) {
 		try {
-			const root = await resolveToolPath(ctx, scope, 'read');
+			const root = target ? await recheckToolPath(ctx, target, 'read') : await resolveToolPath(ctx, scope, 'read');
 			if (root.stat?.isDirectory()) yield* walk(root, root.absolutePath);
 			else if (root.stat?.isFile() && !seen.has(root.absolutePath) && matches(basename(root.absolutePath))) {
 				seen.add(root.absolutePath);
@@ -117,17 +119,17 @@ async function* searchFiles(
 			}
 		} catch (error) {
 			ctx.signal.throwIfAborted();
-			if (path !== undefined || scope === ctx.cwd) throw error;
+			if (target || scope === ctx.cwd) throw error;
 			omit();
 		}
 	}
 }
 
-async function globSearch(ctx: ToolContext, path: string | undefined, matches: PathMatcher): Promise<string> {
+async function globSearch(ctx: ToolContext, target: ResolvedToolPath | undefined, matches: PathMatcher): Promise<string> {
 	const results: ResolvedToolPath[] = [];
 	let found = 0;
 	let omitted = 0;
-	for await (const file of searchFiles(ctx, path, matches, () => omitted++)) {
+	for await (const file of searchFiles(ctx, target, matches, () => omitted++)) {
 		found++;
 		results.push(file);
 		results.sort((a, b) => (b.stat?.mtimeMs ?? 0) - (a.stat?.mtimeMs ?? 0) || a.displayPath.localeCompare(b.displayPath));
@@ -141,7 +143,6 @@ async function globSearch(ctx: ToolContext, path: string | undefined, matches: P
 }
 
 interface GrepOptions {
-	path?: string;
 	fileMatches: PathMatcher;
 	regex: RE2JS;
 	mode: GrepMode;
@@ -172,13 +173,13 @@ async function* grepFile(ctx: ToolContext, file: ResolvedToolPath, text: string,
 	if (options.mode === 'count' && count) yield `${file.displayPath}:${count}`;
 }
 
-async function grepSearch(ctx: ToolContext, options: GrepOptions): Promise<string> {
+async function grepSearch(ctx: ToolContext, target: ResolvedToolPath | undefined, options: GrepOptions): Promise<string> {
 	const results: string[] = [];
 	let omitted = 0;
 	let offset = options.offset;
 	let length = 0;
 	let truncated = false;
-	search: for await (const file of searchFiles(ctx, options.path, options.fileMatches, () => omitted++)) {
+	search: for await (const file of searchFiles(ctx, target, options.fileMatches, () => omitted++)) {
 		let text: string;
 		try {
 			text = await readToolFile(ctx, file);
@@ -211,8 +212,21 @@ async function grepSearch(ctx: ToolContext, options: GrepOptions): Promise<strin
 
 const schema = {
 	pattern: { type: 'string' },
-	path: { type: 'string', description: '笔记库相对路径，或用户明确授权的绝对路径。省略时搜索笔记库和已授权的位置。' },
+	path: { type: 'string', description: '笔记库相对路径或绝对路径。库外路径可能需要批准。省略时搜索笔记库和已授权的位置。' },
 };
+
+async function prepareSearch(
+	ctx: ToolContext, path: string | undefined, title: string, pattern: string,
+	run: (target: ResolvedToolPath | undefined) => Promise<string>,
+): Promise<PreparedTool> {
+	const target = path === undefined ? undefined : await resolveToolPath(ctx, path, 'read', { requestApproval: true });
+	return {
+		approval: target?.requiresApproval ? {
+			kind: 'access', title, target: target.absolutePath, reason: `${title}。匹配模式为 ${JSON.stringify(pattern)}。`,
+		} : undefined,
+		run: () => run(target),
+	};
+}
 
 export const searchTools: ToolModule = () => [
 	{
@@ -223,9 +237,10 @@ export const searchTools: ToolModule = () => [
 		inputSchema: { type: 'object', properties: schema, required: ['pattern'], additionalProperties: false },
 		prepare(input, ctx) {
 			const args = fileToolInput(input, ['pattern', 'path']);
-			const matches = globMatcher(requiredText(args, 'pattern'));
+			const pattern = requiredText(args, 'pattern');
+			const matches = globMatcher(pattern);
 			const path = optionalText(args, 'path');
-			return { run: () => globSearch(ctx, path, matches) };
+			return prepareSearch(ctx, path, '搜索库外文件名', pattern, (target) => globSearch(ctx, target, matches));
 		},
 	},
 	{
@@ -255,7 +270,6 @@ export const searchTools: ToolModule = () => [
 			if (mode !== 'files_with_matches' && mode !== 'content' && mode !== 'count') throw new Error('Grep 输出模式无效。');
 			const glob = optionalText(args, 'glob');
 			const options: GrepOptions = {
-				path: optionalText(args, 'path'),
 				fileMatches: glob ? globMatcher(glob) : () => true,
 				regex: RE2JS.compile(pattern, booleanOption(args, '-i', false) ? RE2JS.CASE_INSENSITIVE : 0),
 				mode,
@@ -263,7 +277,7 @@ export const searchTools: ToolModule = () => [
 				limit: integerOption(args, 'head_limit', GREP_DEFAULT_LIMIT),
 				offset: integerOption(args, 'offset', 0),
 			};
-			return { run: () => grepSearch(ctx, options) };
+			return prepareSearch(ctx, optionalText(args, 'path'), '搜索库外文件内容', pattern, (target) => grepSearch(ctx, target, options));
 		},
 	},
 ];

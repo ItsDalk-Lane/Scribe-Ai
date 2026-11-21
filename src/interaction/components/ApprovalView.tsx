@@ -23,7 +23,8 @@ export default function ApprovalView({ approval }: { approval: ChatApproval | nu
 	if (!approval) return null;
 	const text = uiText();
 	const shell = approval.kind === 'shell';
-	const title = approval.title === '创建文件' ? text.chatApprovalCreate
+	const access = approval.kind === 'access';
+	const title = access ? text.chatApprovalAccess : approval.title === '创建文件' ? text.chatApprovalCreate
 		: approval.title === '修改文件' ? text.chatApprovalEdit : approval.title;
 	return (
 		<section className="scribe-approval-view" ref={preserveApprovalFocus} aria-labelledby={headingId} aria-describedby={warningId}>
@@ -35,7 +36,9 @@ export default function ApprovalView({ approval }: { approval: ChatApproval | nu
 				<h3 id={headingId}>{title}</h3>
 				{shell && <div>{text.chatWorkingFolder}</div>}
 				<div className="scribe-chat-path" title={approval.target} dir="auto">{approval.target}</div>
+				{approval.reason && <p className="scribe-chat-disclosure">{approval.reason}</p>}
 				{shell && <p className="scribe-chat-disclosure">{text.chatShellDisclosure}</p>}
+				{access && <p className="scribe-chat-disclosure">{text.chatApprovalPathDisclosure}</p>}
 				{approval.after !== undefined && (shell ? <div>
 					<strong>{text.chatCommand}</strong>
 					<pre className="scribe-chat-pre" tabIndex={0}>{approval.after}</pre>

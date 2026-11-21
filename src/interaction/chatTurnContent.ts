@@ -173,13 +173,12 @@ function finalReply(items: readonly TimelineItem[]): string {
 export function chatTurnContent(execution: ChatExecution) {
 	const messages = execution.state?.messages ?? [];
 	const user = messages.filter(({ role }) => role === 'user').map(({ content }) => content).join('\n\n');
-	const rows = timelineRows(execution.items.filter((item) => item.kind !== 'text' || !item.final));
+	const rows = timelineRows(execution.items.filter((item) => item.kind !== 'text' || !item.final))
+		.filter((row) => row.kind !== 'text' || row.content.trim());
 	const answer = finalReply(execution.items);
 	const hasReply = Boolean(answer.trim());
 	const copyText = hasReply ? answer : rows.flatMap((row) => row.kind === 'text' ? [row.content] : []).join('');
-	const status = execution.state?.status;
-	const showCompletion = !hasReply && (status === 'done' || status === 'file-changes-done');
-	return { user, rows, answer, copyText, showCompletion, hasProcess: rows.length > 0, answerMessage: execution.answerMessage };
+	return { user, rows, answer, copyText, hasProcess: rows.length > 0, answerMessage: execution.answerMessage };
 }
 
 export function chatTurnPreview(execution: ChatExecution, instruction?: string) {

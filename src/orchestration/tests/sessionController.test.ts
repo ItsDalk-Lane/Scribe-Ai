@@ -78,17 +78,59 @@ async function fixture(t: TestContext) {
 		cwd,
 		directory,
 		connect: (stream: (request: ModelRequest) => ModelStream, model: Partial<ScribeSettings> = firstModel,
-			thinkingOptions?: ModelService['thinkingOptions']) => {
+			thinkingOptions?: ModelService['thinkingOptions'], reviewer?: Pick<ModelService, 'send'>) => {
 			const registry = createToolRegistry([readTools, searchTools, writeTools]);
 			const models = createModelCoordinator({ stream }, createContextBuilder(registry));
 			const tools = createToolCoordinator(app, createToolExecutor(registry));
 			const runtime: RuntimeLayer = {
 				newState: createRunState, createAgent: bindAgent(createAgentLoop(models, tools)), models, tools,
 			};
-			return createSessionController(app, normalizeSettings(model), runtime, createConversationStore(directory), thinkingOptions);
+			return createSessionController(app, normalizeSettings(model), runtime, createConversationStore(directory), thinkingOptions, reviewer);
 		},
 	};
 }
+
+void test('chat execution modes run vault edits directly and route outside actions to the selected approver', async (t) => {
+	const { cwd, connect } = await fixture(t);
+	for (const [executionMode, decision] of [
+		['ask', 'approve'], ['ask', 'deny'], ['auto-review', 'APPROVE'], ['auto-review', 'DENY'],
+		['auto-review', 'APPROVE with extra text'], ['full-access', 'unused'],
+	] as const) {
+		const label = `${executionMode}-${decision}`;
+		const outside = join(cwd, '..', `${label}.md`);
+		const inside = `${label}.md`;
+		const write = (id: string, path: string): ToolCall => ({ id, name: 'Write', input: { file_path: path, content: '新内容' } });
+		const reviews: ModelRequest[] = [];
+		let prompts = 0;
+		let first = true;
+		const sessions = connect(() => {
+			if (!first) return reply('执行完毕。');
+			first = false;
+			return reply('', [write('inside', inside), write('outside', outside)]);
+		}, firstModel, undefined, { async send(request) { reviews.push(request); return reply(decision).result(); } });
+		const id = await sessions.createConversation();
+		const instruction = `创建 ${inside} 以及库外的 ${outside}`;
+		const state = await sessions.submit({ conversationId: id, instruction, refs: [] }, {
+			approve: async (operation) => { prompts++; assert.ok(operation.target.endsWith(`${label}.md`)); return decision === 'approve'; },
+		}, undefined, { executionMode }).result;
+		assert.equal(await readFile(join(cwd, inside), 'utf8'), '新内容');
+		const allowed = decision === 'approve' || decision === 'APPROVE' || executionMode === 'full-access';
+		if (allowed) assert.equal(await readFile(outside, 'utf8'), '新内容');
+		else await assert.rejects(access(outside), { code: 'ENOENT' });
+		assert.equal(state.messages.find(({ toolCallId }) => toolCallId === 'outside')?.isError, !allowed);
+		assert.equal(prompts, executionMode === 'ask' ? 1 : 0);
+		assert.equal(reviews.length, executionMode === 'auto-review' ? 1 : 0);
+		for (const review of reviews) {
+			assert.deepEqual(review.tools, []);
+			assert.equal(review.sessionId, undefined);
+			const payload = JSON.parse(review.messages[0]!.content) as { instruction: string; operation: { target: string; after: string } };
+			assert.equal(payload.instruction, instruction);
+			assert.ok(payload.operation.target.endsWith(`${label}.md`));
+			assert.equal(payload.operation.after, '新内容');
+		}
+		sessions.dispose();
+	}
+});
 
 void test('after reopening, the same conversation sends prior messages and tool results to the current model', async (t) => {
 	const { cwd, connect } = await fixture(t);
@@ -590,8 +632,11 @@ void test('closing and reopening resumes the same task without replaying a saved
 	const requests: ModelRequest[] = [];
 	const reopened = connect((request) => {
 		requests.push(request);
-		return requests.length === 1 ? reply('', [{ ...a, id: 'repeated-a', input: { ...a.input, content: '不应覆盖' } }, { ...b, id: 'b-after-open' }])
-			: reply('两篇已完成。');
+		return requests.length === 1 ? reply('', [
+			{ ...a, id: 'repeated-a', input: { ...a.input, content: '不应覆盖' } },
+			{ ...b, id: 'b-after-open' },
+			{ id: 'outside-resume-scope', name: 'Write', input: { file_path: '额外.md', content: '不应写入' } },
+		]) : reply('两篇已完成。');
 	});
 	const saved = (await reopened.openConversation(id))?.runs[0];
 	assert.equal(saved?.state.status, 'interrupted');
@@ -600,17 +645,20 @@ void test('closing and reopening resumes the same task without replaying a saved
 	assert.equal(requests.length, 0);
 	const approvals: string[] = [];
 	const result = await reopened.resume(id, old.taskId, { approve: async (preview) => { approvals.push(preview.target); return true; } }).result;
-	assert.equal(result.status, 'file-changes-done', result.error);
+	assert.equal(result.status, 'done', result.error);
 	assert.deepEqual(approvals, ['B.md']);
 	assert.equal(requests[0]?.messages.find((message) => message.toolCallId === a.id)?.isError, false);
 	assert.equal(requests[0]?.messages.find((message) => message.toolCallId === b.id)?.skipped, true);
+	assert.equal(result.messages.find(({ toolCallId }) => toolCallId === 'outside-resume-scope')?.skipped, true);
 	assert.equal(await readFile(join(cwd, 'A.md'), 'utf8'), '甲');
 	assert.equal((await stat(join(cwd, 'A.md'))).mtimeMs, aBefore.mtimeMs);
 	assert.equal(await readFile(join(cwd, 'B.md'), 'utf8'), '乙');
+	await assert.rejects(access(join(cwd, '额外.md')), { code: 'ENOENT' });
 	const runs = (await reopened.openConversation(id))?.runs;
 	assert.equal(runs?.length, 1);
 	assert.equal(runs[0]?.state.taskId, old.taskId);
-	assert.equal(runs[0]?.state.status, 'file-changes-done');
+	assert.equal(runs[0]?.state.status, 'done');
+	assert.equal(runs[0]?.state.messages.at(-1)?.content, '两篇已完成。');
 	assert.equal(runs[0]?.state.resumed, true);
 	assert.equal(runs[0]?.state.messages.filter(({ role }) => role === 'user').length, 1);
 	await assert.rejects(reopened.resume(id, old.taskId).result, /无法从此处继续任务/);
@@ -643,7 +691,7 @@ void test('resuming a saved task only restores explicit outside attachments', as
 
 for (const repair of [true, false]) {
 	void test(repair ? 'resuming finishes a second edit without replaying the first edit'
-		: 'an unfinished edit stays visible when a resumed task closes again and omits it', async (t) => {
+		: 'resuming twice preserves both an unexecuted edit result and the final reply', async (t) => {
 		const { cwd, connect } = await fixture(t);
 		const file = '草稿.md';
 		await writeFile(join(cwd, file), '标题\n旧正文\n');
@@ -678,13 +726,16 @@ for (const repair of [true, false]) {
 
 		const repeat = { ...title, id: 'repeat-title', input: { ...title.input, file_path: join(cwd, file) } };
 		const overwrite = { id: 'overwrite', name: 'Write', input: { file_path: file, content: '不得覆盖已写入的修改' } };
-		const finish = reply('标题和正文修改已完成。');
+		const finalText = repair ? '标题和正文修改已完成。' : '标题已修改。正文修改在上次中断时未执行。';
+		const finish = reply(finalText);
 		const replies = repair ? [
 			reply('', [{ ...read, id: 'read-again' }]),
 			reply('', [repeat, overwrite, { ...body, id: 'body-again', input: { ...body.input, replace_all: false } }]),
 			finish,
 		] : [finish];
-		const reopened = connect(() => {
+		let firstRequest: ModelRequest | undefined;
+		const reopened = connect((request) => {
+			firstRequest ??= request;
 			const next = replies.shift();
 			assert.ok(next);
 			return next;
@@ -694,7 +745,12 @@ for (const repair of [true, false]) {
 			approvals.push(preview.after);
 			return true;
 		} }).result;
-		assert.equal(result.status, repair ? 'file-changes-done' : 'partial', result.error);
+		assert.equal(result.status, 'done', result.error);
+		assert.equal(result.messages.at(-1)?.content, finalText);
+		const skippedBody = firstRequest?.messages.find(({ toolCallId }) => toolCallId === body.id);
+		assert.equal(skippedBody?.skipped, true);
+		assert.equal(skippedBody?.isError, true);
+		assert.match(skippedBody?.content ?? '', /退出前未执行/);
 		assert.deepEqual(approvals, repair ? ['新标题\n新正文\n'] : []);
 		assert.equal(await readFile(join(cwd, file), 'utf8'), repair ? '新标题\n新正文\n' : '新标题\n旧正文\n');
 		assert.equal(replies.length, 0);
@@ -703,7 +759,7 @@ for (const repair of [true, false]) {
 			assert.deepEqual(skipped, ['body', 'repeat-title', 'overwrite']);
 			assert.equal(result.messages.find((message) => message.toolCallId === 'body-again')?.isError, false);
 		} else {
-			assert.match(result.messages.at(-1)?.content ?? '', /草稿\.md 仍有修改未完成（退出前尚未完成此项修改。）/);
+			assert.equal(result.messages.find(({ toolCallId }) => toolCallId === body.id)?.skipped, true);
 		}
 	});
 }
@@ -748,7 +804,8 @@ void test('resuming a previously pending overwrite rereads the file and gets a f
 		previews.push(preview.after);
 		return true;
 	} }).result;
-	assert.equal(result.status, 'file-changes-done', result.error);
+	assert.equal(result.status, 'done', result.error);
+	assert.equal(result.messages.at(-1)?.content, '已续做。');
 	assert.deepEqual(previews, [write.input.content]);
 	assert.equal(await readFile(join(cwd, file), 'utf8'), write.input.content);
 });

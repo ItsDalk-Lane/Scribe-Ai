@@ -1,0 +1,54 @@
+import { accessSync, constants } from 'node:fs';
+import { realpath } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import type { ToolContext } from '../../types';
+import { hasFileErrorCode } from '../support/pathUtils';
+
+export const macSandboxExecutable = '/usr/bin/sandbox-exec';
+
+export function hasMacShellSandbox(): boolean {
+	if (process.platform !== 'darwin') return false;
+	try {
+		accessSync(macSandboxExecutable, constants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+export async function macShellSandboxArgs(ctx: ToolContext): Promise<string[]> {
+	const vault = await realpath(ctx.cwd);
+	const protectedPaths = new Set([resolve(vault, ctx.app.vault.configDir)]);
+	for (const ref of ctx.task.request.refs) {
+		const path = resolve(vault, ref.path);
+		if (ref.lines && ctx.permissions.readLines?.(path)) protectedPaths.add(path);
+	}
+	const canonicalPaths = await Promise.all([...protectedPaths].map(async (path) => {
+		try {
+			return await realpath(path);
+		} catch (error) {
+			if (!hasFileErrorCode(error, 'ENOENT')) throw error;
+			return path;
+		}
+	}));
+	for (const path of canonicalPaths) protectedPaths.add(path);
+	const parameters = [...protectedPaths].map((path, index) => ({ key: `PROTECTED_${index}`, path }));
+	// 系统命令及其依赖只开放读取，笔记库外的其他资料与网络默认拒绝。
+	const profile = `
+		(version 1)
+		(deny default)
+		(allow process-exec process-fork)
+		(allow signal (target same-sandbox))
+		(allow file-read*
+			(literal "/")
+			(subpath "/System/Library")
+			(subpath "/usr/lib") (subpath "/usr/share")
+			(subpath "/usr/bin") (subpath "/bin")
+			(subpath "/usr/sbin") (subpath "/sbin")
+			(subpath (param "VAULT")))
+		(allow file-read* file-write-data (literal "/dev/null"))
+		(allow file-write* (subpath (param "VAULT")))
+		(deny file-read* file-write* ${parameters.map(({ key }) => `(subpath (param "${key}"))`).join(' ')})
+	`;
+	return ['-D', `VAULT=${vault}`, ...parameters.flatMap(({ key, path }) => ['-D', `${key}=${path}`]), '-p', profile];
+}

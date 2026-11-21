@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -7,6 +7,7 @@ import type { TestContext } from 'node:test';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { App } from 'obsidian';
 import { createModelService } from '../../communication/providers';
+import { chatTurnContent } from '../../interaction/chatTurnContent';
 import { emptyExecution, restoreExecution, updateExecution } from '../../interaction/context';
 import { createContextBuilder } from '../../orchestration/context/contextBuilder';
 import { createRunContext } from '../../orchestration/runContext';
@@ -20,12 +21,13 @@ import { readTools } from '../../tools/readTools';
 import { writeTools } from '../../tools/writeTools';
 import { ContextOverflowError, RetryableModelError } from '../../types';
 import type {
-	CredentialStore, ModelRequest, ModelResponse, ModelService, ModelStream, QueuedMessage,
+	CredentialStore, Message, ModelRequest, ModelResponse, ModelService, ModelStream, QueuedMessage,
 	RunObserver, RuntimeLayer, ToolCall, ToolModule, Transport,
 } from '../../types';
 import { createAgentLoop } from '../agentLoop';
+import { mayHaveStoppedEarly } from '../continuationText';
 import { bindAgent } from '../createAgent';
-import { createModelCoordinator } from '../modelCoordinator';
+import { createModelCoordinator, InitialContextBudgetError } from '../modelCoordinator';
 import { explicitNoteTargets } from '../noteTargets';
 import { createRunState } from '../runState';
 import { createToolCoordinator } from '../toolCoordinator';
@@ -113,7 +115,7 @@ void test('steering reaches the next natural model request, keeps its paired too
 	const received: string[] = [];
 	const call: ToolCall = { id: 'work', name: 'Echo', input: {} };
 	const context = createContextBuilder(createToolRegistry([]));
-	ctx.takeSteering = () => sent.length ? queued : [];
+	ctx.takeSteering = () => sent.length ? queued.filter(({ id }) => !received.includes(`steer:${id}`) && !rejected.includes(id)) : [];
 	ctx.rejectSteering = (ids) => rejected.push(...ids);
 	ctx.record = async (event) => {
 		if (event.type !== 'state') return;
@@ -147,26 +149,42 @@ void test('steering reaches the next natural model request, keeps its paired too
 	assert.equal(result.messages.at(-1)?.content, '已完成');
 });
 
-void test('steering clicked during the final model request cannot create another round or consume its row', async (t) => {
-	const { cwd, app } = await fixture(t);
-	const request = { conversationId: 'last-steering', instruction: '请回答', refs: [] };
-	const ctx = await createRunContext(createTask(request), {
-		cwd, model: { providerId: 'fake', model: 'fake' }, signal: new AbortController().signal, observer: {},
-	}, app.vault.configDir);
-	const queued: QueuedMessage[] = [];
-	ctx.takeSteering = () => queued;
-	const loop = createAgentLoop({
-		async nextTurn() {
-			queued.push({ id: 'late', request: { ...request, instruction: '再问一件事' } });
-			return emptyModelResponse('已完成');
-		},
-	}, { async *runCalls() {} });
-	const result = await loop.run(ctx, createRunState(ctx));
-	assert.equal(result.status, 'done');
-	assert.equal(result.turn, 1);
-	assert.equal(queued.length, 1);
-	assert.ok(!result.messages.some(({ id }) => id === 'steer:late'));
-});
+for (const oversized of [false, true]) {
+	void test(oversized ? 'oversized late steering keeps the previous reply without rerunning its request'
+		: 'steering received during the final model request is delivered before ending the turn', async (t) => {
+		const { cwd, app } = await fixture(t);
+		const request = { conversationId: 'last-steering', instruction: '请回答', refs: [] };
+		const ctx = await createRunContext(createTask(request), {
+			cwd, model: { providerId: 'fake', model: 'fake' }, signal: new AbortController().signal, observer: {},
+		}, app.vault.configDir);
+		let pending: QueuedMessage | undefined;
+		const rejected: string[] = [];
+		ctx.takeSteering = () => pending ? [pending] : [];
+		ctx.rejectSteering = (ids) => rejected.push(...ids);
+		ctx.record = async (event) => {
+			if (event.type === 'state' && event.state.messages.some(({ id }) => id === 'steer:late')) pending = undefined;
+		};
+		let requests = 0;
+		const loop = createAgentLoop({
+			async nextTurn(state) {
+				if (++requests === 1) {
+					pending = { id: 'late', request: { ...request, instruction: '再问一件事' } };
+					return emptyModelResponse('第一条回复');
+				}
+				assert.equal(state.messages.at(-2)?.content, '第一条回复');
+				assert.equal(state.messages.at(-1)?.id, 'steer:late');
+				if (oversized) throw new InitialContextBudgetError('插话过长');
+				return emptyModelResponse('补充回复');
+			},
+		}, { async *runCalls() {} });
+		const result = await loop.run(ctx, createRunState(ctx));
+		assert.equal(result.status, 'done');
+		assert.equal(requests, 2);
+		assert.equal(result.messages.at(-1)?.content, oversized ? '第一条回复' : '补充回复');
+		assert.deepEqual(rejected, oversized ? ['late'] : []);
+		assert.equal(result.messages.some(({ id }) => id === 'steer:late'), !oversized);
+	});
+}
 
 void test('stopping while a steering model request is running leaves the message uncommitted', async (t) => {
 	const { cwd, app } = await fixture(t);
@@ -202,7 +220,7 @@ void test('oversized steering retries the original turn only when no provider re
 		const instruction = 'X'.repeat(dispatched ? 3_000 : 30_000);
 		const sent: ModelRequest[] = [];
 		const rejected: string[] = [];
-		ctx.takeSteering = () => [{ id: 'oversized', request: { ...request, instruction } }];
+		ctx.takeSteering = () => rejected.length ? [] : [{ id: 'oversized', request: { ...request, instruction } }];
 		ctx.rejectSteering = (ids) => rejected.push(...ids);
 		const models = createModelCoordinator({
 			contextLimits: () => ({ contextWindow: 4_000, maxTokens: 500 }),
@@ -401,15 +419,48 @@ void test('tools keep going past 12 rounds and 8 calls and return errors to the 
 	const result = await sessions.submit({ conversationId: 'one', instruction: 'do work', refs: [] }, {
 		onEvent(event) { if (event.type === 'text-delta') text += event.text; },
 	}).result;
-	assert.equal(result.status, 'partial', result.error);
+	assert.equal(result.status, 'done', result.error);
 	assert.equal(result.turn, 16);
 	assert.equal(text, '完成');
+	assert.equal(result.messages.at(-1)?.content, text);
 	assert.equal(result.messages.filter(({ role }) => role === 'tool').length, 150);
 	assert.equal(seen.at(-1)?.messages.at(-1)?.toolCallId, '15-9');
 	assert.equal(seen.at(-1)?.messages.at(-10)?.isError, true);
 });
 
-void test('a failed note write overrides the model claim and only the missing note is written on follow-up', async (t) => {
+const chatTools = createToolLayer().registry;
+void test('a failed shell attempt keeps its error without replacing the final reply after a retry', { skip: !chatTools.find('Bash') }, async (t) => {
+	const { app, cwd } = await fixture(t);
+	const command = "printf '%s' '核对完成'";
+	const replies = [
+		emptyModelResponse('', [{ id: 'bad-cwd', name: 'Bash', input: { command, cwd: false } }]),
+		emptyModelResponse('', [{ id: 'retry', name: 'Bash', input: { command, cwd: '' } }]),
+		emptyModelResponse('命令已运行，返回「核对完成」。'),
+	];
+	const sessions = sessionsFor(app, { stream: (request) => fakeStream(replies.shift()!, request.signal) }, [() => chatTools.all()]);
+	const conversationId = 'shell-retry';
+	let approvals = 0;
+	const result = await sessions.submit({ conversationId, instruction: '运行测试命令并报告结果。', refs: [] }, {
+		async approve(preview) {
+			assert.equal(preview.target, await realpath(cwd));
+			approvals++;
+			return true;
+		},
+	}).result;
+	assert.equal(approvals, 1);
+	assert.equal(result.status, 'done', result.error);
+	const tools = result.messages.filter(({ role }) => role === 'tool');
+	assert.deepEqual(tools.map(({ isError }) => isError), [true, false]);
+	assert.match(tools[0]?.content ?? '', /参数 cwd/u);
+	assert.match(tools[1]?.content ?? '', /核对完成/u);
+	const saved = (await sessions.openConversation(conversationId))?.runs[0];
+	assert.ok(saved);
+	const restored = chatTurnContent(restoreExecution(saved));
+	assert.equal(restored.answer, '命令已运行，返回「核对完成」。');
+	assert.ok(!restored.rows.some((row) => row.kind === 'notice'));
+});
+
+void test('a failed note write reaches the model and a later request can finish the missing note', async (t) => {
 	const { app, cwd } = await fixture(t);
 	const a = { id: 'write-a', name: 'Write', input: { file_path: 'A.md', content: '甲' } };
 	const b = { id: 'write-b', name: 'Write', input: { file_path: 'B.md', content: '乙' } };
@@ -422,29 +473,41 @@ void test('a failed note write overrides the model claim and only the missing no
 			writes.push(path);
 		},
 	});
+	const finalText = 'A.md 已写入。B.md 写入失败。';
 	const replies = [
-		emptyModelResponse('', [a, b]), emptyModelResponse('两篇笔记全部完成。'),
+		emptyModelResponse('', [a, b]), emptyModelResponse(finalText),
 		emptyModelResponse('', [b]), emptyModelResponse('第二篇已写入。'),
 	];
+	const requests: ModelRequest[] = [];
 	const sessions = sessionsFor(app, {
-		stream: (request) => fakeStream(replies.shift()!, request.signal),
+		stream(request) {
+			requests.push(request);
+			return fakeStream(replies.shift()!, request.signal);
+		},
 	}, [writeTools]);
 	const conversationId = 'note-changes';
 	const observer = { approve: async () => true };
 	const first = await sessions.submit({ conversationId, instruction: '创建两篇笔记。', refs: [] }, observer).result;
-	assert.equal(first.status, 'partial');
-	assert.equal(first.messages.at(-1)?.content, 'A.md 已完成\nB.md 未完成（模拟磁盘写入失败。）');
+	assert.equal(first.status, 'done');
+	assert.equal(first.messages.at(-1)?.content, finalText);
+	const error = requests[1]?.messages.find(({ toolCallId }) => toolCallId === b.id);
+	assert.equal(error?.isError, true);
+	assert.match(error?.content ?? '', /模拟磁盘写入失败/u);
 	assert.deepEqual(writes, ['A.md']);
 	await assert.rejects(readFile(join(cwd, 'B.md')), { code: 'ENOENT' });
 
 	failB = false;
 	const retry = await sessions.submit({ conversationId, instruction: '只补写第二篇。', refs: [] }, observer).result;
-	assert.equal(retry.status, 'file-changes-done');
+	assert.equal(retry.status, 'done');
 	assert.deepEqual(writes, ['A.md', 'B.md']);
 	assert.equal(await readFile(join(cwd, 'A.md'), 'utf8'), '甲');
 	assert.equal(await readFile(join(cwd, 'B.md'), 'utf8'), '乙');
 	const saved = await sessions.openConversation(conversationId);
-	assert.deepEqual(saved?.runs.map(({ state }) => state.status), ['partial', 'file-changes-done']);
+	assert.ok(saved);
+	assert.deepEqual(saved.runs.map(({ state }) => state.status), ['done', 'done']);
+	const [original] = saved.runs;
+	assert.ok(original);
+	assert.equal(chatTurnContent(restoreExecution(original)).answer, finalText);
 });
 
 void test('a successful retry resolves the same note operation before the task ends', async (t) => {
@@ -466,31 +529,37 @@ void test('a successful retry resolves the same note operation before the task e
 	const result = await sessions.submit({ conversationId: 'retry', instruction: '创建 B.md。', refs: [] }, {
 		approve: async () => true,
 	}).result;
-	assert.equal(result.status, 'file-changes-done');
+	assert.equal(result.status, 'done');
 	assert.equal(result.messages.at(-1)?.content, 'B.md 已写入。');
 	assert.equal(attempts, 2);
 	assert.equal(await readFile(join(cwd, 'B.md'), 'utf8'), '修正稿');
 });
 
-void test('a failed verification prevents a completed status after writing a note', async (t) => {
+void test('a failed verification can end with only the tool record when the model supplies no final text', async (t) => {
 	const { app, cwd } = await fixture(t);
 	const replies = [
 		emptyModelResponse('', [{ id: 'draft', name: 'Write', input: { file_path: '草稿.md', content: '草稿正文' } }]),
 		emptyModelResponse('', [{ id: 'verify', name: 'Read', input: { file_path: '参考笔记.md' } }]),
-		emptyModelResponse('全部完成。'),
+		emptyModelResponse(''),
 	];
 	const sessions = sessionsFor(app, { stream: (request) => fakeStream(replies.shift()!, request.signal) }, [readTools, writeTools]);
 	const result = await sessions.submit({ conversationId: 'write-verify', instruction: '创建草稿并核对参考笔记。', refs: [] }, {
 		approve: async () => true,
 	}).result;
 	assert.equal(await readFile(join(cwd, '草稿.md'), 'utf8'), '草稿正文');
-	assert.equal(result.status, 'partial');
-	assert.match(result.messages.at(-1)?.content ?? '', /Read 参考笔记\.md 未完成/);
-	assert.doesNotMatch(result.messages.at(-1)?.content ?? '', /全部完成/);
+	assert.equal(result.status, 'done');
+	assert.equal(result.messages.at(-1)?.content, '');
+	assert.equal(result.messages.find(({ toolCallId }) => toolCallId === 'verify')?.isError, true);
+	const saved = (await sessions.openConversation('write-verify'))?.runs[0];
+	assert.ok(saved);
+	const { answer, copyText, rows } = chatTurnContent(restoreExecution(saved));
+	assert.equal(answer, '');
+	assert.equal(copyText, '');
+	assert.deepEqual(rows.map(({ kind }) => kind), ['tool', 'tool']);
 });
 
 for (const recheck of [false, true]) {
-	void test(`an interrupted verification remains tracked after pausing a resumed task and is ${recheck ? 'cleared by rechecking' : 'reported as incomplete'}`, async (t) => {
+	void test(`an interrupted verification is delivered back to the model ${recheck ? 'before checking again' : 'even when it ends without rechecking'}`, async (t) => {
 		const { app, cwd } = await fixture(t);
 		const file = '核对用临时草稿.md';
 		const write = { id: 'draft', name: 'Write', input: { file_path: file, content: '待核对正文' } };
@@ -512,14 +581,18 @@ for (const recheck of [false, true]) {
 		assert.equal((await interrupted.result).status, 'interrupted');
 		assert.ok((await second.openConversation(conversationId))?.runs[0]?.state.messages.some(({ skipped, toolCallId }) => skipped && toolCallId === read.id));
 
-		const replies = [emptyModelResponse('已完成。')];
+		const finalText = recheck ? '已读回草稿并核对。' : '草稿已写入，尚未读回核对。';
+		const replies = [emptyModelResponse(finalText)];
 		if (recheck) replies.unshift(emptyModelResponse('', [{ ...read, id: 'verify-again', input: { file_path: join(cwd, file), offset: 1 } }]));
-		const third = sessionsFor(app, { stream: (request) => fakeStream(replies.shift()!, request.signal) }, modules);
+		const third = sessionsFor(app, { stream(request) {
+			assert.ok(request.messages.some(({ toolCallId, skipped, isError }) => toolCallId === read.id && skipped && isError));
+			return fakeStream(replies.shift()!, request.signal);
+		} }, modules);
 		const completed = await third.resume(conversationId, initial.taskId).result;
-		assert.equal(completed.status, recheck ? 'file-changes-done' : 'partial');
+		assert.equal(completed.status, 'done');
+		assert.equal(completed.messages.at(-1)?.content, finalText);
 		assert.equal(await readFile(join(cwd, file), 'utf8'), write.input.content);
 		if (recheck) assert.match(completed.messages.find(({ toolCallId }) => toolCallId === 'verify-again')?.content ?? '', /待核对正文/);
-		else assert.match(completed.messages.at(-1)?.content ?? '', /Read 核对用临时草稿\.md 未完成（退出前尚未执行此步骤。）/);
 	});
 }
 
@@ -588,6 +661,7 @@ for (const retry of [true, false]) {
 		const { app, cwd } = await fixture(t);
 		const path = '草稿.md';
 		await writeFile(join(cwd, path), '现用标题\n正文');
+		const finalText = retry ? '标题修改完成。' : '标题已修改，正文未改动。';
 		const replies = [
 			emptyModelResponse('', [{ id: 'read', name: 'Read', input: { file_path: path } }]),
 			emptyModelResponse('', [{ id: 'first-edit', name: 'Edit', input: {
@@ -596,16 +670,16 @@ for (const retry of [true, false]) {
 			emptyModelResponse('', [{ id: 'second-edit', name: 'Edit', input: {
 				file_path: path, old_string: '现用标题', new_string: '最终标题',
 			} }]),
-			emptyModelResponse('修改完成。'),
+			emptyModelResponse(finalText),
 		];
 		const sessions = sessionsFor(app, { stream: (request) => fakeStream(replies.shift()!, request.signal) }, [readTools, writeTools]);
 		const result = await sessions.submit({ conversationId: 'edit-status', instruction: '修改临时草稿。', refs: [] }, {
 			approve: async () => true,
 		}).result;
 		assert.equal(await readFile(join(cwd, path), 'utf8'), '最终标题\n正文');
-		assert.equal(result.status, retry ? 'file-changes-done' : 'partial');
+		assert.equal(result.status, 'done');
+		assert.equal(result.messages.at(-1)?.content, finalText);
 		assert.deepEqual(result.messages.filter(({ role }) => role === 'tool').map(({ isError }) => isError), [false, true, false]);
-		if (!retry) assert.match(result.messages.at(-1)?.content ?? '', /草稿\.md 仍有修改未完成/);
 	});
 }
 
@@ -619,42 +693,27 @@ void test('explicit write targets exclude source notes and conditional choices',
 	assert.equal(explicitNoteTargets(`创建 ${'A.md和'.repeat(500)}只选其一`, cwd).size, 0);
 });
 
-for (const repair of [true, false]) {
-	void test(`a named note omitted by the model is ${repair ? 'written without rewriting other notes' : 'reported as unfinished after one check'}`, async (t) => {
-		const { app, cwd } = await fixture(t);
-		const a = { id: 'first', name: 'Write', input: { file_path: 'A.md', content: '甲' } };
-		const b = { id: 'remaining', name: 'Write', input: { file_path: 'B.md', content: '乙' } };
-		const writes: string[] = [];
-		Object.assign(app.vault, {
-			async create(path: string, content: string) {
-				await writeFile(join(cwd, path), content, { flag: 'wx' });
-				writes.push(path);
-			},
-		});
-		const earlyEnd = emptyModelResponse('两篇都成功。');
-		const replies = [emptyModelResponse('', [a]), earlyEnd];
-		if (repair) replies.push(emptyModelResponse('', [{ ...a, id: 'unneeded-repeat' }, b]));
-		replies.push(earlyEnd);
-		const requests: ModelRequest[] = [];
-		const sessions = sessionsFor(app, {
-			stream(request) {
-				requests.push(request);
-				return fakeStream(replies.shift()!, request.signal);
-			},
-		}, [writeTools]);
-		const approved: string[] = [];
-		const result = await sessions.submit({ conversationId: 'omitted-note', instruction: '请创建 A.md 和 B.md。', refs: [] }, {
-			async approve(preview) { approved.push(preview.target); return true; },
-		}).result;
-		assert.deepEqual(approved, repair ? ['A.md', 'B.md'] : ['A.md']);
-		assert.deepEqual(writes, approved);
-		assert.match(requests[2]?.messages.at(-1)?.content ?? '', /从未尝试写入：B\.md/);
-		assert.ok(result.messages.some(({ content }) => content.includes('还未写入 B.md')));
-		assert.equal(result.status, repair ? 'file-changes-done' : 'partial');
-		assert.equal(replies.length, 0);
-		if (!repair) assert.match(result.messages.at(-1)?.content ?? '', /B\.md 未完成（尚未尝试写入）/);
-	});
-}
+void test('a normal end preserves the model reply and does not start another request to write an omitted note', async (t) => {
+	const { app, cwd } = await fixture(t);
+	const a = { id: 'first', name: 'Write', input: { file_path: 'A.md', content: '甲' } };
+	const finalText = 'A.md 已写入，B.md 尚未写入。';
+	const replies = [emptyModelResponse('', [a]), emptyModelResponse(finalText)];
+	let requests = 0;
+	const sessions = sessionsFor(app, { stream(request) {
+		requests++;
+		return fakeStream(replies.shift()!, request.signal);
+	} }, [writeTools]);
+	const approved: string[] = [];
+	const result = await sessions.submit({ conversationId: 'omitted-note', instruction: '请创建 A.md 和 B.md。', refs: [] }, {
+		async approve(preview) { approved.push(preview.target); return true; },
+	}).result;
+	assert.equal(result.status, 'done');
+	assert.equal(result.messages.at(-1)?.content, finalText);
+	assert.equal(requests, 2);
+	assert.deepEqual(approved, ['A.md']);
+	assert.equal(await readFile(join(cwd, 'A.md'), 'utf8'), '甲');
+	await assert.rejects(readFile(join(cwd, 'B.md')), { code: 'ENOENT' });
+});
 
 void test('a model disconnection restarts only the incomplete model turn and preserves an earlier write', async (t) => {
 	const { app, cwd } = await fixture(t);
@@ -714,12 +773,12 @@ void test('a model disconnection restarts only the incomplete model turn and pre
 	assert.equal(requests[2]?.messages.at(-1)?.toolCallId, a.id);
 	assert.equal(requests[2]?.messages.at(-1)?.isError, false);
 	assert.deepEqual(writes, ['A.md', 'B.md']);
-	assert.equal(result.status, 'file-changes-done');
+	assert.equal(result.status, 'done');
 	assert.ok(result.messages.every(({ content }) => !content.includes('断开的半句')));
 	const saved = await sessions.openConversation('disconnected-write');
 	assert.equal(saved?.runs.length, 1);
 	const savedRun = saved.runs[0]!;
-	assert.equal(savedRun.state.status, 'file-changes-done');
+	assert.equal(savedRun.state.status, 'done');
 	assert.ok(savedRun.state.messages.every(({ id }) => id !== disconnectedReplyId));
 	assert.deepEqual(restoreExecution(savedRun).items.flatMap((row) => (
 		(row.kind === 'text' || row.kind === 'thinking') && row.messageId === disconnectedReplyId ? [row.content] : []
@@ -935,6 +994,71 @@ void test('stopping a model stream prevents tool execution and further requests'
 	assert.equal(requests, 1);
 });
 
+void test('only the latest model text for the current user input can suggest an early stop', () => {
+	const user: Message = { role: 'user', content: '请处理。' };
+	const continuing: Message = { role: 'assistant', content: '接下来我会核对文件。' };
+	const complete: Message = { role: 'assistant', content: '已核对文件。' };
+	const tool: Message = { role: 'tool', content: '下一步需要检查：', toolCallId: 'last-tool', isError: true };
+	for (const content of [
+		continuing.content, '接下來我會確認。', "Now I'll check the result.", 'I can explain it with', '命令示例如下：', '```text\n示例',
+	]) {
+		assert.equal(mayHaveStoppedEarly([user, { role: 'assistant', content }, tool]), true, content);
+	}
+	for (const content of ['', '核对完毕', '请提供文件。', '需要我继续查看吗？', '```text\n示例：\n```']) {
+		assert.equal(mayHaveStoppedEarly([user, { role: 'assistant', content }, tool]), false, content);
+	}
+	assert.equal(mayHaveStoppedEarly([user, continuing, complete, tool]), false);
+	assert.equal(mayHaveStoppedEarly([user, continuing, { ...user, id: 'steer:latest' }, tool]), false);
+});
+
+for (const ending of ['recovered', 'still blank', 'has text'] as const) {
+	void test(`an early-end reminder is private and sent at most once when the model ${ending}`, async (t) => {
+		const { app } = await fixture(t);
+		const previous = '接下来我会核对资料。';
+		const final = ending === 'still blank' ? '' : '资料已核对。';
+		const call = { id: 'verification', name: 'ReadStatus', input: {} };
+		const replies = [emptyModelResponse(previous, [call])];
+		if (ending !== 'has text') replies.push(emptyModelResponse('  '));
+		replies.push(emptyModelResponse(final));
+		const requests: ModelRequest[] = [];
+		let executions = 0;
+		const sessions = sessionsFor(app, { stream(request) {
+			requests.push(request);
+			const response = replies.shift();
+			assert.ok(response);
+			return fakeStream(response, request.signal);
+		} }, [() => [{
+			name: call.name, description: 'test', inputSchema: {}, isReadOnly: true,
+			prepare: () => ({ run: () => { executions++; return '资料齐全'; } }),
+		}]]);
+		const conversationId = 'early-end';
+		const instruction = '核对资料。';
+		const result = await sessions.submit({ conversationId, instruction, refs: [] }, {
+			onEvent(event) {
+				if (event.type === 'state') assert.ok(event.state.messages.every(({ content }) => !content.includes('刚才在没有正文')));
+			},
+		}).result;
+		assert.equal(result.status, 'done', result.error);
+		assert.equal(executions, 1);
+		assert.equal(requests.length, ending === 'has text' ? 2 : 3);
+		assert.equal(requests[1]?.messages.at(-1)?.toolCallId, call.id);
+		if (ending !== 'has text') {
+			const followUp = requests[2]?.messages ?? [];
+			assert.equal(followUp.at(-3)?.content, previous);
+			assert.equal(followUp.at(-2)?.toolCallId, call.id);
+			assert.equal(followUp.at(-1)?.role, 'user');
+			assert.match(followUp.at(-1)?.content ?? '', /从停下的位置继续/u);
+		}
+		const saved = (await sessions.openConversation(conversationId))?.runs[0];
+		assert.ok(saved);
+		assert.deepEqual(saved.state.messages.filter(({ role }) => role === 'user').map(({ content }) => content), [instruction]);
+		const { answer, rows } = chatTurnContent(restoreExecution(saved));
+		assert.equal(answer, final);
+		assert.deepEqual(rows.flatMap((row) => row.kind === 'text' ? [row.content] : []), [previous]);
+		assert.ok(rows.every((row) => row.kind !== 'notice'));
+	});
+}
+
 void test('a truncated answer resumes from saved text without replaying tools', async (t) => {
 	const { app } = await fixture(t);
 	const requests: ModelRequest[] = [];
@@ -1063,8 +1187,6 @@ void test('outside material is available only through the current task attachmen
 	assert.ok(attached.messages.some(({ role, content }) => role === 'tool' && content.includes('临时库外资料')));
 	const saved = await sessions.openConversation('scope');
 	assert.deepEqual(saved?.runs.map(({ request }) => request.refs), [[], [{ path: folder, kind: 'folder', addedExternal: true }], []]);
-	assert.equal(createToolLayer().registry.find('Bash'), undefined);
-	assert.equal(createToolLayer().registry.find('PowerShell'), undefined);
 });
 
 void test('the model tool switch blocks execution before approval and is rechecked after approval', async (t) => {
@@ -1083,7 +1205,8 @@ void test('the model tool switch blocks execution before approval and is recheck
 	const submit = { conversationId: 'tool-switch', instruction: '创建临时笔记。', refs: [] };
 	const disabled = await sessions.submit(submit, { approve: async () => { assert.fail('关闭时不应发起批准'); } }).result;
 	assert.deepEqual(requests.map(({ tools }) => tools), [[], []]);
-	assert.equal(disabled.status, 'failed');
+	assert.equal(disabled.status, 'done');
+	assert.equal(disabled.messages.at(-1)?.content, '模型已结束。');
 	assert.deepEqual(disabled.messages.filter(({ role }) => role === 'tool').map(({ isError }) => isError), [true, true]);
 	assert.doesNotMatch(JSON.stringify(requests), /仅供工具开关测试/);
 	await assert.rejects(readFile(join(cwd, call.input.file_path)), { code: 'ENOENT' });
@@ -1103,6 +1226,6 @@ void test('the model tool switch blocks execution before approval and is recheck
 	requests = [];
 	model.capabilities.tools = true;
 	const enabled = await sessions.submit(submit, { approve: async () => true }).result;
-	assert.equal(enabled.status, 'file-changes-done');
+	assert.equal(enabled.status, 'done');
 	assert.equal(await readFile(join(cwd, call.input.file_path), 'utf8'), '临时笔记');
 });

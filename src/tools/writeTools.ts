@@ -8,7 +8,7 @@ export const editTextNotFound = '文件中没有找到要替换的文本。';
 
 export const writeTools: ToolModule = () => [{
 	name: 'Write',
-	description: 'Create or overwrite a UTF-8 text file in an existing folder. Before overwriting, read all lines of the current file with Read. Use smaller pages if output was truncated. For local changes use Edit. Each write requires approval.',
+	description: 'Create or overwrite a UTF-8 text file in an existing folder. Before overwriting, read all lines of the current file with Read. Use smaller pages if output was truncated. For local changes use Edit. The selected execution mode determines whether approval is needed.',
 	inputSchema: {
 		type: 'object',
 		properties: { file_path: stringProperty, content: stringProperty },
@@ -27,7 +27,7 @@ export const writeTools: ToolModule = () => [{
 	},
 }, {
 	name: 'Edit',
-	description: 'Replace an exact text fragment. Read the file first. The fragment must occur exactly once unless replace_all is true. Each edit requires approval.',
+	description: 'Replace an exact text fragment. Read the file first. The fragment must occur exactly once unless replace_all is true. The selected execution mode determines whether approval is needed.',
 	inputSchema: {
 		type: 'object',
 		properties: {
@@ -51,7 +51,7 @@ export const writeTools: ToolModule = () => [{
 	},
 }, {
 	name: 'NotebookEdit',
-	description: 'Replace, insert, or delete a Jupyter notebook cell. Read the notebook first. Use its cell ID or cell-N for legacy cells without IDs, where N is a zero-based position. Insertion without an ID goes at the beginning. Each change requires approval.',
+	description: 'Replace, insert, or delete a Jupyter notebook cell. Read the notebook first. Use its cell ID or cell-N for legacy cells without IDs, where N is a zero-based position. Insertion without an ID goes at the beginning. The selected execution mode determines whether approval is needed.',
 	inputSchema: {
 		type: 'object',
 		properties: {

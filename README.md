@@ -4,7 +4,7 @@ Run AI tasks in Obsidian with your configured model.
 
 ## Agent tasks
 
-Open **Scribe Ai** and submit a task. The agent starts in the current vault. Under **Add a path outside the vault**, choose a file or folder in the system picker to grant access for the current task. Add it again for a new task. Paths mentioned in the instructions or saved in chat history do not grant access.
+Open **Scribe Ai** and submit a task. The agent starts in the current vault. Under **Add a path outside the vault**, choose a file or folder in the system picker to grant read access for the current task. Add it again for a new task. In the default modes, paths mentioned in the instructions or saved in chat history still require approval before access.
 
 You can expand saved text selections in older conversations to review the exact excerpts sent with those messages.
 
@@ -14,11 +14,19 @@ Select **+** above the chat to open another conversation. Each tab keeps its own
 
 When you send a task, the current chat history, instructions, file references, and tool results it uses can be sent to the selected model provider. Select **Stop** to cancel pending work. Tools from a previous task only run again when a new task requests them and any required approval is granted.
 
-`Read`, `Glob`, and `Grep` retrieve information. `Write`, `Edit`, and `NotebookEdit` preview changes for approval. An overwrite requires the model to receive every line of the file's current version in this task. For long notes, request smaller pages or use a local edit. Chat does not run shell commands. Turning off **Tool calling** for the selected model also blocks local tool execution.
+Use the execution mode selector next to **Add context** in the main chat. New chats and tabs inherit the previous chat's mode. Saved conversations keep their own mode when reopened. If the previous mode is missing or invalid, the default is **Ask for approval**. Stop the current task and clear or finish queued messages before changing modes.
+
+- **Ask for approval** runs ordinary vault reads and edits directly. External file changes, reads of unshared external files, and commands that need broader access ask for your approval for that action.
+- **Approve for me** uses the same default scope and sends approval requests to a separate review using the selected model. The review request includes the task instruction and the exact operation, which may include file previews, paths, or commands. This can add to model usage. The operation runs only after an explicit approval from the reviewer.
+- **Full access** lets file tools and commands use your computer account's permissions, including access outside the vault and network access, without per-action approval. Confirm this mode when selecting it. New chats can inherit it when it is the previous chat's saved mode.
+
+On macOS, routine Bash commands run within a restricted environment with networking blocked. When the selected shell or system cannot enforce those limits, commands need approval in **Ask for approval** and **Approve for me**. A command that requests broader access is reviewed before it runs, with the command and its working directory included. After approval, it runs with your computer account's permissions.
+
+An overwrite requires the model to receive every line of the file's current version in this task. For long notes, request smaller pages or use a local edit. Turning off **Tool calling** for the selected model also blocks local tool execution in every mode.
 
 ## Side chat
 
-Select **Ask in side chat** on a queued message to send its text, references and quotes to side chat. The message leaves the queue after the question starts, and your main draft stays in the input box. Enter `/side` to open side chat, or `/side your question` to send a question immediately. **Add to chat** attaches selected passages to the current input. Each main conversation has its own side chat in Obsidian's right sidebar. It uses the main conversation as it was when you first opened it. The main task can keep running while you ask follow-up questions.
+Select **Ask in side chat** on a queued message to send its text, references and quotes to side chat. The message leaves the queue after the question starts, and your main draft stays in the input box. Enter `/side` to open side chat, or `/side your question` to send a question immediately. In the main chat, select text to show **Add to chat** and **Ask in side chat**; the latter opens side chat with that passage quoted. Each main conversation has its own side chat in Obsidian's right sidebar. It uses the main conversation as it was when you first opened it. The main task can keep running while you ask follow-up questions.
 
 Side chat can read and search notes in the current vault using `Read`, `Glob`, and `Grep`. Use **Add context** to attach a vault file or folder, and choose a model for that side chat from the input box. The selected provider can receive the inherited conversation, attached text and paths, and note contents it reads. Closing the side chat tab cancels its current response and clears its messages. Side chats are separate from the saved chat history.
 

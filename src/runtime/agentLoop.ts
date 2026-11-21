@@ -4,9 +4,8 @@ import { taskMessage } from '../orchestration/context/contextBuilder';
 import { pauseRun } from '../orchestration/runResume';
 import { isWithinPath, toolAbsolutePath } from '../tools/support/pathUtils';
 import { toolSignature } from '../tools/support/toolSignature';
-import { editTextNotFound } from '../tools/writeTools';
-import type { AgentLoop, Message, ModelCoordinator, ModelResponse, NoteRef, RunContext, RunState, TerminalRunStatus, ToolApproval, ToolCall, ToolCoordinator, ToolResult } from '../types';
-import { latestIncompleteReply, newContinuationText } from './continuationText';
+import type { AgentLoop, Message, ModelCoordinator, ModelResponse, NoteRef, RunContext, RunState, ToolApproval, ToolCall, ToolCoordinator, ToolResult } from '../types';
+import { latestIncompleteReply, mayHaveStoppedEarly, newContinuationText } from './continuationText';
 import { InitialContextBudgetError } from './modelCoordinator';
 import { explicitNoteTargets } from './noteTargets';
 import { assistantMessageId } from './runState';
@@ -16,13 +15,17 @@ const MAX_TOOL_CALLS = 256;
 const MAX_UNCHANGED_RESULTS = 3;
 const MAX_OUTPUT_CONTINUATIONS = 2;
 const fileChangeTools = new Set(['Write', 'Edit', 'NotebookEdit']);
-const noteRepairTools = new Set(['Read', 'Glob', 'Grep', ...fileChangeTools]);
+const resumeTools = new Set(['Read', 'Glob', 'Grep', ...fileChangeTools]);
 const repeatedToolsError = '工具多次返回相同结果，已停止重复操作。';
 const pendingResume = '退出前未执行。继续任务时请补做此步骤，修改文件仍需重新请求确认。';
 const legacyPendingResume = '退出前未执行。继续任务时需要重新请求确认。';
 const outputContinuation: Message = {
 	role: 'user',
 	content: '上一轮回答被截断。请从截断处继续原任务，保留原有格式，避免重复已写的内容或已完成的操作。需要工具时，重新给出完整的请求。',
+};
+const earlyEndReminder: Message = {
+	role: 'user',
+	content: '刚才在没有正文和工具调用的情况下结束了。如果上段回复还没写完，请从停下的位置继续。如果还有可以执行的步骤，请按原任务继续。避免重复已经输出的内容和已成功的操作。如果已经说完或需要用户补充，可以直接结束。',
 };
 
 function skippedResults(calls: ToolCall[], content: string): Message[] {
@@ -73,27 +76,6 @@ function fileChangeSignature(call: ToolCall, path: string): string {
 	return toolSignature({ ...call, input });
 }
 
-function taskOutcome(
-	results: { target: string; path?: string; result: ToolResult }[], written: Map<string, string>, missing: string[],
-): { status: TerminalRunStatus; content?: string } {
-	const failures = new Set<string>();
-	for (const { target, path, result } of results) {
-		if (!result.isError) continue;
-		const status = path && written.has(path) ? '仍有修改未完成' : '未完成';
-		failures.add(`${target} ${status}（${result.content}）`);
-	}
-	for (const target of missing) failures.add(`${target} 未完成（尚未尝试写入）`);
-	if (!failures.size) return { status: written.size ? 'file-changes-done' : 'done' };
-	const successes = Array.from(written, ([path, target]) => {
-		const unfinished = results.some((item) => item.path === path && item.result.isError);
-		return `${target} ${unfinished ? '已写入部分修改' : '已完成'}`;
-	});
-	return {
-		status: written.size || results.some(({ result }) => !result.isError) ? 'partial' : 'failed',
-		content: [...successes, ...failures].join('\n'),
-	};
-}
-
 async function canSteerWithRefs(ctx: RunContext, refs: NoteRef[]): Promise<boolean> {
 	const { cwd, permissions } = ctx;
 	const readable = await Promise.all(refs.map(async ({ path, lines }) => {
@@ -121,13 +103,10 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 			let outputSoFar: string | undefined;
 			let progressVersion = 0;
 			const toolOutcomes = new Map<string, { content: string; isError: boolean; unchanged: number; progressVersion: number }>();
-			const operations = new Map<string, { target: string; path?: string; editIntent?: string; result: ToolResult }>();
-			const written = new Map<string, string>();
 			const priorWrittenPaths = new Set<string>();
 			const completedChanges = new Set<string>();
 			const pendingOverwrites = new Set<string>();
-			let repairPaths: Set<string> | undefined;
-			let repairPrompt: Message | undefined;
+			let resumePrompt: Message | undefined;
 			const update = async (patch: Partial<RunState>) => {
 				state = { ...state, ...patch };
 				const event = { type: 'state' as const, state };
@@ -141,10 +120,20 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 				status: 'limit', error, pendingCalls: [],
 				messages: [...state.messages, ...skippedResults(state.pendingCalls, error)],
 			});
+			const readSteering = async () => {
+				const messages: (Message & { id: string })[] = [];
+				for (const { id, request } of ctx.takeSteering?.() ?? []) {
+					if (!request.refs.length || await canSteerWithRefs(ctx, request.refs)) messages.push({ ...taskMessage(request), id: `steer:${id}` });
+					else ctx.rejectSteering?.([id]);
+				}
+				signal.throwIfAborted();
+				return messages;
+			};
 
 			const approve = async (approval: ToolApproval): Promise<boolean> => {
 				signal.throwIfAborted();
-				if (!observer.approve) return false;
+				const decide = ctx.permissions.executionMode === 'auto-review' ? ctx.reviewTool : observer.approve;
+				if (!decide) return false;
 				await update({ status: 'awaiting-approval' });
 				let stop: () => void = () => {};
 				const cancelled = new Promise<false>((resolve) => {
@@ -152,7 +141,7 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					signal.addEventListener('abort', stop, { once: true });
 				});
 				try {
-					return !signal.aborted && await Promise.race([observer.approve(approval, signal), cancelled]);
+					return !signal.aborted && await Promise.race([decide(approval, signal), cancelled]);
 				} finally {
 					signal.removeEventListener('abort', stop);
 					if (!signal.aborted) await update({ status: 'running' });
@@ -161,15 +150,14 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 
 			try {
 				signal.throwIfAborted();
-				const explicit = task.request.selection || ctx.sideChat ? new Map<string, string>() : explicitNoteTargets(task.request.instruction, ctx.cwd);
-				const vaultRoot = explicit.size || resuming ? await realpath(ctx.cwd) : ctx.cwd;
+				const explicit = resuming && !task.request.selection && !ctx.sideChat ? explicitNoteTargets(task.request.instruction, ctx.cwd) : undefined;
+				const vaultRoot = resuming ? await realpath(ctx.cwd) : ctx.cwd;
 				const notePath = (name: string) => {
 					const path = resolve(ctx.cwd, name);
 					return isWithinPath(ctx.cwd, path) ? resolve(vaultRoot, relative(ctx.cwd, path)) : path;
 				};
-				const expected = new Map(Array.from(explicit, ([path, name]) => [notePath(path), name]));
-				const mayWrite = (path: string) => (!repairPaths || repairPaths.has(path))
-					&& (!resuming || !expected.size || expected.has(path));
+				const resumeTargets = new Set(Array.from(explicit?.keys() ?? [], notePath));
+				const mayWrite = (path: string) => !resumeTargets.size || resumeTargets.has(notePath(path));
 				const fileTarget = (call: ToolCall) => {
 					const value = (call.input as Record<string, unknown> | undefined)?.[fileChangePathKey(call)];
 					return typeof value === 'string' && value.trim() ? value : undefined;
@@ -185,18 +173,20 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					const direct = await realpath(requested).catch(() => undefined);
 					return direct && ctx.permissions.canWrite(direct) ? direct : notePath(target);
 				};
-				const continuationContext = { ...ctx, permissions: {
+				const { canRequestPath } = ctx.permissions;
+				const requestContext = resuming ? { ...ctx, permissions: {
 					...ctx.permissions,
-					canWrite: (path: string) => ctx.permissions.canWrite(path) && mayWrite(notePath(path)),
+					canWrite: (path: string) => ctx.permissions.canWrite(path) && mayWrite(path),
+					canRequestPath: canRequestPath && ((path: string, operation: 'read' | 'write') =>
+						(operation === 'read' || mayWrite(path)) && canRequestPath(path, operation)),
 					canCallTool: (tool: Parameters<typeof ctx.permissions.canCallTool>[0]) =>
-						ctx.permissions.canCallTool(tool) && noteRepairTools.has(tool.name),
-				} };
+						ctx.permissions.canCallTool(tool) && resumeTools.has(tool.name),
+				} } : ctx;
 				const skipContinuation = async (call: ToolCall) => {
-					if ((!resuming && !repairPaths) || !fileChangeTools.has(call.name)) return;
+					if (!fileChangeTools.has(call.name)) return;
 					const target = fileTarget(call);
 					if (!target) return;
-					if (!mayWrite(notePath(target))) return '此文件不属于本次续做或补写的目标。';
-					if (!resuming) return;
+					if (!mayWrite(target)) return '此文件不属于本次续做的目标。';
 					const path = await canonicalNote(target);
 					const key = fileChangeSignature(call, path);
 					if (completedChanges.has(key)) return '此项修改已完成，已跳过重复操作。';
@@ -205,75 +195,48 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					}
 					return undefined;
 				};
-				const remember = async (call: ToolCall, result: ToolResult, kind?: 'restored' | 'pending' | 'skipped') => {
+				const remember = (call: ToolCall, { content, isError }: ToolResult) => {
 					const signature = toolSignature(call);
-					const { content, isError } = result;
-					if (kind !== 'pending') {
-						callsRemaining--;
-						const previous = toolOutcomes.get(signature);
-						const sameResult = previous?.content === content && previous.isError === isError;
-						// 有新结果后重新累计，避免把后续核对当成旧操作的空转。
-						if (!sameResult) progressVersion++;
-						const unchanged = sameResult && previous.progressVersion === progressVersion ? previous.unchanged + 1 : 1;
-						toolOutcomes.set(signature, { content, isError, unchanged, progressVersion });
-					}
-					if (task.request.selection || kind === 'skipped') return;
-					const input = call.input as Record<string, unknown> | undefined;
-					if (!fileChangeTools.has(call.name)) {
-						const source = input?.file_path ?? input?.path;
-						const target = typeof source === 'string' ? `${call.name} ${source}` : call.name;
-						let key = signature;
-						if (call.name === 'Read' || call.name === 'Grep' || call.name === 'Glob') {
-							const pathKey = call.name === 'Read' ? 'file_path' : 'path';
-							const path = input?.[pathKey];
-							const args = { ...input };
-							if (typeof path === 'string' && path.trim()) args[pathKey] = notePath(path);
-							if (call.name === 'Read' && (args.offset === undefined || args.offset === 0)) args.offset = 1;
-							key = toolSignature({ ...call, input: args });
-						}
-						operations.set(key, { target, result });
+					callsRemaining--;
+					const previous = toolOutcomes.get(signature);
+					const sameResult = previous?.content === content && previous.isError === isError;
+					// 有新结果后重新累计，避免把后续核对当成旧操作的空转。
+					if (!sameResult) progressVersion++;
+					const unchanged = sameResult && previous.progressVersion === progressVersion ? previous.unchanged + 1 : 1;
+					toolOutcomes.set(signature, { content, isError, unchanged, progressVersion });
+				};
+				const rememberResumeChange = async (call: ToolCall, kind: 'restored' | 'pending' | 'current') => {
+					if (task.request.selection || !fileChangeTools.has(call.name)) return;
+					const target = fileTarget(call);
+					if (!target) return;
+					const path = await canonicalNote(target);
+					const key = fileChangeSignature(call, path);
+					if (kind === 'pending') {
+						if (call.name === 'Write' && !completedChanges.has(key)) pendingOverwrites.add(key);
 						return;
 					}
-					const target = fileTarget(call);
-					const absolute = target ? resuming ? await canonicalNote(target) : notePath(target) : undefined;
-					const changeKey = absolute ? fileChangeSignature(call, absolute) : signature;
-					const key = absolute && call.name === 'Write' ? toolSignature({ ...call, input: { file_path: absolute } }) : changeKey;
-					if (kind === 'pending' && completedChanges.has(changeKey)) return;
-					if (kind === 'pending' && call.name === 'Write') pendingOverwrites.add(changeKey);
-					const replacement = input?.new_string;
-					const editIntent = call.name === 'Edit' && absolute && typeof replacement === 'string' && replacement
-						? JSON.stringify([absolute, replacement, input?.replace_all === true]) : undefined;
-					if (!isError && absolute && target) {
-						written.set(absolute, target);
-						if (resuming) completedChanges.add(changeKey);
-						if (kind === 'restored') priorWrittenPaths.add(absolute);
-						// shortcut: 只归并同一文件、同一替换文字的原文未匹配，精确确认编辑意图需要明确的重试标识。
-						if (editIntent && !operations.get(key)?.result.isError) {
-							const matches = [...operations].filter(([, item]) => item.editIntent === editIntent
-								&& item.result.isError && item.result.content === editTextNotFound);
-							if (matches.length === 1) operations.delete(matches[0]![0]);
-						}
-					}
-					operations.set(key, { target: target ?? '未指定文件路径', path: absolute, editIntent, result });
+					completedChanges.add(key);
+					if (kind === 'restored') priorWrittenPaths.add(path);
 				};
-				const rememberPending = (call: ToolCall) => remember(call, {
-					callId: call.id, isError: true,
-					content: fileChangeTools.has(call.name) ? '退出前尚未完成此项修改。' : '退出前尚未执行此步骤。',
-				}, 'pending');
 				if (resuming) {
 					for (const { call, pending, result } of savedResults(state.messages)) {
-						if (pending) await rememberPending(call);
-						else await remember(call, result, 'restored');
+						if (pending) await rememberResumeChange(call, 'pending');
+						else {
+							remember(call, result);
+							if (!result.isError) await rememberResumeChange(call, 'restored');
+						}
 					}
-					for (const call of state.pendingCalls) await rememberPending(call);
-					repairPrompt = { role: 'user', content: '从重开前保存的进度继续原任务。保留已经成功的修改，不要重复操作。补做之前未执行的读取、搜索和核对。同一篇笔记如有未完成的修改，请重新读取后完成。优先使用局部编辑，已记录的整篇写入才能原样重试，所有改动仍需重新请求确认。' };
+					for (const call of state.pendingCalls) await rememberResumeChange(call, 'pending');
+					resumePrompt = { role: 'user', content: '从重开前保存的进度继续原任务。保留已经成功的修改，不要重复操作。补做之前未执行的读取、搜索和核对。同一篇笔记如有未完成的修改，请重新读取后完成。优先使用局部编辑，已记录的整篇写入才能原样重试，所有改动仍需重新请求确认。' };
 					outputSoFar = latestIncompleteReply(state.messages);
-					if (outputSoFar) repairPrompt.content += '上一段回复尚未完成，请从已经保存的文字末尾接着写，避免重复。';
+					if (outputSoFar) resumePrompt.content += '上一段回复尚未完成，请从已经保存的文字末尾接着写，避免重复。';
 				}
 				const previous = state.messages.length && resuming ? state.messages : [...state.messages, taskMessage(task.request)];
 				await update({ status: 'running', resumed: resuming || undefined, pendingCalls: [], messages: [...previous,
 					...skippedResults(state.pendingCalls, pendingResume),
 				] });
+				let lateSteering: Awaited<ReturnType<typeof readSteering>> | undefined;
+				let earlyEndCheck: 'pending' | 'used' | undefined;
 				while (true) {
 					signal.throwIfAborted();
 					if (state.turn >= MAX_TURNS) {
@@ -284,23 +247,29 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					const start = { type: 'turn-start' as const, turn: state.turn };
 					await ctx.record?.(start);
 					observer.onEvent?.(start);
-					const reminder = repairPrompt ?? (outputSoFar === undefined ? undefined : outputContinuation);
-					repairPrompt = undefined;
-					const steering: (Message & { id: string })[] = [];
-					for (const { id, request } of ctx.takeSteering?.() ?? []) {
-						if (!request.refs.length || await canSteerWithRefs(ctx, request.refs)) steering.push({ ...taskMessage(request), id: `steer:${id}` });
-						else ctx.rejectSteering?.([id]);
-					}
-					const requestContext = resuming || repairPaths ? continuationContext : ctx;
-					const baseRequest = reminder ? { ...state, messages: [...state.messages, reminder] } : state;
+					const nudge = earlyEndCheck === 'pending';
+					const finishing = lateSteering !== undefined || nudge;
+					const steering = lateSteering ?? await readSteering();
+					lateSteering = undefined;
+					if (nudge) earlyEndCheck = 'used';
+					const reminder = resumePrompt ?? (outputSoFar === undefined ? undefined : outputContinuation)
+						?? (nudge && !steering.length ? earlyEndReminder : undefined);
+					resumePrompt = undefined;
+					// 空回复留在聊天记录里，续做请求直接接在上一段正文及配对的工具结果之后。
+					const messages = reminder === earlyEndReminder ? state.messages.slice(0, -1) : state.messages;
+					const baseRequest = reminder ? { ...state, messages: [...messages, reminder] } : state;
 					const requestState = steering.length ? { ...baseRequest, messages: [...baseRequest.messages, ...steering] } : baseRequest;
 					let response: ModelResponse;
 					try {
 						response = await models.nextTurn(requestState, requestContext);
 					} catch (error) {
 						// 只在模型请求尚未发出时移除插话并继续原任务。
-						if (!(error instanceof InitialContextBudgetError) || !steering.length) throw error;
-						ctx.rejectSteering?.(steering.map(({ id }) => id.slice('steer:'.length)));
+						if (!(error instanceof InitialContextBudgetError) || (!steering.length && !finishing)) throw error;
+						if (steering.length) ctx.rejectSteering?.(steering.map(({ id }) => id.slice('steer:'.length)));
+						if (finishing) {
+							await update({ status: 'done' });
+							break;
+						}
 						steering.length = 0;
 						response = await models.nextTurn(baseRequest, requestContext);
 					}
@@ -317,33 +286,25 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					const calls = truncated ? [] : response.toolCalls;
 					const content = outputSoFar === undefined ? response.content : newContinuationText(outputSoFar, response.content);
 					const finished = response.stopReason === 'end' && calls.length === 0;
-					const results = finished ? [...operations.values()] : [];
-					const attempted = new Set(results.map(({ path }) => path));
-					const missing = finished ? [...expected].filter(([path]) => !attempted.has(path)) : [];
-					const canRepair = missing.length && !repairPaths && state.turn < MAX_TURNS && callsRemaining > 0
-						&& [...written.keys()].some((path) => expected.has(path));
-					if (canRepair) {
-						const names = missing.map(([, name]) => name).join('、');
-						// 补写仍走原有的路径校验和批准流程，只收窄可写范围。
-						repairPaths = new Set(missing.map(([path]) => path));
-						repairPrompt = {
-							role: 'user',
-							content: `完成检查发现这些目标从未尝试写入：${names}。请按原任务要求只补做这些目标。保留其他笔记的现有改动，确认写入结果后再收尾。`,
-						};
-						outputSoFar = undefined;
-						await update({ messages: [...state.messages, assistantReply(state, response, `还未写入 ${names}，正在补做。\n\n`, false)] });
-						continue;
-					}
-					const outcome = finished ? taskOutcome(results, written, missing.map(([, name]) => name)) : undefined;
 					// 工具请求保留原始签名，修正后的纯文字用已拼接的正文回放。
 					const keepRaw = !truncated && (content === response.content || calls.length > 0);
 					if (calls.some((call) => !call.id) || new Set(calls.map((call) => call.id)).size !== calls.length) {
 						throw new Error('模型返回了无法配对的工具请求。');
 					}
+					if (finished && state.turn < MAX_TURNS) {
+						if (ctx.takeSteering) {
+							const pending = await readSteering();
+							if (pending.length) lateSteering = pending;
+						}
+						if (!lateSteering && !earlyEndCheck && outputSoFar === undefined && !response.content.trim() && mayHaveStoppedEarly(state.messages)) {
+							earlyEndCheck = 'pending';
+						}
+					}
+					const followUp = lateSteering !== undefined || earlyEndCheck === 'pending';
 					await update({
-						messages: [...state.messages, assistantReply(state, response, outcome?.content ?? content, keepRaw && !outcome?.content, calls)],
+						messages: [...state.messages, assistantReply(state, response, content, keepRaw, calls)],
 						pendingCalls: calls,
-						status: outcome?.status ?? state.status,
+						status: finished && !followUp ? 'done' : state.status,
 					});
 
 					if (truncated) {
@@ -358,6 +319,7 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					outputSoFar = undefined;
 					if (calls.length === 0) {
 						if (response.stopReason === 'tool-calls') throw new Error('模型结束了本轮，却没有给出完整的工具请求。');
+						if (followUp) continue;
 						break;
 					}
 					if (state.turn >= MAX_TURNS || calls.length > callsRemaining) {
@@ -376,10 +338,11 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					}
 
 					for await (const { call, result, skipped } of tools.runCalls(
-						state, resuming || repairPaths ? continuationContext : ctx, approve, skipContinuation,
+						state, requestContext, approve, resuming ? skipContinuation : undefined,
 					)) {
 						if (result.isError && signal.reason === pauseRun) signal.throwIfAborted();
-						await remember(call, result, skipped ? 'skipped' : undefined);
+						remember(call, result);
+						if (resuming && !skipped && !result.isError) await rememberResumeChange(call, 'current');
 						const message: Message = {
 							role: 'tool', content: result.content, toolCallId: call.id,
 							toolName: call.name, isError: result.isError, skipped: skipped || undefined,

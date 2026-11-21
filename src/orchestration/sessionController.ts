@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import type { App, FileSystemAdapter } from 'obsidian';
 import { conversationHistory } from './context/conversationHistory';
+import { reviewToolApproval } from './policies/approvalReview';
 import { createRunContext } from './runContext';
 import { canResumeRun, createResumeReview, pauseRun, ResumeThinkingUnavailable } from './runResume';
 import { chatModelKey } from './settings/thinking';
@@ -9,7 +10,7 @@ import { trackRun } from './storage/runTranscript';
 import { createTask } from './taskManager';
 import { MissingConversationError } from '../types';
 import type {
-	ConversationSnapshot, ConversationStore, ModelService, QueuedMessage, RunContext, RunObserver, RunState, RuntimeLayer, SavedRun, ScribeSettings, SessionController, Task, TaskRequest,
+	ConversationSnapshot, ConversationStore, ExecutionMode, ModelService, QueuedMessage, RunContext, RunObserver, RunState, RuntimeLayer, SavedRun, ScribeSettings, SessionController, Task, TaskRequest,
 } from '../types';
 
 interface Steering {
@@ -65,9 +66,10 @@ async function runTask(
 	selection: RunContext['model'],
 	signal: AbortSignal,
 	observer: RunObserver,
-	{ restored, replaceFromTaskId, sideRuns, queued, steering, rememberConversation = true }: {
+	{ restored, replaceFromTaskId, sideRuns, queued, steering, rememberConversation = true, executionMode, models }: {
 		restored?: { run: SavedRun; conversation: ConversationSnapshot }; replaceFromTaskId?: string; sideRuns?: SavedRun[];
 		queued?: { message: QueuedMessage; onStarted: () => void }; steering?: Steering; rememberConversation?: boolean;
+		executionMode?: ExecutionMode; models?: Pick<ModelService, 'send' | 'contextLimits'>;
 	} = {},
 ): Promise<RunState> {
 	const { providerId, model } = selection;
@@ -122,13 +124,19 @@ async function runTask(
 		try {
 			ctx = await createRunContext(task, {
 				cwd, model: selection, signal: runSignal, checkModel, observer: transcript.observed,
+				reviewTool: executionMode === 'auto-review' && models ? async (operation) => {
+					checkModel();
+					const allowed = await reviewToolApproval(models, selection, task.request, operation, runSignal);
+					checkModel();
+					return allowed;
+				} : undefined,
 				record: review ? (event) => review.record(event) : transcript.record, resumeReview: review?.review,
 				...(steering ? {
 					takeSteering: () => Array.from(steering.pending.values(), ({ message }) => message),
 					rejectSteering: (ids: string[]) => rejectSteering(steering, ids),
 				} : {}),
 				...(task.request.selection ? {} : conversationHistory(saved)),
-			}, app.vault.configDir, () => toolsEnabledAtStart && toolsEnabled(), Boolean(sideRuns));
+			}, app.vault.configDir, () => toolsEnabledAtStart && toolsEnabled(), Boolean(sideRuns), executionMode);
 		} finally {
 			if (!restored && ((!queued && replaceFromTaskId === undefined) || ctx)) {
 				if (replaceFromTaskId !== undefined || queued) {
@@ -173,6 +181,7 @@ export function createSessionController(
 	runtime: RuntimeLayer,
 	conversations: ConversationStore,
 	thinkingOptions?: ModelService['thinkingOptions'],
+	models?: Pick<ModelService, 'send' | 'contextLimits'>,
 ): SessionController {
 	const active = new Map<string, { conversationId: string; controller: AbortController; steering: Steering }>();
 	const deleting = new Set<string>();
@@ -291,17 +300,17 @@ export function createSessionController(
 				close,
 			};
 		},
-		submit(request, observer = {}, replaceFromTaskId, { model, rememberConversation } = {}) {
+		submit(request, observer = {}, replaceFromTaskId, { model, rememberConversation, executionMode } = {}) {
 			const selection = selectedModel(model);
 			const task = mainTask(request);
 			return launch(request.conversationId, task.id, (signal, steering) =>
-				runTask(task, app, settings, runtime, conversations, selection, signal, observer, { replaceFromTaskId, steering, rememberConversation }));
+				runTask(task, app, settings, runtime, conversations, selection, signal, observer, { replaceFromTaskId, steering, rememberConversation, executionMode, models }));
 		},
-		submitQueued(message, observer, onStarted, { model, rememberConversation } = {}) {
+		submitQueued(message, observer, onStarted, { model, rememberConversation, executionMode } = {}) {
 			const selection = selectedModel(model);
 			const task = mainTask(message.request);
 			return launch(message.request.conversationId, task.id, (signal, steering) =>
-				runTask(task, app, settings, runtime, conversations, selection, signal, observer, { queued: { message, onStarted }, steering, rememberConversation }));
+				runTask(task, app, settings, runtime, conversations, selection, signal, observer, { queued: { message, onStarted }, steering, rememberConversation, executionMode, models }));
 		},
 		canSteer(conversationId, taskId) {
 			const running = active.get(taskId);
@@ -318,7 +327,7 @@ export function createSessionController(
 				running.steering.pending.set(message.id, { message, resolve, reject });
 			});
 		},
-		resume(conversationId, taskId, observer = {}, { model, rememberConversation } = {}) {
+		resume(conversationId, taskId, observer = {}, { model, rememberConversation, executionMode } = {}) {
 			return launch(conversationId, taskId, async (signal, steering) => {
 				const conversation = await conversations.load(conversationId);
 				const run = conversation.runs.at(-1);
@@ -332,7 +341,7 @@ export function createSessionController(
 				}
 				const refs = run.request.refs.filter(({ path, addedExternal }) => !isAbsolute(path) || addedExternal === true);
 				const task = { ...createTask({ ...run.request, refs }), id: taskId };
-				return runTask(task, app, settings, runtime, conversations, run.model, signal, observer, { restored: { run, conversation }, steering, rememberConversation });
+				return runTask(task, app, settings, runtime, conversations, run.model, signal, observer, { restored: { run, conversation }, steering, rememberConversation, executionMode, models });
 			});
 		},
 		cancel(taskId) {

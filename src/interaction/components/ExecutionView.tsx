@@ -28,12 +28,13 @@ function turnAtScroll(column: HTMLDivElement | null, top: number) {
 
 export default function ExecutionView({
 	app, execution, history, loading, conversationId, liveRequest, liveModel, editingId, onEdit, onFork,
-	onQuoteSelection, temporary = false,
+	onQuoteSelection, onSideChatSelection, temporary = false, automaticReview = false,
 }: {
 	app: App; execution: ChatExecution; history: DisplayedRun[]; loading: boolean; conversationId: string | null;
 	liveRequest?: TaskRequest; liveModel?: SavedRun['model']; editingId?: string;
 	onEdit?: (taskId: string) => void; onFork?: (taskId: string) => void;
-	onQuoteSelection?: (quote: string) => void; temporary?: boolean;
+	onQuoteSelection?: (quote: string) => void; onSideChatSelection?: (quote: string) => void; temporary?: boolean;
+	automaticReview?: boolean;
 }) {
 	const text = uiText();
 	const scroll = useRef<HTMLDivElement>(null);
@@ -87,7 +88,7 @@ export default function ExecutionView({
 		<ChatTurn key={id} app={app} expanded={expanded} toggleExpanded={toggleExpanded} editing={editingId === id}
 			onEdit={onEdit && (() => onEdit(id))} onFork={onFork && (() => onFork(id))} readOnly={temporary} {...run} />);
 	if (execution.state) turns.push(<ChatTurn key={execution.state.taskId} app={app} execution={execution}
-		request={liveRequest} model={liveModel} expanded={expanded} toggleExpanded={toggleExpanded} readOnly={temporary} live />);
+		request={liveRequest} model={liveModel} expanded={expanded} toggleExpanded={toggleExpanded} readOnly={temporary} automaticReview={automaticReview} live />);
 
 	function jumpTo(id: string) {
 		const element = scroll.current;
@@ -122,8 +123,8 @@ export default function ExecutionView({
 					{loading ? <p className="scribe-chat-loading" role="status">{text.chatLoadingHistory}</p> : turns}
 				</div>
 			</div>
-			{!loading && onQuoteSelection && <TranscriptSelection key={conversationId} scroll={scroll}
-				content={content} onQuote={onQuoteSelection} />}
+			{!loading && (onQuoteSelection || onSideChatSelection) && <TranscriptSelection key={conversationId} scroll={scroll}
+				content={content} onQuote={onQuoteSelection} onSideChat={onSideChatSelection} />}
 			{!loading && entries.length > 1 && <TurnNavigator key={conversationId} entries={entries} current={current} onJump={jumpTo} />}
 			{!loading && away && (
 				<button type="button" className="scribe-chat-jump" aria-label={text.chatLatest} title={text.chatLatest} onClick={() => {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { replaceActiveTabPane } from '../chatTabWorkspace';
+import { executionModeKey, loadExecutionMode, replaceActiveTabPane } from '../chatTabWorkspace';
 
 interface TestPane {
 	conversation: { id: string; runs: unknown[]; queue?: unknown[] };
@@ -38,4 +38,18 @@ void test('a queued message keeps the previous conversation recoverable', () => 
 	assert.deepEqual(next.panes.map(({ conversation, open }) => [conversation.id, open]), [
 		['c', true], ['a', false],
 	]);
+});
+
+void test('execution mode records restore each conversation and the latest mode independently', () => {
+	const entries = new Map<string, unknown>([
+		[executionModeKey(), 'full-access'],
+		[executionModeKey('older'), 'auto-review'],
+		[executionModeKey('invalid'), { mode: 'full-access' }],
+	]);
+	const app = { loadLocalStorage: (key: string) => entries.get(key) };
+	assert.equal(loadExecutionMode(app), 'full-access');
+	assert.equal(loadExecutionMode(app, 'older'), 'auto-review');
+	assert.equal(loadExecutionMode(app, 'invalid'), 'ask');
+	assert.equal(loadExecutionMode(app, 'missing'), 'ask');
+	assert.equal(loadExecutionMode({ loadLocalStorage: () => { throw new SyntaxError('invalid local record'); } }), 'ask');
 });

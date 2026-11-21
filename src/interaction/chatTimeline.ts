@@ -8,7 +8,7 @@ export type ThinkingRow = {
 export type ToolRow = { kind: 'tool'; id: string; call: ToolCall; result?: ToolResult; skipped?: boolean; resolved?: boolean };
 export type NoticeRow = {
 	kind: 'notice'; id: string;
-	code: 'reconnect' | 'connection' | 'context' | 'skipped' | 'partial' | 'failed' | 'cancelled' | 'interrupted' | 'limit';
+	code: 'reconnect' | 'connection' | 'context' | 'skipped' | 'failed' | 'cancelled' | 'interrupted' | 'limit';
 	tone: 'info' | 'warning' | 'error'; detail?: string; resolved?: boolean; messageId?: string;
 };
 export type TimelineItem = TextRow | ThinkingRow | ToolRow | NoticeRow;
