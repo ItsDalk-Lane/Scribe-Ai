@@ -8,6 +8,7 @@ import { ContextOverflowError } from '../../types';
 import type { CredentialStore, Message, RunContext, SavedRun, Transport } from '../../types';
 import { createContextBuilder, inputBytes } from '../context/contextBuilder';
 import { conversationHistory } from '../context/conversationHistory';
+import { shrinkToolResults } from '../context/toolResultBudget';
 
 const context = createContextBuilder({ all: () => [], find: () => undefined });
 
@@ -68,6 +69,19 @@ void test('saved timing and usage do not consume the outgoing message budget', a
 	assert.equal(inputBytes(withDisplay), available);
 });
 
+void test('a long shell result keeps its final diagnostic within the model budget', async () => {
+	const messages: Message[] = [
+		current[0]!,
+		{ role: 'assistant', content: '', toolCalls: [{ id: 'shell', name: 'Bash', input: { command: 'run' } }] },
+		{ role: 'tool', toolCallId: 'shell', toolName: 'Bash', shellStatus: 'failed', isError: true,
+			content: '退出状态 7\n' + '输出'.repeat(10_000) + '\n最后一行报错' },
+	];
+	const budget = 5_000;
+	const request = await context.build(runContext(), messages, budget);
+	assert.ok(inputBytes(request) <= budget);
+	assert.match(request.messages.at(-1)?.content ?? '', /^退出状态 7[\s\S]*中间已缩短[\s\S]*最后一行报错$/);
+});
+
 void test('dropped chat turns still carry explicit user agreements in order and within the budget', async () => {
 	const original = '先约定：只改正文，保留原标题。';
 	const newer = '更新之前的约定：附录也可以改。';
@@ -102,9 +116,7 @@ void test('dropped chat turns still carry explicit user agreements in order and 
 
 	const fits = await context.build(ctx, next, 50_000);
 	assert.equal(fits.messages[0]?.content, ctx.history?.[0]?.content);
-	const selection = runs[1]!.request.selection;
-	const isolated = { ...ctx, task: { ...ctx.task, request: { ...ctx.task.request, selection } } };
-	assert.deepEqual((await context.build(isolated, next, 5_000)).messages, next);
+	assert.doesNotMatch(JSON.stringify(fits), /SELECTION-ONLY|选区回复/u);
 });
 
 void test('an oversized partial response leaves its ending and continuation instruction in the request', async () => {
@@ -118,6 +130,29 @@ void test('an oversized partial response leaves its ending and continuation inst
 	assert.doesNotMatch(request.messages[1]?.content ?? '', /DISCARDED-START/);
 	assert.equal(request.messages[2], continuation);
 	assert.match(partial.content, /^DISCARDED-START/);
+});
+
+void test('manual compaction supplies the saved summary to the next model request', async () => {
+	const prior: SavedRun = {
+		request: { conversationId: 'context-test', instruction: '尚未经整理的原始对话', refs: [] },
+		model: runContext().model,
+		state: { taskId: 'compacted', turn: 1, status: 'done', pendingCalls: [], messages: [
+			{ role: 'user', content: '尚未经整理的原始对话' },
+			{ role: 'assistant', content: '已确认代号青鹭-481，预算 42 元。' },
+		] },
+	};
+	const ctx = { ...runContext(), ...conversationHistory({
+		id: 'context-test', runs: [prior],
+		manualCompaction: { throughTaskId: 'compacted', text: '代号青鹭-481，预算 42 元。' },
+	}) };
+	const next: Message = { role: 'user', content: '代号和预算是多少？' };
+	const request = await context.build(ctx, [next], 8_000);
+	assert.equal(request.messages.length, 1);
+	assert.equal(request.messages[0]?.role, 'user');
+	assert.match(request.messages[0]?.content ?? '', /^代号和预算是多少？[\s\S]*仅供参考[\s\S]*代号青鹭-481，预算 42 元/u);
+	assert.doesNotMatch(JSON.stringify(request), /尚未经整理的原始对话/u);
+	const budget = inputBytes(await context.build(runContext(), [next], 8_000));
+	assert.deepEqual((await context.build(ctx, [next], budget)).messages, [next]);
 });
 
 void test('an explicit provider overflow retries once with less history and no lost tool result', async () => {
@@ -180,4 +215,58 @@ void test('a model settings change after overflow prevents a retry from preparin
 	}, context);
 	await assert.rejects(models.nextTurn({ ...createRunState(ctx), messages: current }, ctx), /连接设置已变更/);
 	assert.equal(attempts, 1);
+});
+
+void test('the total tool budget shortens old results first while preserving sources, diagnostics and writes', () => {
+	const source = 'Folder/Note.md（第 3–92 行）';
+	const retrieve = '（已省略 90000 字节。完整结果：/tmp/scribe/result.txt。用 Read 工具按 offset/limit 读取，或用 Grep 搜索。）';
+	const note: Message = { role: 'tool', toolName: 'Read', toolCallId: 'read', content: `${source}\n3\t${'🧪'.repeat(800)}` };
+	const search: Message = { role: 'tool', toolName: 'Grep', toolCallId: 'grep', content: `${'search '.repeat(300)}\n\n${retrieve}` };
+	const written: Message = { role: 'tool', toolName: 'Edit', toolCallId: 'edit', content: '已更新 Folder/Note.md。' };
+	const failed: Message = { role: 'tool', toolName: 'Bash', toolCallId: 'bash', isError: true, shellStatus: 'failed',
+		content: `命令退出状态 7。\n${'log '.repeat(800)}\n最后一行报错：超时。` };
+	const history = [note, search];
+	const active = [written, failed];
+	const size = (message: Message) => Buffer.byteLength(JSON.stringify(message));
+	const total = [...history, ...active].reduce((sum, message) => sum + size(message), 0);
+	const moderate = shrinkToolResults(history, active, total - 100, 1, size);
+	assert.equal(moderate.shortened, 1);
+	assert.notEqual(moderate.history[0], note);
+	assert.equal(moderate.history[1], search);
+	assert.deepEqual(moderate.current, active);
+	assert.match(moderate.history[0]!.content, /^Folder\/Note\.md（第 3–92 行）/u);
+	assert.doesNotMatch(moderate.history[0]!.content, /[\uD800-\uDFFF]/u);
+
+	const budget = 1_150;
+	const tight = shrinkToolResults(history, active, budget, 1, size);
+	assert.equal(tight.shortened, 3);
+	assert.ok([...tight.history, ...tight.current].reduce((sum, message) => sum + size(message), 0) <= budget);
+	assert.equal(tight.history[1]?.toolCallId, 'grep');
+	assert.ok(tight.history[1]?.content.endsWith(retrieve));
+	assert.equal(tight.current[0], written);
+	assert.equal(tight.current[1]?.toolCallId, 'bash');
+	assert.match(tight.current[1]?.content ?? '', /^命令退出状态 7。[\s\S]*中间已缩短[\s\S]*最后一行报错：超时。$/u);
+	assert.doesNotMatch(note.content, /已缩短/u);
+	assert.doesNotMatch(failed.content, /中间已缩短/u);
+});
+
+void test('trimming aggregate tool output avoids a summary when the whole task then fits', async () => {
+	const older: Message[] = [
+		{ role: 'assistant', content: '', toolCalls: [{ id: 'old', name: 'Read', input: { file_path: 'old.md' } }] },
+		{ role: 'tool', toolCallId: 'old', toolName: 'Read', content: 'old.md（第 1–20 行）\n' + '旧'.repeat(9_000) },
+	];
+	const ctx = runContext();
+	ctx.runCompaction = { summarize: async () => assert.fail('压短工具输出后应保留完整批次，无需另发摘要请求') };
+	const compactions: RunContext['record'] = async (event) => {
+		if (event.type !== 'context-compaction') return;
+		assert.equal(event.compaction.droppedCurrent, 0);
+		assert.equal(event.compaction.shortenedToolResults, 1);
+		assert.equal(event.compaction.summary, 'none');
+	};
+	ctx.record = compactions;
+	const request = await context.build(ctx, [current[0]!, ...older, ...current.slice(1)], 8_000);
+	assert.ok(inputBytes(request) <= 8_000);
+	assert.deepEqual(request.messages.map(({ role }) => role), ['user', 'assistant', 'tool', 'assistant', 'tool']);
+	assert.match(request.messages[2]!.content, /^old\.md（第 1–20 行）[\s\S]*重新读取/u);
+	assert.equal(request.messages.at(-1), current.at(-1));
 });
