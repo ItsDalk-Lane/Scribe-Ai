@@ -1,0 +1,96 @@
+import { getLanguage } from 'obsidian';
+
+const EN = {
+	tab: 'Subagents',
+	mode: 'Delegation',
+	modeDescription: 'Automatic mode starts clearly independent work separately. Subagents make their own model requests, which may increase usage.',
+	auto: 'Automatic',
+	explicit: 'Only when requested',
+	off: 'Off',
+	concurrency: 'Parallel subagent limit',
+	depth: 'Delegation depth',
+	depthDescription: 'At 1, only the main agent can delegate. At 2, its subagents can delegate one level further.',
+	roles: 'Subagent roles',
+	builtIn: 'Built-in',
+	addRole: 'Add role',
+	editRole: 'Edit role',
+	removeRole: 'Remove role',
+	removeRoleQuestion: 'Remove the custom configuration for {role}?',
+	roleName: 'Role name',
+	roleDescription: 'When to use this role',
+	roleInstructions: 'Instructions for this role',
+	invalidRole: 'Enter a description and instructions. Start the name with a lowercase letter and use lowercase letters, digits, underscores or hyphens.',
+	duplicateRole: 'A custom role already uses this name.',
+	readOnly: 'Read-only role',
+	readOnlyDescription: 'Allow this role to read and search material.',
+	inheritedModel: 'Use the main agent’s model',
+	defaultEffort: 'Use the model default',
+	unavailableModel: 'Model unavailable',
+	providerNotice: 'This role may send its task and assigned material to {provider}.',
+} as const;
+
+type SubagentSettingsText = Record<keyof typeof EN, string>;
+
+const ZH: SubagentSettingsText = {
+	tab: '子 Agent',
+	mode: '分工方式',
+	modeDescription: '自动分工会把可各自完成的复杂工作分开处理。子 Agent 会各自调用模型，可能增加用量。',
+	auto: '自动分工',
+	explicit: '仅在要求时分工',
+	off: '关闭',
+	concurrency: '并行子 Agent 上限',
+	depth: '分工层数',
+	depthDescription: '设为 1 时，只有主 Agent 可以分工。设为 2 时，子 Agent 可以再分一层。',
+	roles: '子 Agent 角色',
+	builtIn: '内置',
+	addRole: '添加角色',
+	editRole: '编辑角色',
+	removeRole: '移除角色',
+	removeRoleQuestion: '移除 {role} 的自定义配置？',
+	roleName: '角色名称',
+	roleDescription: '何时使用此角色',
+	roleInstructions: '角色指令',
+	invalidRole: '请填写用途和指令。名称以小写字母开头，可用小写字母、数字、下划线和连字符。',
+	duplicateRole: '已有自定义角色使用此名称。',
+	readOnly: '只读角色',
+	readOnlyDescription: '允许此角色读取和搜索资料。',
+	inheritedModel: '沿用主 Agent 的模型',
+	defaultEffort: '使用模型默认档位',
+	unavailableModel: '模型已不可用',
+	providerNotice: '此角色可能把分配的任务和资料发送给 {provider}。',
+};
+
+const ZH_TW: SubagentSettingsText = {
+	tab: '子 Agent',
+	mode: '分工方式',
+	modeDescription: '自動分工會把可各自完成的複雜工作分開處理。子 Agent 會各自呼叫模型，可能增加用量。',
+	auto: '自動分工',
+	explicit: '僅在要求時分工',
+	off: '關閉',
+	concurrency: '並行子 Agent 上限',
+	depth: '分工層數',
+	depthDescription: '設為 1 時，只有主 Agent 可以分工。設為 2 時，子 Agent 可以再分一層。',
+	roles: '子 Agent 角色',
+	builtIn: '內建',
+	addRole: '新增角色',
+	editRole: '編輯角色',
+	removeRole: '移除角色',
+	removeRoleQuestion: '移除 {role} 的自訂設定？',
+	roleName: '角色名稱',
+	roleDescription: '何時使用此角色',
+	roleInstructions: '角色指示',
+	invalidRole: '請填寫用途和指示。名稱以小寫字母開頭，可用小寫字母、數字、底線和連字號。',
+	duplicateRole: '已有自訂角色使用此名稱。',
+	readOnly: '唯讀角色',
+	readOnlyDescription: '允許此角色讀取和搜尋資料。',
+	inheritedModel: '沿用主 Agent 的模型',
+	defaultEffort: '使用模型預設等級',
+	unavailableModel: '模型已無法使用',
+	providerNotice: '此角色可能把分配的任務和資料傳送給 {provider}。',
+};
+
+export function subagentSettingsText(): SubagentSettingsText {
+	const language = getLanguage().toLowerCase();
+	if (language.startsWith('zh-tw') || language.startsWith('zh-hk') || language.startsWith('zh-hant')) return ZH_TW;
+	return language.startsWith('zh') ? ZH : EN;
+}
