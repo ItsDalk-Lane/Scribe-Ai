@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { appendFile, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
-import type { ConversationEntry, Message, QueuedMessage } from '../../types';
+import type { ConversationEntry, Message, QueuedMessage, SubagentRecord } from '../../types';
 import { createConversationStore } from '../storage/conversationStore';
+import { replayConversation } from '../storage/taskStore';
+import { conversationHistory } from '../context/conversationHistory';
 
 async function fixture(context: TestContext) {
 	const directory = await mkdtemp(join(tmpdir(), 'scribe-conversation-'));
@@ -13,7 +15,7 @@ async function fixture(context: TestContext) {
 	return { directory, store: createConversationStore(directory) };
 }
 
-function start(conversationId: string, id: string, instruction: string): ConversationEntry {
+function start(conversationId: string, id: string, instruction: string): Extract<ConversationEntry, { type: 'start' }> {
 	return {
 		type: 'start',
 		task: {
@@ -24,13 +26,132 @@ function start(conversationId: string, id: string, instruction: string): Convers
 	};
 }
 
-function messages(taskId: string, ...items: Message[]): ConversationEntry {
+function messages(taskId: string, ...items: Message[]): Extract<ConversationEntry, { type: 'messages' }> {
 	return { type: 'messages', taskId, messages: items };
 }
 
 function queued(conversationId: string, id: string, instruction: string): QueuedMessage {
 	return { id, request: { conversationId, instruction, refs: [] } };
 }
+
+function subagent(agentId: string, record: SubagentRecord): Extract<ConversationEntry, { type: 'subagent' }> {
+	return { type: 'subagent', agentId, record };
+}
+
+void test('subagent results stay separate from the main chat and a fork keeps only the recorded prefix', async (t) => {
+	const { directory, store } = await fixture(t);
+	const id = 'subagent-chat';
+	const parent = start(id, 'main', '查找并归纳资料');
+	const worker = start(id, 'child-run', '检查读书笔记');
+	await store.append(id, [parent, subagent('scout', { kind: 'create', agent: {
+		id: 'scout', rootTaskId: parent.task.id, name: '查找资料', role: 'explorer', model: worker.model,
+	} }), subagent('scout', { kind: 'run', entry: worker }),
+	subagent('scout', { kind: 'run', entry: messages(worker.task.id, { role: 'user', content: '检查读书笔记' }) }),
+	{ type: 'finish', taskId: parent.task.id, status: 'done', turn: 1 }]);
+	await store.append(id, [start(id, 'next', '另一个问题')]);
+	await store.append(id, [
+		subagent('scout', { kind: 'run', entry: messages(worker.task.id, { role: 'assistant', content: '后台结论' }) }),
+		subagent('scout', { kind: 'run', entry: { type: 'finish', taskId: worker.task.id, status: 'done', turn: 1 } }),
+		subagent('scout', { kind: 'note', note: { id: 'report', from: 'scout', to: 'root', text: '后台结论', kind: 'result' } }),
+		subagent('scout', { kind: 'delivered', ids: ['report'] }),
+	]);
+
+	const reopened = createConversationStore(directory);
+	const original = await reopened.load(id);
+	assert.deepEqual(original.runs.map(({ state }) => state.taskId), ['main', 'next']);
+	assert.equal(original.runs[0]?.state.messages.length, 0);
+	const childRuns = async (conversationId: string) => {
+		const saved = (await reopened.load(conversationId)).subagents ?? [];
+		return (await replayConversation(conversationId, saved.flatMap(({ record }) => record.kind === 'run' ? [record.entry] : []))).runs;
+	};
+	assert.equal((await childRuns(id))[0]?.state.messages.at(-1)?.content, '后台结论');
+	const branch = await reopened.fork(id, 'main');
+	const [branchedWorker] = await childRuns(branch.id);
+	assert.equal(branchedWorker?.state.status, 'interrupted');
+	assert.equal(branchedWorker?.request.conversationId, branch.id);
+	assert.deepEqual(branchedWorker?.state.messages.map(({ content }) => content), ['检查读书笔记']);
+	assert.equal(branch.subagents?.some(({ record }) => record.kind === 'note'), false);
+
+	await reopened.replaceFrom(id, 'main', [start(id, 'replacement', '更换原任务')]);
+	await assert.rejects(store.append(id, [subagent('scout', { kind: 'visibility', closed: true })]), /不属于此对话/);
+	assert.equal((await reopened.load(id)).subagents, undefined);
+	assert.equal((await childRuns(branch.id)).length, 1);
+});
+
+void test('a rejected subagent record leaves the whole append batch unwritten', async (t) => {
+	const { store } = await fixture(t);
+	const parent = start('primary', 'parent-task', '查询资料');
+	const scout = subagent('scout', { kind: 'create', agent: { id: 'scout', rootTaskId: parent.task.id,
+		name: '资料搜索', role: 'explorer', model: parent.model } });
+	await store.append('primary', [parent]);
+	await assert.rejects(store.append('other', [scout]), /所属任务无效/);
+	await assert.rejects(store.append('primary', [scout, subagent('scout', { kind: 'run', entry: start('other', 'child', '误投') })]),
+		/不属于此对话/);
+	assert.equal((await store.load('primary')).subagents, undefined);
+	await store.append('primary', [scout, subagent('scout', { kind: 'run', entry: start('primary', 'child', '查找') })]);
+	await assert.rejects(store.append('primary', [subagent('scout', { kind: 'delivered', ids: ['missing'] })]), /找不到/);
+	assert.equal((await store.load('primary')).subagents?.length, 2);
+	await store.append('primary', [subagent('reader', { kind: 'create', agent: { id: 'reader', parentId: 'scout',
+		rootTaskId: parent.task.id, name: '阅读资料', role: 'explorer', model: parent.model } }),
+	subagent('reader', { kind: 'note', note: { id: 'nested-result', from: 'reader', to: 'scout', text: '子任务结论', kind: 'result' } }),
+	subagent('reader', { kind: 'delivered', ids: ['nested-result'] })]);
+	assert.equal((await store.load('primary')).subagents?.length, 5);
+});
+
+void test('an automatic report is saved once after its receipt and all its child runs finish', async (t) => {
+	const { directory, store } = await fixture(t);
+	const id = 'automatic-report';
+	const main = start(id, 'main', '分别整理两个主题');
+	const agents = ['agent-one', 'agent-two'];
+	await store.append(id, [main, ...agents.flatMap((agentId) => [
+		subagent(agentId, { kind: 'create', agent: {
+			id: agentId, rootTaskId: main.task.id, name: agentId, role: 'default', model: main.model,
+		} }),
+		subagent(agentId, { kind: 'run', entry: start(id, `work-${agentId}`, '整理主题') }),
+	])]);
+	const sendReport: ConversationEntry = { type: 'subagent-report', taskId: main.task.id,
+		report: { content: '## 主题一\n\n第一份结果\n\n## 主题二\n\n第二份结果', sentAt: 10 } };
+	const receipt = (deliveryAgents: string[]) =>
+		messages(main.task.id, { role: 'assistant', content: '已收到。', local: true, deliveryAgents });
+	await assert.rejects(store.append(id, [receipt([agents[0]!, agents[0]!])]), /收件确认的格式无效/);
+	await assert.rejects(store.append(id, [messages(main.task.id, { role: 'assistant', content: '未授权', deliveryAgents: agents })]),
+		/收件确认的格式无效/);
+	await assert.rejects(store.append(id, [receipt(['missing'])]), /关联的后台任务无效/);
+	await store.append(id, [receipt(agents)]);
+	const finish = (agentId: string) => subagent(agentId, { kind: 'run',
+		entry: { type: 'finish', taskId: `work-${agentId}`, status: 'done', turn: 1 } });
+	await store.append(id, [finish(agents[0]!)]);
+	await assert.rejects(store.append(id, [sendReport]), /任务或记录顺序无效/);
+	await store.append(id, [{ type: 'finish', taskId: main.task.id, status: 'done', turn: 0, finishedAt: 4 }]);
+	await assert.rejects(store.append(id, [sendReport]), /任务或记录顺序无效/);
+
+	// 下一轮已经开始时，报告仍回到最初给出收件确认的任务。
+	const later = start(id, 'later', '另一个问题');
+	await store.append(id, [later, finish(agents[1]!)]);
+	await assert.rejects(store.append(id, [{ ...sendReport, report: { content: ' ', sentAt: 10 } }]), /回传的格式无效/);
+	await assert.rejects(store.append('other-chat', [sendReport]), /任务或记录顺序无效/);
+	await assert.rejects(store.append(id, [subagent(agents[0]!, { kind: 'run', entry: sendReport } as unknown as SubagentRecord)]),
+		/子 Agent 记录格式无效/);
+	const results = await Promise.allSettled([store.append(id, [sendReport]), store.append(id, [sendReport])]);
+	assert.deepEqual(results.map(({ status }) => status), ['fulfilled', 'rejected']);
+
+	const reopened = createConversationStore(directory);
+	const [first, second] = (await reopened.load(id)).runs;
+	assert.equal(first?.state.status, 'done');
+	assert.equal(first?.state.finishedAt, 4);
+	assert.deepEqual(first?.state.messages[0]?.deliveryAgents, agents);
+	assert.deepEqual(first?.subagentReport, sendReport.report);
+	assert.equal(second?.subagentReport, undefined);
+
+	const prefix = await reopened.fork(id, main.task.id);
+	assert.equal(prefix.runs[0]?.subagentReport, undefined);
+	const branch = await reopened.fork(id, later.task.id);
+	assert.deepEqual(branch.runs[0]?.subagentReport, sendReport.report);
+	await reopened.replaceFrom(id, main.task.id, [start(id, 'replacement', '更换原任务')]);
+	await assert.rejects(store.append(id, [sendReport]), /任务或记录顺序无效/);
+	assert.equal((await reopened.load(id)).runs[0]?.subagentReport, undefined);
+	assert.deepEqual((await reopened.load(branch.id)).runs[0]?.subagentReport, sendReport.report);
+});
 
 void test('saved conversations can be listed, reopened and appended independently', async (t) => {
 	const { directory, store } = await fixture(t);
@@ -84,6 +205,171 @@ void test('renaming keeps the original transcript and ordering, and deletion rem
 	await reopened.delete('second');
 	assert.equal(await reopened.lastOpened(), undefined);
 	assert.deepEqual(await readdir(directory), []);
+});
+
+void test('history summaries follow the saved conversation prefix when reopening, forking or editing', async (t) => {
+	const { directory, store } = await fixture(t);
+	const id = 'history-summary';
+	const summary = { throughTaskId: 'earlier', text: '确认周五发布，出处 [[项目/会议.md]]。' };
+	await store.append(id, [
+		start(id, 'earlier', '确认周五发布'),
+		messages('earlier', { role: 'user', content: '确认周五发布' }),
+		{ type: 'finish', taskId: 'earlier', status: 'done', turn: 1 },
+		start(id, 'summarized', '继续核对'),
+		{ type: 'history-summary', taskId: 'summarized', summary },
+		{ type: 'finish', taskId: 'summarized', status: 'done', turn: 1 },
+	]);
+	const reopened = createConversationStore(directory);
+	assert.deepEqual((await reopened.load(id)).runs[1]?.historySummary, summary);
+	assert.deepEqual((await reopened.load(id)).runs[0]?.state.messages.map(({ content }) => content), ['确认周五发布']);
+	assert.equal((await reopened.fork(id, 'earlier')).runs[0]?.historySummary, undefined);
+	const branch = await reopened.fork(id, 'summarized');
+	assert.deepEqual((await reopened.load(branch.id)).runs[1]?.historySummary, summary);
+	await reopened.replaceFrom(id, 'earlier', [start(id, 'revised', '改为周一发布')]);
+	assert.doesNotMatch(await readFile(join(directory, `${id}.jsonl`), 'utf8'), /周五发布/u);
+	assert.equal((await reopened.load(id)).runs[0]?.historySummary, undefined);
+});
+
+void test('archive can be reversed and manual compaction follows the saved fork boundary', async (t) => {
+	const { directory, store } = await fixture(t);
+	const id = 'manual-compaction';
+	const summary = { throughTaskId: 'middle', text: '已确定周五发布。' };
+	await store.append(id, [
+		start(id, 'old', '过时记录'), messages('old', { role: 'user', content: '过时记录' }),
+		{ type: 'finish', taskId: 'old', status: 'done', turn: 1 },
+		start(id, 'middle', '周五发布'), messages('middle', { role: 'user', content: '周五发布' }),
+		{ type: 'finish', taskId: 'middle', status: 'done', turn: 1 },
+		start(id, 'new', '新内容'), messages('new', { role: 'user', content: '新内容' }),
+	]);
+	await store.saveManualCompaction(id, summary);
+	await store.setArchived(id, true);
+	const reopened = createConversationStore(directory);
+	assert.equal((await reopened.list())[0]?.archived, true);
+	const original = await reopened.load(id);
+	assert.equal(original.runs.length, 3);
+	assert.deepEqual(original.manualCompaction, summary);
+	const { history, manualSummary } = conversationHistory(original);
+	assert.doesNotMatch(JSON.stringify(history), /过时记录/u);
+	assert.match(JSON.stringify(history), /新内容/u);
+	assert.equal(manualSummary, summary.text);
+	assert.equal((await reopened.fork(id, 'old')).manualCompaction, undefined);
+	const branch = await reopened.fork(id, 'middle');
+	assert.deepEqual((await reopened.load(branch.id)).manualCompaction, summary);
+	await reopened.setArchived(id, false);
+	assert.equal((await reopened.list()).find((row) => row.id === id)?.archived, undefined);
+	await reopened.replaceFrom(id, 'middle', [start(id, 'revised', '改为周一发布')]);
+	assert.equal((await reopened.load(id)).manualCompaction, undefined);
+});
+
+void test('history summaries reject oversized text and references to a later task', async (t) => {
+	const { store } = await fixture(t);
+	const id = 'invalid-summary';
+	await store.append(id, [
+		start(id, 'earlier', '早期问题'),
+		start(id, 'later', '后面的提问'),
+		{ type: 'history-summary', taskId: 'earlier', summary: { throughTaskId: 'later', text: '' } },
+	]);
+	await assert.rejects(store.load(id), /摘要超出原对话范围/u);
+	const large = '超'.repeat(1_370);
+	await store.append('oversized-summary', [
+		start('oversized-summary', 'first', '早期问题'),
+		start('oversized-summary', 'second', '后面的提问'),
+		{ type: 'history-summary', taskId: 'second', summary: { throughTaskId: 'first', text: large } },
+	]);
+	await assert.rejects(store.load('oversized-summary'), /第 3 行/u);
+});
+
+void test('completed shell jobs survive reopening in their original conversation', async (t) => {
+	const { directory, store } = await fixture(t);
+	const original = 'job-chat';
+	const other = 'other-chat';
+	const bash = {
+		id: 'b50b8242-cd9d-46d7-ad51-8ad38fcabb05', name: 'Bash', status: 'success',
+		command: 'printf 原始首行；printf 原始末行', startedAt: 1_700_000_000_000,
+		finishedAt: 1_700_000_602_000, exitCode: 0,
+		content: '原始首行\n…（命令输出中间已截断）\n原始末行',
+	} as const;
+	const powershell = {
+		id: 'dc214397-3260-493d-8558-cbf77304f7ff', name: 'PowerShell', status: 'timed-out',
+		command: 'Write-Output 起始输出；Write-Error 末尾诊断', startedAt: 1_700_000_000_000,
+		finishedAt: 1_700_000_600_000, exitCode: null,
+		content: '命令已超时。\n起始输出\n…（命令输出中间已截断）\n末尾诊断',
+	} as const;
+	const separate = { ...bash, id: 'a22cc5cd-2681-474d-93a0-519081a821a0', content: '另一聊天的结果' };
+	await store.append(original, [start(original, 'launch', '运行后台任务')]);
+	await store.append(other, [start(other, 'other-task', '另一聊天')]);
+	await Promise.all([
+		store.shellJobHistory.save(original, bash),
+		store.shellJobHistory.save(original, powershell),
+		store.shellJobHistory.save(other, separate),
+	]);
+
+	const reopened = createConversationStore(directory);
+	const originalJobs = async () => new Map((await reopened.shellJobHistory.list(original)).map((job) => [job.id, job]));
+	const expected = new Map<string, typeof bash | typeof powershell>([[bash.id, bash], [powershell.id, powershell]]);
+	assert.deepEqual(await originalJobs(), expected);
+	assert.deepEqual(await reopened.shellJobHistory.list(other), [separate]);
+	const branch = await reopened.fork(original, 'launch');
+	assert.deepEqual(await reopened.shellJobHistory.list(branch.id), []);
+	await reopened.rename(original, '后台结果');
+	await reopened.replaceFrom(original, 'launch', [start(original, 'edited', '改写后的任务')]);
+	assert.deepEqual(await originalJobs(), expected);
+
+	await reopened.delete(original);
+	assert.deepEqual(await createConversationStore(directory).shellJobHistory.list(original), []);
+	await assert.rejects(store.shellJobHistory.save(original, bash), /已删除/);
+	assert.deepEqual(await reopened.shellJobHistory.list(other), [separate]);
+});
+
+void test('shell job read state survives reopening and concurrent writes in the original conversation', async (t) => {
+	const { directory, store } = await fixture(t);
+	const owner = 'job-owner';
+	const other = 'other-job-owner';
+	const legacy = {
+		id: 'b50b8242-cd9d-46d7-ad51-8ad38fcabb05', name: 'Bash', status: 'success', content: '旧结果',
+	} as const;
+	const viewed = {
+		id: 'dc214397-3260-493d-8558-cbf77304f7ff', name: 'PowerShell', status: 'failed',
+		content: '原始首行\n…（命令输出中间已截断）\n最后的报错',
+	} as const;
+	const pending = { ...legacy, id: 'a22cc5cd-2681-474d-93a0-519081a821a0', unread: true } as const;
+	const separate = { ...pending, id: 'e999f2ae-8577-430a-a2ba-197d88023cdb' };
+	const stillUnread = { ...pending, id: 'abda5163-d0b2-47f3-acc4-51027cac2578' };
+	await store.append(owner, [start(owner, 'one', '运行后台任务')]);
+	await store.append(other, [start(other, 'two', '另一聊天')]);
+	await Promise.all([
+		store.shellJobHistory.save(owner, legacy),
+		store.shellJobHistory.save(owner, { ...viewed, unread: true }),
+		store.shellJobHistory.save(owner, stillUnread),
+		store.shellJobHistory.save(other, separate),
+	]);
+	const open = () => createConversationStore(directory).shellJobHistory;
+	const unreadChats = async () => (await createConversationStore(directory).list())
+		.filter(({ unreadResult }) => unreadResult).map(({ id }) => id).sort();
+	const reopened = open();
+	assert.deepEqual(await unreadChats(), [other, owner].sort());
+	await reopened.markRead(other, viewed.id);
+	assert.deepEqual(await reopened.list(owner), [legacy, { ...viewed, unread: true }, stillUnread]);
+	await Promise.all([
+		reopened.markRead(owner, viewed.id.toUpperCase()),
+		store.shellJobHistory.save(owner, pending),
+		store.shellJobHistory.markRead(owner, viewed.id),
+	]);
+	assert.deepEqual(await open().list(owner), [legacy, viewed, stillUnread, pending]);
+	assert.deepEqual(await open().list(other), [separate]);
+	await reopened.markRead(owner, pending.id);
+	assert.deepEqual(await unreadChats(), [other, owner].sort());
+	await reopened.markRead(owner, stillUnread.id);
+	assert.deepEqual(await unreadChats(), [other]);
+
+	await Promise.all([store.delete(owner), reopened.markRead(owner, pending.id)]);
+	await reopened.markRead('missing-chat', separate.id);
+	assert.deepEqual(await open().list(owner), []);
+	assert.deepEqual((await readdir(directory)).sort(), [`${other}.jsonl`, `${other}.shell-jobs.json`]);
+	await writeFile(join(directory, `${other}.shell-jobs.json`), '{');
+	const [row] = await createConversationStore(directory).list();
+	assert.equal(row?.id, other);
+	assert.equal(row?.unreadResult, undefined);
 });
 
 void test('a torn tail cannot hide a completed result or revive a pending approval', async (t) => {

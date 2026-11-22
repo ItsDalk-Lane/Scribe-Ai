@@ -2,22 +2,26 @@ import { Notice } from 'obsidian';
 import type { App } from 'obsidian';
 import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { RunStep, SavedRun, TaskRequest } from '../../types';
-import { abbreviatedNumber, completedMessages, messageTime, usageTotals } from '../chatMetrics';
+import type { RunStep, SavedRun, SubagentSnapshot, TaskRequest } from '../../types';
+import { abbreviatedNumber, completedMessages, messageTime, runUsage } from '../chatMetrics';
 import { chatTurnContent } from '../chatTurnContent';
 import type { NoticeRow, TimelineItem } from '../chatTimeline';
 import type { ChatExecution } from '../context';
+import { collaborationRows } from '../subagentTimeline';
+import { subagentUiText } from '../subagentUiText';
 import { actionTarget } from '../toolCardDetails';
 import { uiText } from '../uiText';
 import ActivityDisclosure from './ActivityDisclosure';
 import AnswerContent from './AnswerContent';
 import ChatIcon from './ChatIcon';
 import ChatMarkdown from './ChatMarkdown';
+import CollaborationActivity from './CollaborationActivity';
 import { chatDuration, UsagePopover } from './ChatMetrics';
+import type { InspectSubagent } from './SubagentsPanel';
 import { ToolActivityGroup, ToolActivityRow } from './ToolActivityRow';
 import WorkingRow from './WorkingRow';
 
-type SubmittedPrompt = Pick<TaskRequest, 'instruction' | 'refs' | 'selection' | 'chatQuotes'>;
+type SubmittedPrompt = Pick<TaskRequest, 'instruction' | 'refs' | 'selection' | 'chatQuotes' | 'skillMentions'>;
 
 function Timestamp({ timestamp }: { timestamp?: number }) {
 	if (!timestamp) return null;
@@ -30,7 +34,7 @@ function Timestamp({ timestamp }: { timestamp?: number }) {
 	</time>;
 }
 
-function UserMessage({ app, content, request, timestamp, editing, onEdit, readOnly }: {
+export function UserMessage({ app, content, request, timestamp, editing, onEdit, readOnly }: {
 	app: App; content: string; request?: SubmittedPrompt; timestamp?: number; editing?: boolean; onEdit?: () => void; readOnly?: boolean;
 }) {
 	const text = uiText();
@@ -44,6 +48,7 @@ function UserMessage({ app, content, request, timestamp, editing, onEdit, readOn
 	const selection = request?.selection;
 	const refs = request?.refs ?? [];
 	const quotes = request?.chatQuotes ?? [];
+	const skills = [...new Map(request?.skillMentions?.map((item) => [item.id, item])).values()];
 	useEffect(() => {
 		mounted.current = true;
 		return () => {
@@ -84,8 +89,11 @@ function UserMessage({ app, content, request, timestamp, editing, onEdit, readOn
 
 	return (
 		<div className="scribe-chat-message is-user" role="group" aria-label={text.chatYou}>
-			{(selection || refs.length > 0 || quotes.length > 0) && (
+			{(selection || refs.length > 0 || quotes.length > 0 || skills.length > 0) && (
 				<ul className="scribe-message-context" aria-label={text.chatContextLabel}>
+					{skills.map((skill) => <li className="scribe-message-chip" key={skill.id} title={skill.id}>
+						<ChatIcon name="book-open" /><span>${skill.name} · {skill.sourceLabel ?? skill.id}</span>
+					</li>)}
 					{quotes.length > 0 && <li>
 						<details className="scribe-message-selection">
 							<summary className="scribe-message-chip"><ChatIcon name="quote" />
@@ -129,8 +137,8 @@ function UserMessage({ app, content, request, timestamp, editing, onEdit, readOn
 	);
 }
 
-function TurnProcess({ summary, render }: { summary: string; render: () => ReactNode }) {
-	const [open, setOpen] = useState(false);
+function TurnProcess({ summary, initiallyOpen, render }: { summary: string; initiallyOpen: boolean; render: () => ReactNode }) {
+	const [open, setOpen] = useState(initiallyOpen);
 	const id = useId();
 	return <div className="scribe-turn-process">
 		<button type="button" className="scribe-process-summary" aria-expanded={open} aria-controls={open ? id : undefined}
@@ -152,6 +160,7 @@ function TimelineNotice({ item, live, lastStep }: { item: NoticeRow; live?: bool
 		cancelled: text.chatStopped,
 		interrupted: text.chatInterrupted,
 		limit: text.chatRunLimit,
+		collaboration: subagentUiText().error,
 	}[item.code];
 	const icon = item.resolved ? 'circle-check'
 		: { error: 'circle-alert', warning: 'triangle-alert', info: 'info' }[item.tone];
@@ -179,31 +188,46 @@ function lastStepLabel(step: RunStep, items: readonly TimelineItem[]): string {
 
 export default memo(function ChatTurn({
 	app, execution, live, request, step, model, editing, onEdit, onFork, expanded, toggleExpanded, readOnly, automaticReview,
+	completedActivity, subagentReport, submissions, inspectSubagent, subagentNames, childChat = false, parentAgentId = 'root',
 }: {
 	app: App; execution: ChatExecution; live?: boolean; request?: SubmittedPrompt; step?: RunStep;
 	model?: SavedRun['model']; editing?: boolean; onEdit?: () => void; onFork?: () => void; readOnly?: boolean; automaticReview?: boolean;
 	expanded: ReadonlySet<string>; toggleExpanded: (id: string) => void;
+	completedActivity?: ReactNode; childChat?: boolean; parentAgentId?: string;
+	subagentReport?: SavedRun['subagentReport'];
+	submissions?: SubagentSnapshot['submissions']; inspectSubagent?: InspectSubagent;
+	subagentNames?: ReadonlyMap<string, string>;
 }) {
 	const text = uiText();
 	const { state, modelRetry } = execution;
-	const { user, rows, answer, copyText, hasProcess, answerMessage } = useMemo(() => chatTurnContent(execution), [execution]);
+	const content = useMemo(() => chatTurnContent(execution), [execution]);
+	const { user, answer, copyText, answerMessage } = content;
+	const rows = useMemo(() => collaborationRows(content.rows, submissions, childChat ? parentAgentId : undefined),
+		[childChat, content.rows, submissions, parentAgentId]);
 	const messages = useMemo(() => completedMessages(state?.messages ?? []), [state?.messages]);
-	const usage = useMemo(() => usageTotals(messages), [messages]);
+	const usage = useMemo(() => state ? runUsage(state) : undefined, [state]);
 	const status = state?.status ?? 'idle';
 	const running = status === 'running' || status === 'awaiting-approval';
+	const lateActivity = !running && completedActivity;
+	const hasProcess = rows.length > 0 || Boolean(lateActivity);
 	const hasReply = Boolean(answer.trim());
+	// 子 Agent 聊天的提问要和收到的答复一起直接可见。
+	const showChildCollaboration = rows.some((row) => row.kind === 'subagent' || row.kind === 'to-parent');
+	const foldProcess = !showChildCollaboration && (hasReply && !running || rows.some((row) => row.kind === 'collaboration') || Boolean(lateActivity));
 	const showActivity = state && running && live;
 	const statusLabel = status === 'awaiting-approval' ? (automaticReview ? text.chatTimelineAutoReview : text.chatTimelineApproval)
 		: modelRetry === 'manual' ? text.chatTimelineWaitingConnection
 		: modelRetry === 'automatic' ? text.chatReconnecting : text.chatResponding;
 	const end = state?.finishedAt ?? messageTime(answerMessage);
-	const summary = [text.chatProcessSummary.replace('{messages}', abbreviatedNumber(messages.length))
-		.replace('{tools}', abbreviatedNumber(messages.reduce((total, message) => total + (message.toolCalls?.length ?? 0), 0))),
-	state?.createdAt && end ? chatDuration(end - state.createdAt) : undefined].filter(Boolean).join(' · ');
+	const duration = state?.createdAt && end ? chatDuration(end - state.createdAt) : undefined;
+	const summary = childChat && duration ? subagentUiText().workedFor.replace('{duration}', duration)
+		: [text.chatProcessSummary.replace('{messages}', abbreviatedNumber(messages.length))
+			.replace('{tools}', abbreviatedNumber(messages.reduce((total, message) => total + (message.toolCalls?.length ?? 0), 0))),
+		duration].filter(Boolean).join(' · ');
 
-	async function copyReply() {
+	async function copyReply(content: string) {
 		try {
-			await navigator.clipboard.writeText(copyText);
+			await navigator.clipboard.writeText(content);
 			new Notice(text.chatCopiedReply);
 		} catch {
 			new Notice(text.chatCopyFailed);
@@ -213,12 +237,23 @@ export default memo(function ChatTurn({
 	const renderTimeline = () => <div className="scribe-chat-timeline">
 		{rows.map((row) => {
 			switch (row.kind) {
+				case 'collaboration':
+					return <CollaborationActivity key={row.id} action={row.action} agentId={row.agentId}
+						name={subagentNames?.get(row.agentId) ?? row.agentName ?? row.agentId} inspect={inspectSubagent} />;
+				case 'to-parent':
+					return <AnswerContent key={row.id} app={app}
+						content={row.question ? subagentUiText().questionPrefix + row.content : row.content} />;
 				case 'text':
 					return <AnswerContent key={row.id} app={app} content={row.content} />;
 				case 'notice':
 					return <TimelineNotice key={row.id} item={row} live={live}
 						lastStep={step && state?.status === row.code && row === rows.at(-1)
 							? lastStepLabel(step, execution.items) : undefined} />;
+				case 'subagent':
+					return <UserMessage key={row.id} app={app} content={row.content} readOnly />;
+				case 'skill-steering':
+					return <UserMessage key={row.id} app={app} content={row.content} readOnly
+						request={{ instruction: row.content, refs: [], skillMentions: row.mentions }} />;
 				case 'thinking': {
 					const open = expanded.has(row.id);
 					const seconds = row.durationMs === undefined ? undefined : Math.round(row.durationMs / 1000);
@@ -241,11 +276,16 @@ export default memo(function ChatTurn({
 				case 'tool-group': {
 					const members = row.kind === 'tool' ? [row] as const : row.members;
 					const first = members[0];
+					const groupExpanded = expanded.has(row.id);
+					const showRows = row.kind === 'tool' || groupExpanded;
+					const showShellOutput = live && status === 'running';
 					return (
 						<ToolActivityGroup key={first.id} call={first.call} count={members.length}
-							expanded={expanded.has(row.id)} onToggle={() => toggleExpanded(row.id)}>
+							shellOutput={showShellOutput && !showRows ? members.at(-1)?.shellOutput : undefined}
+							expanded={groupExpanded} onToggle={() => toggleExpanded(row.id)}>
 							{members.map((item) => <ToolActivityRow key={item.id} app={app}
 								call={item.call} result={item.result} skipped={item.skipped} resolved={item.resolved}
+									shellOutput={showShellOutput && showRows ? item.shellOutput : undefined}
 								status={status} statusLabel={running ? statusLabel : text.chatInterrupted}
 								expanded={expanded.has(item.id)} onToggle={() => toggleExpanded(item.id)} />)}
 						</ToolActivityGroup>
@@ -253,26 +293,39 @@ export default memo(function ChatTurn({
 				}
 			}
 		})}
+		{lateActivity}
 	</div>;
 
 	return (
 		<article className="scribe-chat-run" data-task-id={state?.taskId} tabIndex={-1}>
 			{(request?.instruction || user) && <UserMessage app={app} request={request} content={request?.instruction || user}
-				timestamp={state?.createdAt} editing={editing} onEdit={onEdit} readOnly={readOnly} />}
-			{!editing && (hasProcess || hasReply || showActivity) && <div className="scribe-assistant-turn" role="group" aria-label={text.chatAssistant}>
-				{hasProcess && (hasReply && !running ? <TurnProcess summary={summary} render={renderTimeline} /> : renderTimeline())}
+				timestamp={state?.createdAt} editing={editing} onEdit={onEdit} readOnly={readOnly || Boolean(request?.selection)} />}
+			{!editing && (hasProcess || hasReply || showActivity || usage) && <div className="scribe-assistant-turn" role="group" aria-label={text.chatAssistant}>
+				{hasProcess && (foldProcess
+					? <TurnProcess key={running ? 'live' : 'finished'} summary={summary} initiallyOpen={running} render={renderTimeline} />
+					: renderTimeline())}
 				{hasReply && <AnswerContent app={app} content={answer} />}
 				{showActivity && <WorkingRow key={state.taskId} state={state}
 					modelIntent={execution.modelIntent}
 					override={status === 'awaiting-approval' || modelRetry ? statusLabel : undefined} />}
-				{!running && Boolean(copyText.trim()) && <div className="scribe-message-actions scribe-assistant-actions">
+				{!running && (Boolean(copyText.trim()) || usage) && <div className="scribe-message-actions scribe-assistant-actions">
 					<Timestamp timestamp={messageTime(answerMessage) ?? answerMessage?.rawAssistant?.timestamp} />
 					{hasReply && !readOnly && <button type="button" className="scribe-message-action" aria-label={text.chatForkReply} title={text.chatForkReply}
 						disabled={!onFork} onClick={onFork}><ChatIcon name="git-branch" /><span>{text.chatForkReply}</span></button>}
-					{hasReply && usage && <UsagePopover usage={usage} model={model} turn />}
-					<button type="button" className="scribe-message-action scribe-reply-copy" aria-label={text.chatCopyReply} title={text.chatCopyReply}
-						onClick={() => void copyReply()}><ChatIcon name="copy" /></button>
+					{usage && <UsagePopover usage={usage} model={model} turn />}
+					{Boolean(copyText.trim()) && <button type="button" className="scribe-message-action scribe-reply-copy"
+						aria-label={text.chatCopyReply} title={text.chatCopyReply}
+						onClick={() => void copyReply(copyText)}><ChatIcon name="copy" /></button>}
 				</div>}
+			</div>}
+			{!editing && subagentReport && <div className="scribe-assistant-turn scribe-subagent-report" role="group"
+				aria-label={text.chatSubagentReport}>
+				<AnswerContent app={app} content={subagentReport.content} />
+				<div className="scribe-message-actions scribe-assistant-actions">
+					<Timestamp timestamp={subagentReport.sentAt} />
+					<button type="button" className="scribe-message-action scribe-reply-copy" aria-label={text.chatCopyReply} title={text.chatCopyReply}
+						onClick={() => void copyReply(subagentReport.content)}><ChatIcon name="copy" /></button>
+				</div>
 			</div>}
 		</article>
 	);

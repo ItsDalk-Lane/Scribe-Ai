@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { Message, RunStatus } from '../../types';
+import type { Message, RunState, RunStatus } from '../../types';
 import { parseConversationEntry, replayConversation } from '../../orchestration/storage/taskStore';
 import { createTask } from '../../orchestration/taskManager';
 import { latestIncompleteReply } from '../../runtime/continuationText';
-import { conversationMetrics, messageTime } from '../chatMetrics';
+import { conversationMetrics, messageTime, runUsage } from '../chatMetrics';
 import { chatTurnContent, chatTurnPreview } from '../chatTurnContent';
-import { emptyExecution, restoreExecution, updateExecution } from '../context';
+import { conversationPreview, emptyExecution, restoreExecution, updateExecution } from '../context';
+import { collaborationRows } from '../subagentTimeline';
 
 const read = { id: 'reused', name: 'Read', input: { file_path: '示例.md' } };
 const grep = { id: 'reused', name: 'Grep', input: { pattern: '示例' } };
@@ -30,6 +31,107 @@ const metadata = {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 } as const;
 
+void test('main chat shows each successful dispatch, outgoing contact and submitted draft exactly once', () => {
+	const identity = { id: 'worker', name: '签到负责人' };
+	const messages: Message[] = [];
+	function call(name: string, input: Record<string, string>, output: unknown, isError = false) {
+		const id = `call-${messages.length}`;
+		messages.push({ role: 'assistant', content: '', id: `assistant-${id}`, toolCalls: [{ id, name, input }] },
+			{ role: 'tool', toolCallId: id, content: typeof output === 'string' ? output : JSON.stringify(output), isError });
+	}
+	function received(id: string, kind: 'question' | 'result') {
+		messages.push({ role: 'assistant', local: true, content: '只在子聊天展示的原文',
+			subagentActivity: { id, kind, agentId: identity.id, agentName: identity.name } });
+	}
+	call('spawn_agent', {}, identity);
+	received('question', 'question');
+	call('answer_subagent', {}, { target: identity.id, name: identity.name });
+	call('send_message', { target: identity.id }, '消息已保存。');
+	call('wait_agent', {}, {});
+	received('draft', 'result');
+	call('review_subagent_result', { decision: 'revise' }, { status: 'returned', agent: identity });
+	call('list_agents', {}, [identity]);
+	call('list_agents', {}, [identity]);
+	received('revised', 'result');
+	call('review_subagent_result', { decision: 'use' }, { status: 'passed' });
+	call('read_subagent_result', {}, '交稿全文');
+	call('followup_task', { target: identity.id }, identity);
+	call('interrupt_agent', {}, identity);
+	call('close_agent', {}, identity);
+	call('resume_agent', {}, identity);
+	call('spawn_agent', {}, '额度用尽', true);
+	messages.push({ role: 'assistant', content: '主聊天的最终汇总' });
+	for (const execution of [restoreExecution(saved(messages)), updateExecution(emptyExecution, { type: 'state', state: state(messages) })]) {
+		const content = chatTurnContent(execution);
+		const visible = collaborationRows(content.rows);
+		assert.deepEqual(visible.map((row) => row.kind === 'collaboration' ? [row.action, row.agentId] : [row.kind]), [
+			['started', 'worker'], ['contacted', 'worker'], ['contacted', 'worker'], ['completed', 'worker'],
+			['contacted', 'worker'], ['completed', 'worker'], ['contacted', 'worker'], ['notice'],
+		]);
+		assert.equal(content.answer, '主聊天的最终汇总');
+		assert.ok(!JSON.stringify(visible).includes('展示的原文'));
+		const warning = visible.at(-1);
+		assert.equal(warning?.kind === 'notice' && warning.detail, '额度用尽');
+		const failed = collaborationRows(content.rows, { revised: { id: 'revised', from: 'worker', to: 'root',
+			kind: 'result', status: 'failed', text: '任务中断' } });
+		assert.equal(failed.find((row) => row.id === 'subagent:revised')?.kind, 'notice');
+	}
+});
+
+void test('child transcripts keep the outgoing question and the incoming reply once while hiding private tool results', () => {
+	const ask = { name: 'ask_parent', id: 'ask', input: { message: '统计窗口是什么？' } };
+	const wait = { name: 'wait_agent', id: 'wait', input: {} };
+	const spawn = { name: 'spawn_agent', id: 'spawn', input: {} };
+	const conversation = restoreExecution(saved([
+		{ role: 'assistant', content: '', toolCalls: [ask] },
+		{ role: 'tool', content: '09:00–12:00', toolCallId: ask.id },
+		{ role: 'user', local: true, content: '09:00–12:00',
+			subagentActivity: { id: 'answer', agentId: 'root', agentName: '主聊天', kind: 'instruction' } },
+		{ role: 'assistant', content: '', toolCalls: [spawn, wait] },
+		{ role: 'tool', toolCallId: 'spawn', content: '{"id":"audit","name":"复核"}' },
+		{ role: 'tool', toolCallId: 'wait', content: '内部等待结果' },
+		{ role: 'assistant', content: '我自己的交付原文' },
+	]));
+	const content = chatTurnContent(conversation);
+	const visible = collaborationRows(content.rows, undefined, 'root');
+	assert.deepEqual(visible.map((row) => 'content' in row ? row.content : row.kind === 'collaboration' ? row.action : row.kind),
+		['统计窗口是什么？', '09:00–12:00', 'started']);
+	assert.equal(content.answer, '我自己的交付原文');
+});
+
+void test('collaboration messages stay in their receive positions beside tools and the final reply', () => {
+	const spawn = { id: 'spawn', name: 'spawn_agent', input: { message: '核对初稿' } };
+	const review = { id: 'review', name: 'review_subagent_result', input: { decision: 'revise' } };
+	const event = (id: string, kind: NonNullable<Message['subagentActivity']>['kind'], content: string): Message => ({
+		id, role: kind === 'instruction' ? 'user' : 'assistant', content, local: true,
+		subagentActivity: { id, kind, agentId: 'worker', agentName: '核对助手' },
+	});
+	const draft = event('first', 'result', '第一份提交原文');
+	const messages: Message[] = [
+		{ role: 'user', content: '检查材料' },
+		{ role: 'assistant', id: 'dispatch', content: '', toolCalls: [spawn, read] },
+		{ role: 'tool', toolCallId: spawn.id, content: '已开始' },
+		{ role: 'tool', toolCallId: read.id, content: '主聊天自己的核对' },
+		draft,
+	];
+	const first = updateExecution(emptyExecution, { type: 'state', state: state(messages, 'running') });
+	const final: Message[] = [...messages,
+		{ role: 'assistant', id: 'review-step', content: '', toolCalls: [review] },
+		{ role: 'tool', toolCallId: review.id, content: '已退回' },
+		event('instruction', 'instruction', '请按原始数据重算'),
+		event('second', 'result', '第二份提交原文'),
+		{ role: 'assistant', id: 'final-answer', content: '正式答复' },
+	];
+	const live = updateExecution(first, { type: 'state', state: state(final) });
+	for (const execution of [live, restoreExecution(saved(final))]) {
+		const content = chatTurnContent(execution);
+		assert.equal(content.user, '检查材料');
+		assert.equal(content.answer, '正式答复');
+		assert.deepEqual(content.rows.map((row) => row.kind === 'tool' ? row.call.name : row.kind === 'subagent' ? row.content : row.kind),
+			['spawn_agent', 'Read', '第一份提交原文', 'review_subagent_result', '请按原始数据重算', '第二份提交原文']);
+	}
+});
+
 void test('round and conversation metrics use measured timings and provider token reports', () => {
 	const output: Message = { role: 'assistant', content: 'First', toolCalls: [read], usage: {
 		input: 100, cacheRead: 300, cacheWrite: 50, output: 25, totalTokens: 999,
@@ -42,17 +144,21 @@ void test('round and conversation metrics use measured timings and provider toke
 	const first = state([output, { role: 'tool', content: 'result', toolCallId: read.id, toolDurationMs: 137 }]);
 	const second = { ...state([next]), taskId: 'second' };
 	const metrics = conversationMetrics([first, second]);
+	const main = { count: 2, input: 300, cacheRead: 500, cacheWrite: 51, output: 75, total: 926,
+		hit: 500 / 851, cost: undefined };
 	assert.deepEqual(metrics, {
 		rounds: 2, count: 2, modelMs: 5000, toolMs: 137, lagMs: 750, speed: 75000 / 3500,
-		usage: { input: 300, cacheRead: 500, cacheWrite: 51, output: 75, total: 926,
-			hit: 500 / 851, cost: 1 },
+		usage: { ...main, byKind: { main, review: undefined, summary: undefined } },
 		context: { prompt: 401, capacity: 1000, remaining: 599, percent: 40.1 },
+		contextCompaction: undefined,
 	});
 	const noUsage: Message = { ...next, usage: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, totalTokens: 0, cost: metadata.usage.cost } };
-	assert.equal(conversationMetrics([state([noUsage])]).usage, undefined);
+	assert.equal(conversationMetrics([state([noUsage])]).usage?.count, 1);
+	assert.equal(conversationMetrics([state([noUsage])]).usage?.output, undefined);
+	assert.equal(runUsage(state([])), undefined);
 	const missing = conversationMetrics([first, { ...second, messages: [noUsage] }]);
-	assert.equal(missing.usage?.total, 475);
-	assert.equal(missing.usage.partialTotal, true);
+	assert.equal(missing.usage?.total, undefined);
+	assert.equal(missing.usage?.cost, undefined);
 	assert.equal(missing.context, undefined);
 	assert.equal(missing.speed, undefined);
 	assert.equal(conversationMetrics([state([{ ...output, metrics: undefined }])]).speed, undefined);
@@ -60,6 +166,85 @@ void test('round and conversation metrics use measured timings and provider toke
 		reportedUsage: { prompt: 4630 }, metrics: { endedAt: 8000, modelMs: 2500, contextWindow: 1_000_000 },
 	}])]);
 	assert.equal(precise.context?.percent, 0.47);
+});
+
+void test('context details keep the latest compression even without provider usage', () => {
+	const older: RunState = { ...state([]), contextCompaction: {
+		reason: 'budget', summary: 'saved', droppedHistory: 1, droppedCurrent: 4, shortenedToolResults: 2, throughMessage: 6,
+	} };
+	const ongoing = updateExecution(emptyExecution, { type: 'state', state: { ...state([], 'running'), taskId: 'latest' } });
+	const latest = updateExecution(ongoing, { type: 'context-compaction', compaction: {
+		reason: 'overflow', summary: 'failed', droppedHistory: 3, droppedCurrent: 2, shortenedToolResults: 1,
+	} });
+	assert.ok(latest.state);
+	const metrics = conversationMetrics([older, latest.state, { ...state([]), taskId: 'newer' }]);
+	assert.equal(metrics.context, undefined);
+	assert.equal(latest.items, ongoing.items);
+	assert.equal(metrics.contextCompaction?.reason, 'overflow');
+	assert.equal(metrics.contextCompaction?.summary, 'failed');
+});
+
+void test('subagent usage is counted once without replacing the main chat context', () => {
+	const main: RunState = { ...state([{
+		role: 'assistant', content: 'Main reply', reportedUsage: { prompt: 200, output: 10 },
+		metrics: { endedAt: 1000, modelMs: 500, contextWindow: 1000 },
+	}]), taskId: 'main' };
+	const child: RunState = { ...state([{
+		role: 'assistant', content: 'Child reply', reportedUsage: { prompt: 100, output: 30 },
+		metrics: { endedAt: 2000, modelMs: 500, contextWindow: 2000 },
+	}]), taskId: 'child' };
+	const metrics = conversationMetrics([main], [child, child]);
+	assert.equal(metrics.usage?.count, 2);
+	assert.equal(metrics.usage?.total, 340);
+	assert.deepEqual(metrics.context, { prompt: 200, capacity: 1000, remaining: 800, percent: 20 });
+});
+
+void test('a local receipt remains visible without affecting model timing, context or usage', () => {
+	const receipt: Message = { role: 'assistant', content: '已收到，正在处理。', local: true };
+	const reply: Message = {
+		role: 'assistant', content: 'Model reply', reportedUsage: { prompt: 200, output: 10 },
+		metrics: { endedAt: 1000, modelMs: 500, contextWindow: 1000 },
+		usage: { ...metadata.usage, cost: { ...metadata.usage.cost, total: 0.125, totalFromProvider: true } },
+	};
+	const withReceipt = state([reply, receipt]);
+	assert.deepEqual(runUsage(withReceipt), runUsage(state([reply])));
+	assert.deepEqual(conversationMetrics([withReceipt]), conversationMetrics([state([reply])]));
+	assert.equal(runUsage(state([receipt])), undefined);
+	assert.equal(messageTime({ ...receipt, metrics: reply.metrics }), undefined);
+	assert.equal(chatTurnContent(restoreExecution(saved([receipt]))).answer, receipt.content);
+	const persisted = (message: unknown) => parseConversationEntry(JSON.stringify({ type: 'messages', taskId: 'task', messages: [message] }), 1);
+	const entry = persisted(receipt);
+	assert.equal(entry.type === 'messages' && entry.messages[0]?.local, true);
+	assert.throws(() => persisted({ ...receipt, role: 'user' }));
+	assert.throws(() => persisted({ ...receipt, usage: reply.usage }));
+});
+
+void test('usage keeps provider totals and zeros while marking missing fields across request types unknown', () => {
+	const turn: RunState = { ...state([{
+		role: 'assistant', content: 'Reply',
+		reportedUsage: { prompt: 200, output: 10, total: 211, cacheRead: 0, cacheWrite: 0 },
+		usage: { ...metadata.usage, cost: { ...metadata.usage.cost, total: 0.125, totalFromProvider: true } },
+		metrics: { endedAt: 8000, modelMs: 2500, contextWindow: 1000 },
+	}], 'failed'), auxiliaryUsage: [
+		{ kind: 'review', reportedUsage: { input: 12, cacheRead: 0, cacheWrite: 3, output: 4 }, cost: 0 },
+		{ kind: 'summary', reportedUsage: { prompt: 70, cacheRead: 1, total: 90 } },
+	] };
+	const usage = runUsage(turn);
+	assert.equal(usage?.byKind.main?.count, 1);
+	assert.equal(usage.byKind.main.total, 211);
+	assert.equal(usage.byKind.review?.total, 19);
+	assert.equal(usage.byKind.review.cost, 0);
+	assert.equal(usage.byKind.summary?.total, 90);
+	assert.equal(usage.byKind.summary.input, undefined);
+	assert.equal(usage.count, 3);
+	assert.equal(usage.total, 320);
+	assert.equal(usage.cacheRead, 1);
+	assert.equal(usage.cacheWrite, undefined);
+	assert.equal(usage.cost, undefined);
+	const metrics = conversationMetrics([turn]);
+	assert.deepEqual(metrics.usage, usage);
+	assert.equal(metrics.count, 1);
+	assert.equal(metrics.context?.prompt, 200);
 });
 
 void test('turn navigation previews the displayed prompt and last reply without exposing other activity', () => {
@@ -75,6 +260,28 @@ void test('turn navigation previews the displayed prompt and last reply without 
 	};
 	assert.deepEqual(chatTurnPreview(withRetry), { prompt: '按当前 指令 检查。', reply: '最终 答复。' });
 	assert.equal(chatTurnPreview(withRetry, '片'.repeat(319) + '📝剩余正文').prompt, '片'.repeat(319) + '…');
+});
+
+void test('turn navigation previews returned results while keeping the receipt in the turn', () => {
+	const receipt: Message = { role: 'assistant', content: '已收到材料。', local: true };
+	const report = { content: '## 预算与报销\n\n预算结果。', sentAt: 5_000 };
+	const execution = restoreExecution(saved([receipt]));
+	assert.equal(chatTurnContent(execution).answer, receipt.content);
+	assert.equal(chatTurnContent(execution).copyText, receipt.content);
+	assert.deepEqual(chatTurnPreview(execution, '核对资料。', report), { prompt: '核对资料。', reply: '## 预算与报销 预算结果。' });
+});
+
+void test('history preview shows the latest main-chat exchange, excluding pending messages', () => {
+	const first = saved([{ role: 'assistant', content: '上一轮答复' }]);
+	const last = saved([{ role: 'assistant', content: '最新答复' }]);
+	last.request.instruction = '最新问题';
+	const queue = [{ id: 'pending', request: { ...last.request, instruction: '未发送的问题' } }];
+	const conversation = { id: 'conversation', runs: [first, last], queue };
+	assert.deepEqual(conversationPreview(conversation), { prompt: '最新问题', reply: '最新答复' });
+	assert.deepEqual(conversationPreview({ ...conversation, runs: [] }), { prompt: '', reply: '' });
+	const interrupted = { ...saved([], 'interrupted'), partial: '中断前的部分回复' };
+	assert.deepEqual(conversationPreview({ ...conversation, runs: [first, interrupted] }),
+		{ prompt: interrupted.request.instruction, reply: interrupted.partial });
 });
 
 void test('restores ordered legacy replies and tools while pairing reused call ids by message', () => {
@@ -223,6 +430,17 @@ void test('a steering instruction within a continued reply preserves the origina
 	const reopened = restoreExecution(run);
 	assert.equal(chatTurnContent(reopened).answer, '第一段。第二段。');
 	assert.deepEqual(chatTurnPreview(reopened, run.request.instruction), { prompt: '查看示例', reply: '第一段。第二段。' });
+});
+
+void test('reopening a chat shows the explicit skill source for a queued interruption', () => {
+	const mentions = [{ name: 'review', id: 'copy', sourceLabel: '本人', start: 0, end: 7 }];
+	const turn = saved([
+		{ role: 'user', content: '先看笔记' },
+		{ role: 'user', id: 'steer:queued', content: '$review 帮我检查\n\n引用上下文', skillInputLength: 12, skillMentions: mentions },
+		{ role: 'assistant', content: '检查完毕' },
+	]);
+	const rows = chatTurnContent(restoreExecution(turn)).rows;
+	assert.deepEqual(rows, [{ kind: 'skill-steering', id: 'steer:queued', content: '$review 帮我检查', mentions }]);
 });
 
 void test('restores retries at their original position and keeps a notice-only failure flat', () => {

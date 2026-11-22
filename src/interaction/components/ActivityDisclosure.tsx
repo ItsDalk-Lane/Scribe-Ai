@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import ChatIcon from './ChatIcon';
 
 export default function ActivityDisclosure({
-	icon, label, labelContent, title, accessibilityLabel, end, expanded, onToggle, children, className, state,
+	icon, label, labelContent, title, accessibilityLabel, end, preview, expanded, onToggle, children, className, state,
 	plain = false, keepMounted = false,
 }: {
 	icon?: string;
@@ -12,6 +12,7 @@ export default function ActivityDisclosure({
 	title?: string;
 	accessibilityLabel?: string;
 	end?: ReactNode;
+	preview?: ReactNode;
 	expanded: boolean;
 	onToggle: () => void;
 	children: ReactNode;
@@ -37,6 +38,7 @@ export default function ActivityDisclosure({
 				{end}
 				<span className="scribe-activity-chevron"><ChatIcon name="chevron-right" /></span>
 			</div>}
+			{preview}
 			<div id={bodyId} className="scribe-activity-expansion" aria-hidden={!open} inert={!open}>
 				<div className="scribe-activity-body">{(opened || keepMounted) && children}</div>
 			</div>

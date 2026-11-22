@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { statSync } from 'node:fs';
+import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { App } from 'obsidian';
+import { conversationMetrics, runUsage } from '../../interaction/chatMetrics';
 import { restoreExecution } from '../../interaction/context';
 import { createAgentLoop } from '../../runtime/agentLoop';
 import { bindAgent } from '../../runtime/createAgent';
@@ -14,11 +16,12 @@ import { createRunState } from '../../runtime/runState';
 import { createToolCoordinator } from '../../runtime/toolCoordinator';
 import { createToolRegistry } from '../../tools';
 import { createToolExecutor } from '../../tools/executor';
+import { shellTools } from '../../tools/external/shellTool';
 import { readTools } from '../../tools/readTools';
 import { searchTools } from '../../tools/searchTools';
 import { writeTools } from '../../tools/writeTools';
 import { MissingConversationError } from '../../types';
-import type { ModelRequest, ModelService, ModelStream, RunState, RuntimeLayer, ScribeSettings, Task, ToolCall } from '../../types';
+import type { AutoReviewDenial, Message, ModelRequest, ModelService, ModelStream, ReportedUsage, RunState, RuntimeLayer, ScribeSettings, Task, TaskRequest, ToolCall } from '../../types';
 import { createContextBuilder } from '../context/contextBuilder';
 import { createSessionController } from '../sessionController';
 import { normalizeSettings } from '../settings/defaults';
@@ -29,7 +32,7 @@ const firstModel = { providerId: 'test-provider', model: 'first-model' };
 const secondModel = { providerId: 'another-provider', model: 'second-model' };
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 
-function reply(content: string, toolCalls: ToolCall[] = []): ModelStream {
+function reply(content: string, toolCalls: ToolCall[] = [], billing?: { reportedUsage: ReportedUsage; total?: number }): ModelStream {
 	const raw: AssistantMessage = {
 		role: 'assistant',
 		content: [
@@ -41,7 +44,8 @@ function reply(content: string, toolCalls: ToolCall[] = []): ModelStream {
 		api: 'openai-completions',
 		provider: firstModel.providerId,
 		model: firstModel.model,
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost },
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+			cost: billing ? { ...cost, total: billing.total ?? 9, totalFromProvider: billing.total !== undefined } : cost },
 		stopReason: toolCalls.length ? 'toolUse' : 'stop',
 		timestamp: Date.now(),
 	};
@@ -49,7 +53,8 @@ function reply(content: string, toolCalls: ToolCall[] = []): ModelStream {
 		async *[Symbol.asyncIterator]() {
 			if (content) yield { type: 'text_delta', delta: content, contentIndex: 0, partial: raw };
 		},
-		result: () => Promise.resolve({ raw, content, toolCalls, stopReason: toolCalls.length ? 'tool-calls' : 'end' }),
+		result: () => Promise.resolve({ raw, content, toolCalls, stopReason: toolCalls.length ? 'tool-calls' : 'end',
+			...(billing ? { reportedUsage: billing.reportedUsage, usage: raw.usage } : {}) }),
 		cancel() {},
 	};
 }
@@ -62,7 +67,10 @@ async function fixture(t: TestContext) {
 	const cwd = join(root, 'vault');
 	const directory = join(root, 'conversations');
 	await mkdir(cwd);
-	const app = { vault: {
+	let activeNote: string | undefined;
+	const ruleLookups: string[] = [];
+	const ruleReads: string[] = [];
+	const app = { workspace: { getActiveFile: () => activeNote ? { path: activeNote } : null }, vault: {
 		adapter: {
 			getBasePath: () => cwd,
 			async process(path: string, update: (content: string) => string) {
@@ -71,27 +79,38 @@ async function fixture(t: TestContext) {
 			},
 		},
 		configDir: 'fixture-vault-config',
-		getFileByPath: () => null,
+		getFileByPath(path: string) {
+			if (path !== 'AGENTS.md' && !path.endsWith('/AGENTS.md')) return null;
+			ruleLookups.push(path);
+			return statSync(join(cwd, path), { throwIfNoEntry: false })?.isFile() ? { path, name: 'AGENTS.md' } : null;
+		},
+		read({ path }: { path: string }) {
+			ruleReads.push(path);
+			return readFile(join(cwd, path), 'utf8');
+		},
 		create: (path: string, content: string) => writeFile(join(cwd, path), content, { flag: 'wx' }),
 	} } as unknown as App;
 	return {
 		cwd,
 		directory,
+		ruleLookups,
+		ruleReads,
+		setActiveNote: (path: string) => { activeNote = path; },
 		connect: (stream: (request: ModelRequest) => ModelStream, model: Partial<ScribeSettings> = firstModel,
-			thinkingOptions?: ModelService['thinkingOptions'], reviewer?: Pick<ModelService, 'send'>) => {
-			const registry = createToolRegistry([readTools, searchTools, writeTools]);
-			const models = createModelCoordinator({ stream }, createContextBuilder(registry));
+			thinkingOptions?: ModelService['thinkingOptions'], modelService?: Pick<ModelService, 'send' | 'contextLimits'>) => {
+			const registry = createToolRegistry([readTools, searchTools, writeTools, shellTools]);
+			const models = createModelCoordinator({ stream, contextLimits: modelService?.contextLimits }, createContextBuilder(registry));
 			const tools = createToolCoordinator(app, createToolExecutor(registry));
 			const runtime: RuntimeLayer = {
 				newState: createRunState, createAgent: bindAgent(createAgentLoop(models, tools)), models, tools,
 			};
-			return createSessionController(app, normalizeSettings(model), runtime, createConversationStore(directory), thinkingOptions, reviewer);
+			return createSessionController(app, normalizeSettings(model), runtime, createConversationStore(directory), thinkingOptions, modelService);
 		},
 	};
 }
 
 void test('chat execution modes run vault edits directly and route outside actions to the selected approver', async (t) => {
-	const { cwd, connect } = await fixture(t);
+	const { cwd, connect, directory } = await fixture(t);
 	for (const [executionMode, decision] of [
 		['ask', 'approve'], ['ask', 'deny'], ['auto-review', 'APPROVE'], ['auto-review', 'DENY'],
 		['auto-review', 'APPROVE with extra text'], ['full-access', 'unused'],
@@ -118,6 +137,9 @@ void test('chat execution modes run vault edits directly and route outside actio
 		if (allowed) assert.equal(await readFile(outside, 'utf8'), '新内容');
 		else await assert.rejects(access(outside), { code: 'ENOENT' });
 		assert.equal(state.messages.find(({ toolCallId }) => toolCallId === 'outside')?.isError, !allowed);
+		const [saved] = (await createConversationStore(directory).load(id)).runs;
+		assert.deepEqual(saved?.state.messages.find(({ toolCallId }) => toolCallId === 'inside')?.noteChange, { path: inside, after: '新内容' });
+		assert.equal(saved?.state.messages.find(({ toolCallId }) => toolCallId === 'outside')?.noteChange, undefined);
 		assert.equal(prompts, executionMode === 'ask' ? 1 : 0);
 		assert.equal(reviews.length, executionMode === 'auto-review' ? 1 : 0);
 		for (const review of reviews) {
@@ -128,6 +150,364 @@ void test('chat execution modes run vault edits directly and route outside actio
 			assert.ok(payload.operation.target.endsWith(`${label}.md`));
 			assert.equal(payload.operation.after, '新内容');
 		}
+		sessions.dispose();
+	}
+});
+
+void test('plan and review do not regain write permissions and review sends only its selected material', async (t) => {
+	const { cwd, connect, directory } = await fixture(t);
+	const outside = join(cwd, '..', 'external.md');
+	await Promise.all([writeFile(outside, 'outside secret'), writeFile(join(cwd, 'context.md'), 'vault detail'),
+		writeFile(join(cwd, 'AGENTS.md'), 'vault style')]);
+	const requests: ModelRequest[] = [];
+	const deniedWrite = { id: 'plan-write', name: 'Write', input: { file_path: 'forbidden.md', content: 'write attempt' } };
+	const planReads = [outside, 'context.md'].map((file_path, index) =>
+		({ id: `plan-read-${index}`, name: 'Read', input: { file_path } }));
+	const sessions = connect((request) => {
+		requests.push(request);
+		if (!request.messages.some(({ toolCallId }) => toolCallId === deniedWrite.id) && request.system?.includes('本次为只读计划模式')) {
+			return reply('', [deniedWrite, ...planReads]);
+		}
+		return reply('说完了。');
+	});
+	t.after(() => sessions.dispose());
+	const conversationId = await sessions.createConversation();
+	await sessions.submit({ conversationId, instruction: 'unrelated prior history', refs: [] }).result;
+	const plan = await sessions.submit({ conversationId, intent: 'plan', instruction: '先做计划', refs: [{ path: outside, kind: 'file' }] }, {}, undefined,
+		{ executionMode: 'full-access' }).result;
+	assert.equal(plan.messages.find(({ toolCallId }) => toolCallId === deniedWrite.id)?.isError, true);
+	assert.equal(plan.messages.find(({ toolCallId }) => toolCallId === planReads[0]?.id)?.isError, true);
+	assert.match(plan.messages.find(({ toolCallId }) => toolCallId === planReads[1]?.id)?.content ?? '', /vault detail/);
+	await assert.rejects(access(join(cwd, 'forbidden.md')), { code: 'ENOENT' });
+	assert.deepEqual(requests.find(({ system }) => system?.includes('本次为只读计划模式'))?.tools.map(({ name }) => name).sort(), ['Glob', 'Grep', 'Read']);
+	const reviewMaterial = 'selected snapshot';
+	await sessions.submit({ conversationId, intent: 'review', instruction: '检查事实', refs: [], reviewMaterial }, {}, undefined,
+		{ executionMode: 'full-access' }).result;
+	const review = requests.at(-1)!;
+	assert.match(review.system ?? '', /本次为只读笔记检查/);
+	assert.doesNotMatch(review.system ?? '', /vault style/);
+	assert.deepEqual(review.tools, []);
+	assert.equal(review.messages.length, 2);
+	assert.equal(review.messages[0]?.content, '检查事实');
+	assert.match(review.messages[1]?.content ?? '', /selected snapshot/);
+	assert.equal((await createConversationStore(directory).load(conversationId)).runs.at(-1)?.request.reviewMaterial, reviewMaterial);
+	await sessions.submit({ conversationId, instruction: '下一个普通问题', refs: [] }).result;
+	assert.ok(requests.at(-1)?.messages.every(({ content }) => !content.includes(reviewMaterial)));
+});
+
+void test('writing rules are read from AGENTS.md in the vault root and matching folders on every question', async (t) => {
+	const { cwd, connect, ruleLookups, setActiveNote } = await fixture(t);
+	await Promise.all(['会议/项目', '读书', '会议存档'].map((folder) => mkdir(join(cwd, folder), { recursive: true })));
+	await Promise.all(Object.entries({
+		'AGENTS.md': '全库用短段落。',
+		'会议/AGENTS.md': '会议用项目符号。',
+		'会议/项目/AGENTS.md': '项目会议结尾列出负责人。',
+		'会议/项目/纪要.md': '会议记录。',
+		'读书/AGENTS.md': '读书笔记结尾写感想。',
+		'读书/摘录.md': '摘录。',
+		'会议存档/旧纪要.md': '旧会议记录。',
+		'普通笔记.md': '普通笔记。',
+	}).map(([path, content]) => writeFile(join(cwd, path), content)));
+	const requests: ModelRequest[] = [];
+	const sessions = connect((request) => {
+		requests.push(request);
+		return reply('已完成。');
+	});
+	t.after(() => sessions.dispose());
+	const id = await sessions.createConversation();
+	const ask = async (options: Partial<Pick<TaskRequest, 'refs'>> = {}) => {
+		const run = await sessions.submit({ conversationId: id, instruction: '请整理内容。', refs: [], ...options }).result;
+		assert.equal(run.status, 'done', run.error);
+		return requests.at(-1)!;
+	};
+
+	setActiveNote('读书/摘录.md');
+	const meeting = await ask({ refs: [{ path: '会议/项目/纪要.md' }] });
+	assert.match(meeting.system ?? '', /全库用短段落。[\s\S]*会议用项目符号。[\s\S]*项目会议结尾列出负责人。/u);
+	assert.match(meeting.system ?? '', /文件夹规则优先于全库规则，较深的文件夹规则优先于上级文件夹规则/u);
+	assert.doesNotMatch(meeting.system ?? '', /结尾写感想/u);
+	assert.doesNotMatch(JSON.stringify(meeting.messages), /全库用短段落|会议用项目符号/u);
+	assert.deepEqual([...new Set(ruleLookups)].sort(), ['AGENTS.md', '会议/AGENTS.md', '会议/项目/AGENTS.md']);
+
+	const books = await ask();
+	assert.match(books.system ?? '', /读书笔记结尾写感想/u);
+	assert.doesNotMatch(JSON.stringify(books), /会议用项目符号|列出负责人/u);
+	assert.doesNotMatch((await ask({ refs: [{ path: '会议存档/旧纪要.md' }] })).system ?? '', /会议用项目符号/u);
+
+	await writeFile(join(cwd, '会议/AGENTS.md'), '会议改用表格。');
+	const edited = await ask({ refs: [{ path: '会议', kind: 'folder' }] });
+	assert.match(edited.system ?? '', /会议改用表格/u);
+	assert.doesNotMatch(JSON.stringify(edited), /会议用项目符号|结尾列出负责人/u);
+
+	await rm(join(cwd, '会议/AGENTS.md'));
+	const removed = await ask({ refs: [{ path: '会议', kind: 'folder' }] });
+	assert.match(removed.system ?? '', /全库用短段落/u);
+	assert.doesNotMatch(JSON.stringify(removed), /会议改用表格/u);
+
+	await writeFile(join(cwd, 'AGENTS.md'), '');
+	assert.doesNotMatch(JSON.stringify(await ask({ refs: [{ path: '普通笔记.md' }] })), /全库用短段落/u);
+});
+
+void test('writing rules cannot be loaded by following a symlink outside the vault', { skip: process.platform === 'win32' }, async (t) => {
+	const { cwd, connect, ruleReads } = await fixture(t);
+	const external = join(cwd, '..', '外部规则.md');
+	await writeFile(external, '不发送这个外部规则。');
+	await symlink(external, join(cwd, 'AGENTS.md'));
+	const requests: ModelRequest[] = [];
+	const sessions = connect((request) => {
+		requests.push(request);
+		return reply('已完成。');
+	});
+	t.after(() => sessions.dispose());
+	const id = await sessions.createConversation();
+	const run = await sessions.submit({ conversationId: id, instruction: '请整理内容。', refs: [] }).result;
+	assert.equal(run.status, 'done', run.error);
+	assert.equal(requests.length, 1);
+	assert.deepEqual(ruleReads, []);
+	assert.doesNotMatch(JSON.stringify(requests), /不发送这个外部规则/u);
+});
+
+void test('a long chat keeps its confirmed decision and counts the summary and automatic reviews once', async (t) => {
+	const { cwd, connect } = await fixture(t);
+	const path = '资料/交付纪要.md';
+	const allowed = join(cwd, '..', '审核可读.md');
+	const denied = join(cwd, '..', '审核拒绝.md');
+	await mkdir(join(cwd, '资料'));
+	await writeFile(join(cwd, path), '# 交付会\n交付批次为「银杏-27」。\n原始记录编号 RAW-NOTE-42。\n');
+	await writeFile(allowed, '通过审核的示例材料。');
+	await writeFile(denied, '拒绝后不得读取的示例材料。');
+	const read: ToolCall = { id: 'summary-source-read', name: 'Read', input: { file_path: path } };
+	const reviewedRead = (target: string): ToolCall => ({ id: 'reviewed-read', name: 'Read', input: { file_path: target } });
+	const readPrompt = '读取这篇纪要并核对批次。';
+	const decisionPrompt = '我确认沿用上一轮纪要里敲定的交付决定，待办由周宁复核清单。';
+	const recallPrompt = '我们早先定的交付批次是什么？注明出处和剩余事项。';
+	const captured: ModelRequest[] = [];
+	const summarized: ModelRequest[] = [];
+	const reviewed: ModelRequest[] = [];
+	let recalls = 0;
+	const beforeReview = { reportedUsage: { prompt: 135, input: 100, cacheRead: 30, cacheWrite: 5, output: 20 }, total: 0.125 };
+	const afterReview = { reportedUsage: { prompt: 250, input: 200, cacheRead: 40, cacheWrite: 10, output: 30 }, total: 0.25 };
+	const approvedUsage = { reportedUsage: { prompt: 100, input: 70, cacheRead: 25, cacheWrite: 5, output: 5 }, total: 0.0625 };
+	const deniedUsage = { reportedUsage: { prompt: 65, input: 60, cacheRead: 5, output: 7 } };
+	const summaryUsage = { reportedUsage: { prompt: 80, input: 60, cacheRead: 10, cacheWrite: 10, output: 12 }, total: 0.03125 };
+	const service: Pick<ModelService, 'send' | 'contextLimits'> = {
+		contextLimits: () => ({ contextWindow: 12_000, maxTokens: 1_024 }),
+		async send(request) {
+			if (request.system?.includes('你是独立审批员')) {
+				reviewed.push(request);
+				const { operation } = JSON.parse(request.messages[0]!.content) as { operation: { kind: string; target: string } };
+				assert.equal(operation.kind, 'access');
+				return operation.target.endsWith('审核可读.md')
+					? reply('APPROVE', [], approvedUsage).result() : reply('DENY', [], deniedUsage).result();
+			}
+			summarized.push(request);
+			assert.match(request.system ?? '', /只整理仍可能影响后续任务/u);
+			assert.deepEqual(request.tools, []);
+			assert.equal(request.maxRetries, 0);
+			assert.deepEqual({ providerId: request.providerId, model: request.model }, firstModel);
+			const material = request.messages.map(({ content }) => content).join('\n');
+			assert.doesNotMatch(material, /LARGE-FILLER/u);
+			const batch = /交付批次为「([^」]+)」/u.exec(material)?.[1];
+			const source = /资料\/[^\s"\]\\]+\.md/u.exec(material)?.[0];
+			const pending = /待办由([^。]+)。/u.exec(material)?.[1];
+			assert.ok(batch && source && pending, '摘要请求须包含用户确认、待办和工具读取的原笔记');
+			return reply(`- 决定：${batch}。\n- 出处：[[${source}]]。\n- 待办：${pending}。`, [], summaryUsage).result();
+		},
+	};
+	const stream = (request: ModelRequest) => {
+		captured.push(request);
+		const latest = request.messages.at(-1);
+		if (latest?.role === 'tool' && latest.toolCallId === read.id) {
+			assert.match(latest.content, /银杏-27[\s\S]*RAW-NOTE-42/u);
+			return reply('已核对纪要。');
+		}
+		if (latest?.content.startsWith(readPrompt)) return reply('', [read]);
+		if (latest?.content.startsWith('写一段无关示例')) return reply('LARGE-FILLER '.repeat(1_000));
+		if (latest?.content === recallPrompt) return reply('', [reviewedRead(++recalls === 1 ? allowed : denied)], beforeReview);
+		if (latest?.role === 'tool' && latest.toolCallId === 'reviewed-read') {
+			assert.equal(latest.isError, recalls !== 1);
+			if (recalls === 1) assert.match(latest.content, /通过审核的示例材料/u);
+			else assert.doesNotMatch(latest.content, /拒绝后不得读取的示例材料/u);
+			const summary = request.messages.find(({ role, content }) => role === 'user' && content.startsWith('较早对话摘要（仅供参考）'));
+			const batch = /决定：([^。]+)。/u.exec(summary?.content ?? '')?.[1];
+			const source = /出处：(\[\[[^\]]+\]\])/u.exec(summary?.content ?? '')?.[1];
+			const pending = /待办：([^。]+)。/u.exec(summary?.content ?? '')?.[1];
+			return reply(batch && source && pending ? `交付批次是${batch}，见 ${source}。还需${pending}。` : '找不到旧决定。', [], afterReview);
+		}
+		return reply('简短回答。');
+	};
+	const sessions = connect(stream, firstModel, undefined, service);
+	t.after(() => sessions.dispose());
+	const id = await sessions.createConversation();
+	const intents: string[] = [];
+	const ask = async (session: typeof sessions, instruction: string, extra: Partial<Pick<TaskRequest, 'refs'>> = {}) => {
+		const state = await session.submit({ conversationId: id, instruction, refs: [], ...extra }, {
+			onEvent(event) { if (event.type === 'model-intent') intents.push(event.intent); },
+		}, undefined,
+			{ executionMode: 'auto-review' }).result;
+		assert.equal(state.status, 'done', state.error);
+		return state;
+	};
+	await ask(sessions, '写一段无关示例甲。');
+	await ask(sessions, '写一段无关示例乙。');
+	await ask(sessions, '请简短回答。');
+	assert.equal(captured.at(-1)?.messages.some(({ content }) => content === '写一段无关示例甲。'), false);
+	assert.equal(summarized.length, 0, '裁掉无关轮次不应调用模型做摘要');
+
+	await ask(sessions, readPrompt, { refs: [{ path }] });
+	await ask(sessions, decisionPrompt);
+	assert.equal(summarized.length, 0, '决定仍保留在普通历史中时不应调用摘要');
+	await ask(sessions, '写一段无关示例丙。');
+	assert.equal(summarized.length, 0, '追问前尚未裁掉用户确认的决定');
+	const recalled = await ask(sessions, recallPrompt);
+	assert.equal(recalled.messages.at(-1)?.content, '交付批次是银杏-27，见 [[资料/交付纪要.md]]。还需周宁复核清单。');
+	assert.doesNotMatch(JSON.stringify(captured.at(-1)), /交付批次为「银杏-27」|RAW-NOTE-42/u);
+	assert.doesNotMatch(intents.join('\n'), /正在整理较早对话里的决定和待办/u);
+	assert.equal(summarized.length, 1);
+	assert.equal(reviewed.length, 1);
+	assert.deepEqual(recalled.auxiliaryUsage, [
+		{ kind: 'summary', reportedUsage: summaryUsage.reportedUsage, cost: summaryUsage.total },
+		{ kind: 'review', reportedUsage: approvedUsage.reportedUsage, cost: approvedUsage.total },
+	]);
+	const usage = runUsage(recalled);
+	assert.ok(usage);
+	assert.deepEqual(usage.byKind, {
+		main: { count: 2, input: 300, cacheRead: 70, cacheWrite: 15, output: 50, total: 435, hit: 70 / 385, cost: 0.375 },
+		review: { count: 1, input: 70, cacheRead: 25, cacheWrite: 5, output: 5, total: 105, hit: 0.25, cost: 0.0625 },
+		summary: { count: 1, input: 60, cacheRead: 10, cacheWrite: 10, output: 12, total: 92, hit: 0.125, cost: 0.03125 },
+	});
+	assert.deepEqual({ count: usage.count, input: usage.input, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite,
+		output: usage.output, total: usage.total, hit: usage.hit, cost: usage.cost },
+	{ count: 4, input: 430, cacheRead: 105, cacheWrite: 30, output: 67, total: 632, hit: 105 / 565, cost: 0.46875 });
+	sessions.dispose();
+
+	const reopened = connect(stream, firstModel, undefined, service);
+	t.after(() => reopened.dispose());
+	const saved = await reopened.openConversation(id);
+	assert.ok(saved);
+	assert.ok(saved.runs.some(({ state }) => state.messages.some(({ content }) => content.includes('RAW-NOTE-42'))));
+	const savedRecall = saved.runs.at(-1)?.state;
+	assert.ok(savedRecall);
+	assert.deepEqual(runUsage(savedRecall), usage);
+	const repeated = await ask(reopened, recallPrompt);
+	assert.equal(repeated.messages.at(-1)?.content, recalled.messages.at(-1)?.content);
+	assert.deepEqual(repeated.auxiliaryUsage?.map(({ kind }) => kind), ['review']);
+	const repeatedUsage = runUsage(repeated);
+	assert.equal(repeatedUsage?.count, 3);
+	assert.equal(repeatedUsage.total, 507);
+	assert.equal(repeatedUsage.byKind.review?.cacheRead, 5);
+	assert.equal(repeatedUsage.byKind.review?.cacheWrite, undefined);
+	assert.equal(repeatedUsage.byKind.review?.cost, undefined);
+	assert.equal(repeatedUsage.byKind.summary, undefined);
+	assert.equal(repeatedUsage.cacheWrite, undefined);
+	assert.equal(repeatedUsage.cost, undefined);
+	const combined = conversationMetrics([savedRecall, repeated]).usage;
+	assert.equal(combined?.count, 7);
+	assert.equal(combined.total, 1139);
+	assert.equal(combined.cost, undefined);
+	assert.equal(combined.byKind.summary?.count, 1);
+	assert.equal(combined.byKind.review?.count, 2);
+	assert.equal(summarized.length, 1);
+	assert.equal(reviewed.length, 2);
+});
+
+void test('stopping during an automatic review saves its usage once even when the reply arrives late', async (t) => {
+	const { cwd, connect, directory } = await fixture(t);
+	const outside = join(cwd, '..', 'cancelled-review-source.md');
+	await writeFile(outside, '库外测试内容，不应读取。');
+	let markStarted = () => {};
+	let release = () => {};
+	const started = new Promise<void>((resolve) => { markStarted = resolve; });
+	const held = new Promise<void>((resolve) => { release = resolve; });
+	const read: ToolCall = { id: 'late-review', name: 'Read', input: { file_path: outside } };
+	const sessions = connect(() => reply('', [read]), firstModel, undefined, {
+		async send() {
+			markStarted();
+			await held;
+			return reply('APPROVE').result();
+		},
+	});
+	t.after(() => { release(); sessions.dispose(); });
+	const id = await sessions.createConversation();
+	const handle = sessions.submit({ conversationId: id, instruction: '经审核后读取指定资料。', refs: [] }, {}, undefined, { executionMode: 'auto-review' });
+	await Promise.race([started, handle.result.then(() => assert.fail('未启动自动审核'))]);
+	await sessions.cancel(handle.taskId);
+	const stopped = await handle.result;
+	assert.equal(stopped.status, 'cancelled');
+	assert.deepEqual(stopped.auxiliaryUsage, [{ kind: 'review' }]);
+	release();
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	const saved = await createConversationStore(directory).load(id);
+	assert.deepEqual(saved.runs[0]?.state.auxiliaryUsage, [{ kind: 'review' }]);
+	assert.equal(runUsage(stopped)?.byKind.review?.cost, undefined);
+});
+
+void test('Bash waits for the automatic reviewer and saves its decision beside the command result', {
+	skip: !shellTools().find(({ name }) => name === 'Bash')?.isAvailable?.(),
+	timeout: 10_000,
+}, async (t) => {
+	const { cwd, connect, directory } = await fixture(t);
+	for (const [decision, expected] of [
+		['APPROVE', 'approved'], ['DENY', 'denied'], ['APPROVE with extra text', 'incomplete'],
+	] as const) {
+		const marker = `bash-ran-${expected}.txt`;
+		const command = `printf 'ran\\n' >> ${marker}`;
+		const call: ToolCall = { id: 'checked-shell', name: 'Bash', input: { command, elevated: true } };
+		let markReviewStarted = (_request: ModelRequest) => {};
+		let releaseReview = () => {};
+		const reviewStarted = new Promise<ModelRequest>((resolve) => { markReviewStarted = resolve; });
+		const reviewHeld = new Promise<void>((resolve) => { releaseReview = resolve; });
+		let reviews = 0;
+		let first = true;
+		const sessions = connect(() => {
+			if (!first) return reply('检查结束。');
+			first = false;
+			return reply('', [call]);
+		}, firstModel, undefined, {
+			async send(request) {
+				reviews++;
+				markReviewStarted(request);
+				await reviewHeld;
+				return reply(decision).result();
+			},
+		});
+		t.after(() => { releaseReview(); sessions.dispose(); });
+		const id = await sessions.createConversation();
+		let liveStatus: RunState['status'] | undefined;
+		let denial: AutoReviewDenial | undefined;
+		const run = sessions.submit({ conversationId: id, instruction: '审核后运行测试命令。', refs: [] }, {
+			onEvent(event) { if (event.type === 'state') liveStatus = event.state.status; },
+			onAutoReviewDenied(operation) { denial = operation; },
+		}, undefined, { executionMode: 'auto-review' });
+		const request = await Promise.race([reviewStarted, run.result.then(() => assert.fail('未发起独立审核'))]);
+		assert.equal(liveStatus, 'awaiting-approval');
+		const { operation } = JSON.parse(request.messages[0]!.content) as { operation: { kind: string; after: string } };
+		assert.equal(operation.kind, 'shell');
+		assert.equal(operation.after, command);
+		await assert.rejects(access(join(cwd, marker)), { code: 'ENOENT' });
+		releaseReview();
+
+		const state = await run.result;
+		assert.equal(reviews, 1);
+		const [result] = state.messages.filter(({ toolCallId }) => toolCallId === call.id);
+		assert.equal(result?.approvalReview, expected);
+		assert.equal(result.isError, expected !== 'approved');
+		assert.equal(result.shellStatus, expected === 'approved' ? 'success' : undefined);
+		if (expected === 'approved') assert.equal(await readFile(join(cwd, marker), 'utf8'), 'ran\n');
+		else await assert.rejects(access(join(cwd, marker)), { code: 'ENOENT' });
+		const [saved] = (await createConversationStore(directory).load(id)).runs;
+		assert.ok(saved);
+		const row = restoreExecution(saved).items.find((item) => item.kind === 'tool' && item.call.id === call.id);
+		assert.ok(row?.kind === 'tool');
+		assert.equal(row.result?.approvalReview, expected);
+		if (expected === 'denied') {
+			assert.ok(denial);
+			assert.equal(denial.approval.after, command);
+			const retry = await denial.retry(new AbortController().signal);
+			assert.equal(retry.shellStatus, 'success');
+			await assert.rejects(denial.retry(new AbortController().signal), /已经尝试/);
+			assert.equal(await readFile(join(cwd, marker), 'utf8'), 'ran\n');
+		} else assert.equal(denial, undefined);
 		sessions.dispose();
 	}
 });
@@ -662,6 +1042,106 @@ void test('closing and reopening resumes the same task without replaying a saved
 	assert.equal(runs[0]?.state.resumed, true);
 	assert.equal(runs[0]?.state.messages.filter(({ role }) => role === 'user').length, 1);
 	await assert.rejects(reopened.resume(id, old.taskId).result, /无法从此处继续任务/);
+});
+
+void test('a long task resumes with saved evidence and does not replay a compacted write', { timeout: 5_000 }, async (t) => {
+	const { cwd, connect } = await fixture(t);
+	const source = '交接原始记录.md';
+	const evidence = 'SOURCE-EVIDENCE-218';
+	const target = '交接清单.md';
+	const written = '第一项核验已完成。';
+	await writeFile(join(cwd, source), `原始核验编号为 ${evidence}。`);
+	const read = (path: string): ToolCall => ({ id: path, name: 'Read', input: { file_path: path } });
+	const write = { id: 'original-write', name: 'Write', input: { file_path: target, content: written } };
+	const laterBatches = await Promise.all(Array.from({ length: 6 }, async (_, index) => {
+		const detail = `材料-${index}.md`;
+		const check = `核验-${index}.md`;
+		await writeFile(join(cwd, detail), `DETAIL-${index} ${'item '.repeat(160)} END-DETAIL-${index}`);
+		await writeFile(join(cwd, check), `CHECK-${index}`);
+		return [read(detail), read(check)];
+	}));
+	const batches = [[read(source), write], ...laterBatches];
+	const handoff = `已核验 ${evidence}，见 [[${source}]]。已创建 ${target}。下一步核对剩余材料。`;
+	const auxiliary: ModelRequest[] = [];
+	const service: Pick<ModelService, 'send' | 'contextLimits'> = {
+		contextLimits: () => ({ contextWindow: 12_000, maxTokens: 1_024 }),
+		async send(request) {
+			auxiliary.push(request);
+			return reply(handoff).result();
+		},
+	};
+	let compactedRequest: ModelRequest | undefined;
+	const original = connect((request) => {
+		if (request.messages.some(({ content }) => content.includes(handoff))) {
+			compactedRequest = request;
+			original.pause(active.taskId);
+			return reply('');
+		}
+		const batch = batches.shift();
+		return batch ? reply(batch.includes(write) ? '' : 'Verified item. '.repeat(150), batch) : reply('已读完材料。');
+	}, firstModel, undefined, service);
+	t.after(() => original.dispose());
+	const conversationId = await original.createConversation();
+	const active = original.submit({ conversationId, instruction: `请读取 ${source} 核验材料并创建 ${target}。`, refs: [] },
+		{}, undefined, { executionMode: 'ask' });
+	const paused = await active.result;
+	assert.equal(paused.status, 'interrupted', paused.error);
+	assert.ok(compactedRequest);
+	assert.equal(auxiliary.length, 1);
+	const summaryInput = auxiliary[0]!;
+	assert.match(summaryInput.system ?? '', /当前任务[\s\S]*交接|交接[\s\S]*当前任务/u);
+	const material = summaryInput.messages.map(({ content }) => content).join('\n');
+	assert.ok(material.includes(`${source}（第 1–1 行）`) && material.includes(evidence) && material.includes(`已创建 ${target}。`));
+	assert.deepEqual(summaryInput.tools, []);
+	assert.equal(compactedRequest.messages.some(({ toolCallId }) => toolCallId === source || toolCallId === write.id), false);
+	const latest = laterBatches.find((batch) => batch.at(-1)?.id === compactedRequest?.messages.at(-1)?.toolCallId);
+	assert.ok(latest);
+	assert.equal(await readFile(join(cwd, target), 'utf8'), written);
+	const writtenAt = (await stat(join(cwd, target))).mtimeMs;
+	original.dispose();
+
+	const sent: ModelRequest[] = [];
+	const reopened = connect((request) => {
+		const stream = sent.length ? reply('核验完成。') : reply('', [{ ...write, id: 'repeat-write' }]);
+		return {
+			...stream,
+			async *[Symbol.asyncIterator]() {
+				assert.ok(request.beforeSend);
+				await request.beforeSend('http://127.0.0.1:14080/v1/chat/completions');
+				sent.push(request);
+				yield* stream;
+			},
+		};
+	}, firstModel, undefined, service);
+	t.after(() => reopened.dispose());
+	const saved = (await reopened.openConversation(conversationId))?.runs[0];
+	assert.equal(saved?.runSummary?.text, handoff);
+	assert.ok(saved.runSummary.throughMessage > 0 && saved.runSummary.throughMessage < saved.state.messages.length);
+	assert.equal(saved.state.messages.find(({ toolCallId }) => toolCallId === write.id)?.isError, false);
+	assert.ok(saved.state.messages.find(({ toolCallId }) => toolCallId === source)?.content.includes(evidence));
+	let confirmations = 0;
+	const result = await reopened.resume(conversationId, active.taskId, {
+		async confirmResume({ request }) {
+			confirmations++;
+			assert.equal(auxiliary.length, 1);
+			assert.deepEqual(sent, []);
+			assert.ok(request.messages.some(({ content }) => content.includes(handoff)));
+			assert.ok(request.messages.some(({ toolCalls }) => toolCalls?.every(({ id }, index) => id === latest[index]?.id)
+				&& toolCalls.length === latest.length));
+			for (const { id } of latest) {
+				const originalResult: Message | undefined = saved.state.messages.find(({ toolCallId }) => toolCallId === id);
+				assert.ok(originalResult);
+				assert.deepEqual(request.messages.find(({ toolCallId }) => toolCallId === id), originalResult);
+			}
+			return true;
+		},
+	}, { executionMode: 'ask' }).result;
+	assert.equal(confirmations, 1);
+	assert.equal(result.status, 'done', result.error);
+	assert.equal(result.messages.at(-1)?.content, '核验完成。');
+	assert.equal(result.messages.find(({ toolCallId }) => toolCallId === 'repeat-write')?.skipped, true);
+	assert.equal(await readFile(join(cwd, target), 'utf8'), written);
+	assert.equal((await stat(join(cwd, target))).mtimeMs, writtenAt);
 });
 
 void test('resuming a saved task only restores explicit outside attachments', async (t) => {

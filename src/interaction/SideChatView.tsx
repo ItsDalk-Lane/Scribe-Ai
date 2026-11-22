@@ -7,8 +7,10 @@ import { createRoot } from 'react-dom/client';
 import { SIDE_CHAT_ICON, SIDE_CHAT_VIEW_TYPE } from '../constants';
 import type ScribeAiPlugin from '../main';
 import { chatModelKey } from '../orchestration/settings/thinking';
-import type { NoteRef, RunContext, SavedRun, SideChat } from '../types';
+import type { NoteRef, RunContext, SavedRun, SideChat, SkillMention } from '../types';
 import { composerShortcut } from './composerKeyboard';
+import { copySlash, exportSlash, showSlashWarnings } from './slashActions';
+import { tr } from './skills/dialog';
 import ExecutionView from './components/ExecutionView';
 import { MetricPopoverProvider } from './components/MetricPopover';
 import TaskInput from './components/TaskInput';
@@ -21,6 +23,8 @@ export interface SideChatOpening {
 	prompt?: string;
 	refs?: NoteRef[];
 	quotes?: string[];
+	skillMentions?: SkillMention[];
+	skillScope?: string[];
 }
 
 interface SideChatHandle {
@@ -47,7 +51,11 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 	const thinking = model ? communication.models.thinkingOptions(model,
 		(value === localValue ? localEffort : undefined) ?? settings.thinkingByModel[value]) : { levels: [] };
 	const [draft, setDraft] = useState('');
+	const [skillMentions, setSkillMentions] = useState<SkillMention[]>([]);
+	const [parentScope, setParentScope] = useState<string[]>();
 	const [refs, setRefs] = useState<NoteRef[]>([]);
+	const skills = plugin.services.orchestration.skills;
+	const draftScope = parentScope && [...new Set([...parentScope, ...skills.scope(refs, '')])];
 	const [quotes, setQuotes] = useState<string[]>([]);
 	const [error, setError] = useState('');
 	const [history, setHistory] = useState<DisplayedRun[]>([]);
@@ -62,11 +70,12 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 		}
 		return model;
 	}
-	function submit(question: string, references: NoteRef[], excerpts: string[]) {
+	function submit(question: string, references: NoteRef[], excerpts: string[], mentions: SkillMention[], scope?: string[]) {
 		if (running.current) throw new SideChatHandoffError(text.sideChatBusy);
 		const selectedModel = requireModel();
 		let displayed = emptyExecution;
 		const run = chat.submit({ instruction: question, refs: references, chatQuotes: excerpts,
+			skillMentions: mentions, skillScope: scope ?? skills.scope(references),
 			model: { ...selectedModel, reasoning: thinking.level } }, { onEvent: (event) => {
 			if (!mounted.current) return;
 			displayed = updateExecution(displayed, event);
@@ -100,8 +109,9 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 		receive(opening) {
 			check(opening);
 			const { prompt = '', refs: incomingRefs = [], quotes: incomingQuotes = [] } = opening;
+			if (opening.skillScope) setParentScope(opening.skillScope);
 			if (prompt.trim()) {
-				submit(prompt, incomingRefs, incomingQuotes);
+				submit(prompt, incomingRefs, incomingQuotes, opening.skillMentions ?? [], opening.skillScope);
 			} else {
 				if (incomingRefs.length) setRefs((previous) => Array.from(
 					new Map([...previous, ...incomingRefs].map((ref) => [ref.path, ref])).values()));
@@ -126,6 +136,26 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 			<ExecutionView app={plugin.app} conversationId={chat.id} loading={false} history={history}
 				execution={execution} liveRequest={live?.request} liveModel={live?.model} temporary />
 			<TaskInput inputRef={input} busy={Boolean(live)} disabled={false} conversationId={chat.id}
+				slashCommands={{ surface: 'side', unavailable: (name) => running.current && ['export', 'mention', 'skills'].includes(name)
+					? tr('侧聊回答结束后可用。', 'Available after the side conversation finishes.') : undefined,
+					run: async ({ name, args }, controls) => {
+						switch (name) {
+							case 'mention': return controls.openMention();
+							case 'skills': controls.openSkills(); return true;
+							case 'copy': return copySlash(history, execution.state, controls.ui);
+							case 'export': return exportSlash(plugin.app, history, args, text.sideChatTitle, controls.ui);
+							case 'status':
+								return controls.ui.show(text.sideChatTitle, [
+									model?.model ?? text.chatModelMissing,
+									tr('临时聊天 · 只读', 'Temporary conversation · Read only'),
+									running.current ? tr('正在回答', 'Replying') : tr('空闲', 'Idle'),
+								]);
+							case 'warnings': return showSlashWarnings(plugin, controls.ui);
+							default: return false;
+						}
+					},
+				}}
+				skills={skills} skillScope={draftScope} skillMentions={skillMentions}
 				vaultOnly placeholder={text.sideChatPlaceholder} modelGroups={modelOptions.groups} modelValue={value} thinking={thinking}
 				context={{
 					app: plugin.app, refs, quotes,
@@ -144,11 +174,15 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 					return Promise.resolve(true);
 				}}
 				onThinkingChange={(level) => { setLocalValue(value); setLocalEffort(level); }}
-				error={error} instruction={draft} onChange={setDraft} onSubmit={(question) => {
+				error={error} instruction={draft} onChange={(value, mentions, scope) => {
+					setDraft(value); setSkillMentions(mentions);
+					if (scope) setParentScope(scope);
+				}} onSubmit={(question, mentions, scope) => {
 					if (!question.trim()) return;
 					try {
-						submit(question.trim(), refs, quotes);
+						submit(question, refs, quotes, mentions, scope);
 						setDraft('');
+						setSkillMentions([]);
 						setQuotes([]);
 						setRefs((previous) => previous.filter(({ addedExternal }) => !addedExternal));
 					} catch (cause) {

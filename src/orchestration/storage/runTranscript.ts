@@ -2,7 +2,7 @@ import { taskMessage } from '../context/contextBuilder';
 import { updateTaskState } from '../taskManager';
 import { latestIncompleteReply, newContinuationText } from '../../runtime/continuationText';
 import type {
-	ConversationEntry, ConversationStore, Message, RunCheckpoint, RunObserver, RunState, RunStep, SavedRun, Task, TerminalRunStatus,
+	AuxiliaryUsage, ConversationEntry, ConversationStore, Message, RunCheckpoint, RunObserver, RunState, RunStep, SavedRun, Task, TerminalRunStatus,
 } from '../../types';
 
 function finalStatus(state: RunState): TerminalRunStatus {
@@ -27,6 +27,8 @@ export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, t
 	const conversationId = task.request.conversationId;
 	let step: RunStep = restored?.step ?? { phase: 'starting', turn: 0 };
 	let savedMessages = restored?.state.messages.length ?? 0;
+	let auxiliaryUsage = restored?.state.auxiliaryUsage ?? [];
+	let compaction = restored?.state.contextCompaction;
 	let canCheckpointThinking = false;
 	let draft: { id: string; blocks: Map<string, DraftBlock> } | undefined;
 	let checkpoints = Promise.resolve();
@@ -43,11 +45,25 @@ export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, t
 		}
 	}
 
+	function withDetails(state: RunState): RunState {
+		const usageChanged = auxiliaryUsage.length > 0 && state.auxiliaryUsage !== auxiliaryUsage;
+		const compactionChanged = compaction !== undefined && state.contextCompaction !== compaction;
+		return usageChanged || compactionChanged ? {
+			...state, ...(usageChanged && { auxiliaryUsage }), ...(compactionChanged && { contextCompaction: compaction }),
+		} : state;
+	}
+
 	async function record(event: RunCheckpoint) {
 		await checkpoints;
 		const entries: ConversationEntry[] = [];
 		const previous = step;
 		switch (event.type) {
+			case 'context-compaction':
+				if (JSON.stringify(event.compaction) === JSON.stringify(compaction)) return;
+				await append([{ type: 'context-compaction', taskId, compaction: event.compaction }]);
+				compaction = event.compaction;
+				observer.onEvent?.(event);
+				return;
 			case 'turn-start':
 				step = { phase: 'model', turn: event.turn };
 				draft = undefined;
@@ -77,6 +93,7 @@ export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, t
 	}
 
 	const observed: RunObserver = {
+		onAutoReviewDenied: observer.onAutoReviewDenied,
 		retryConnection: observer.retryConnection,
 		onEvent(event) {
 			if (event.type === 'model-retry') {
@@ -109,7 +126,11 @@ export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, t
 					}
 				}
 			}
-			if (event.type === 'state') updateTaskState(task, event.state);
+			if (event.type === 'state') {
+				updateTaskState(task, event.state);
+				observer.onEvent?.({ ...event, state: withDetails(event.state) });
+				return;
+			}
 			observer.onEvent?.(event);
 		},
 	};
@@ -125,7 +146,13 @@ export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, t
 	}
 
 	return {
-		record, observed,
+		record, observed, withDetails,
+		async recordUsage(this: void, usage: AuxiliaryUsage) {
+			auxiliaryUsage = [...auxiliaryUsage, usage];
+			const write = checkpoints.then(() => append([{ type: 'auxiliary-usage', taskId, usage }]));
+			checkpoints = write.catch(() => {});
+			await write;
+		},
 		async start(model: Extract<ConversationEntry, { type: 'start' }>['model']) {
 			await append([
 				{ type: 'start', task, model },

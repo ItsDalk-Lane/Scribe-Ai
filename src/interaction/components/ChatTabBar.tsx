@@ -151,6 +151,7 @@ export default function ChatTabBar({ tabs, activeId, onActivate, onNew, onClose,
 		<div className="scribe-chat-tab-list" role="tablist" aria-label={text.chatTabs}>
 			{visible.map((tab) => {
 				const title = tab.title || text.chatUntitled;
+				const description = tab.status && statuses[tab.status];
 				const selected = tab.id === activeId;
 				return <div className="scribe-chat-tab-item" key={tab.id} data-active={selected || undefined} data-status={tab.status}>
 					{editing?.id === tab.id
@@ -173,8 +174,8 @@ export default function ChatTabBar({ tabs, activeId, onActivate, onNew, onClose,
 						: <>
 							<button type="button" className="scribe-chat-tab-select" role="tab" id={`scribe-tab-${tab.id}`}
 								aria-controls={`scribe-tab-panel-${tab.id}`} aria-selected={selected} tabIndex={selected ? 0 : -1}
-								ref={selected ? activeButton : undefined} aria-description={tab.status && statuses[tab.status]}
-								title={tab.status ? `${title} · ${statuses[tab.status]}` : title} onClick={() => onActivate(tab.id)}
+								ref={selected ? activeButton : undefined} aria-description={description}
+								title={description ? `${title} · ${description}` : title} onClick={() => onActivate(tab.id)}
 								onKeyDown={(event) => navigate(event, tab)}
 								onMouseDown={(event) => { if (event.button === 1) event.preventDefault(); }}
 								onAuxClick={(event) => { if (event.button === 1) close(tab.id); }}
@@ -197,7 +198,8 @@ export default function ChatTabBar({ tabs, activeId, onActivate, onNew, onClose,
 				const next = new Menu();
 				for (const tab of overflow) {
 					const title = tab.title || text.chatUntitled;
-					next.addItem((item) => item.setTitle(tab.status ? `${title} · ${statuses[tab.status]}` : title)
+					const description = tab.status && statuses[tab.status];
+					next.addItem((item) => item.setTitle(description ? `${title} · ${description}` : title)
 						.setIcon(tab.status ? statusIcons[tab.status] : 'message-circle').onClick(() => {
 							restoreFocus.current = tab.id;
 							onActivate(tab.id);

@@ -3,7 +3,8 @@ import { Keymap } from 'obsidian';
 import type { App, FileSystemAdapter } from 'obsidian';
 import { memo, useId, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { RunStatus, ToolCall, ToolResult } from '../../types';
+import { TOOL_NOT_APPROVED } from '../../types';
+import type { RunStatus, ShellOutputPreview, ToolCall, ToolResult } from '../../types';
 import { formatToolInput, formatToolOutput, toolHeadingTarget, toolKind, toolTarget, toolTextPreview } from '../toolCardDetails';
 import { uiText } from '../uiText';
 import ActivityDisclosure from './ActivityDisclosure';
@@ -37,8 +38,8 @@ function findToolNote(app: App, target: string) {
 }
 
 export function ToolActivityGroup({
-	call, count, expanded, onToggle, children,
-}: { call: ToolCall; count: number; expanded: boolean; onToggle: () => void; children: ReactNode }) {
+	call, count, shellOutput, expanded, onToggle, children,
+}: { call: ToolCall; count: number; shellOutput?: ShellOutputPreview; expanded: boolean; onToggle: () => void; children: ReactNode }) {
 	const text = uiText();
 	const kind = toolKind(call.name);
 	const label = {
@@ -52,40 +53,68 @@ export function ToolActivityGroup({
 	}[kind].replace('{count}', count.toLocaleString()).replace('{name}', () => call.name);
 	return (
 		<ActivityDisclosure className="scribe-tool-group" label={label} expanded={expanded} onToggle={onToggle}
-			plain={count === 1} keepMounted>
+			plain={count === 1} keepMounted preview={shellOutput && <ShellPreview output={shellOutput} />}>
 			<div className="scribe-tool-group-rows">{children}</div>
 		</ActivityDisclosure>
 	);
 }
 
 export const ToolActivityRow = memo(function ToolActivityRow({
-	app, call, result, skipped, resolved, status, statusLabel, expanded, onToggle,
+	app, call, result, shellOutput, skipped, resolved, status, statusLabel, expanded, onToggle,
 }: {
 	app: App; call: ToolCall; result?: ToolResult; skipped?: boolean; resolved?: boolean; status: RunStatus; statusLabel: string;
-	expanded: boolean; onToggle: () => void;
+	shellOutput?: ShellOutputPreview; expanded: boolean; onToggle: () => void;
 }) {
 	const text = uiText();
 	const kind = toolKind(call.name);
-	const state = resolved ? 'resolved' : skipped ? 'skipped' : result ? (result.isError ? 'error' : 'success')
+	const shellStatus = result?.shellStatus;
+	const approvalReview = kind === 'terminal' ? result?.approvalReview : undefined;
+	const reviewLabel = approvalReview && text.chatShellReview[approvalReview];
+	const reviewPrevented = !shellStatus && (approvalReview === 'denied' || approvalReview === 'incomplete');
+	const notApproved = kind === 'terminal' && !shellStatus && result?.isError && result.content === TOOL_NOT_APPROVED;
+	const shellLabel = shellStatus ? text.chatShellStatus[shellStatus]
+		: reviewPrevented ? text.chatShellNotRun : notApproved ? text.chatShellNotApproved : undefined;
+	const state = resolved ? 'resolved' : skipped || notApproved || reviewPrevented ? 'skipped' : shellStatus === 'stopped' ? 'stopped'
+		: result ? (result.isError ? 'error' : 'success')
 		: status === 'awaiting-approval' ? 'waiting' : status === 'running' ? 'running' : 'stopped';
-	const label = resolved ? text.chatResolved : skipped ? text.chatToolSkipped
+	const label = shellLabel ? (resolved ? `${shellLabel} · ${text.chatResolved}` : shellLabel)
+		: resolved ? text.chatResolved : skipped ? text.chatToolSkipped
 		: result ? (result.isError ? text.phaseError : text.phaseDone) : statusLabel;
+	const outcome = reviewLabel ? `${reviewLabel} · ${label}` : label;
 	const target = toolHeadingTarget(call, (app.vault.adapter as FileSystemAdapter).getBasePath());
-	const title = [call.name, target, label].filter(Boolean).join(' · ');
+	const title = [call.name, target, outcome].filter(Boolean).join(' · ');
 	return (
 		<ActivityDisclosure className="scribe-tool-card" state={state} icon={toolIcons[kind]} label={call.name}
 			labelContent={target && <span className="scribe-tool-heading">
 				<span>{call.name}</span><bdi>{target}</bdi>
 			</span>}
 			expanded={expanded} onToggle={onToggle} title={title} accessibilityLabel={title}
-			end={<span className="scribe-tool-status" aria-hidden="true" title={label}><ChatIcon name={toolStatusIcons[state]} /></span>}>
+			preview={state === 'running' && shellOutput && <ShellPreview output={shellOutput} />}
+			end={<span className="scribe-tool-status" aria-hidden="true" title={outcome}>
+				<ChatIcon name={toolStatusIcons[state]} />{reviewLabel ? outcome : shellLabel}
+			</span>}>
 			<div className="scribe-tool-body">
 				<ToolInput app={app} call={call} />
-				{result && <ToolOutput content={result.content} />}
+				{result && <ToolOutput content={result.content} terminal={kind === 'terminal'} />}
 			</div>
 		</ActivityDisclosure>
 	);
 });
+
+function ShellPreview({ output }: { output: ShellOutputPreview }) {
+	const text = uiText();
+	const labels = { stdout: text.chatShellRecentOutput, stderr: text.chatShellRecentErrors };
+	return (
+		<div className="scribe-shell-preview">
+			{(['stdout', 'stderr'] as const).map((stream) => output[stream] && (
+				<section key={stream} data-stream={stream}>
+					<span>{labels[stream]}</span>
+					<pre className="scribe-chat-pre" tabIndex={0} aria-label={labels[stream]}>{output[stream]}</pre>
+				</section>
+			))}
+		</div>
+	);
+}
 
 function ToolInput({ app, call }: { app: App; call: ToolCall }) {
 	const text = uiText();
@@ -123,12 +152,12 @@ function ToolInput({ app, call }: { app: App; call: ToolCall }) {
 	);
 }
 
-function ToolOutput({ content }: { content: string }) {
+function ToolOutput({ content, terminal }: { content: string; terminal: boolean }) {
 	const text = uiText();
 	const id = useId();
 	const [full, setFull] = useState(false);
 	const value = useMemo(() => formatToolOutput(content), [content]);
-	const preview = useMemo(() => toolTextPreview(value), [value]);
+	const preview = useMemo(() => terminal ? null : toolTextPreview(value), [terminal, value]);
 	return (
 		<section aria-label={text.chatToolOutput}>
 			<pre id={id} className="scribe-chat-pre" tabIndex={0}>{full || preview === null ? value : preview + '\n…'}</pre>

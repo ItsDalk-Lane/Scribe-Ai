@@ -2,7 +2,7 @@ import { basename, isAbsolute } from 'node:path';
 import { FuzzySuggestModal, Platform, TFile, TFolder } from 'obsidian';
 import type { App, TAbstractFile } from 'obsidian';
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import type { NoteRef, NoteSelection } from '../../types';
+import type { NoteRef } from '../../types';
 import { composerShortcut, isImeComposing } from '../composerKeyboard';
 import { externalReferenceAt, pickExternalReference } from '../externalReferencePicker';
 import type { ExternalReferenceMode } from '../externalReferencePicker';
@@ -37,12 +37,10 @@ class VaultPicker extends FuzzySuggestModal<TAbstractFile> {
 export interface ContextPickerProps {
 	app: App;
 	refs: NoteRef[];
-	selection?: NoteSelection | null;
 	quotes?: string[];
 	disabled: boolean;
 	onAdd: (ref: NoteRef) => void;
 	onRemove: (path: string) => void;
-	onRemoveSelection?: () => void;
 	onRemoveQuotes?: () => void;
 	onFocusInput?: () => void;
 }
@@ -77,11 +75,11 @@ export function useVaultPicker(app: App, onAdd: ContextPickerProps['onAdd']): (a
 	};
 }
 
-export function ContextChips({ refs, selection, quotes, disabled, onRemove, onRemoveSelection, onRemoveQuotes, onFocusInput }: Pick<
-	ContextPickerProps, 'refs' | 'selection' | 'quotes' | 'disabled' | 'onRemove' | 'onRemoveSelection' | 'onRemoveQuotes' | 'onFocusInput'
+export function ContextChips({ refs, quotes, disabled, onRemove, onRemoveQuotes, onFocusInput }: Pick<
+	ContextPickerProps, 'refs' | 'quotes' | 'disabled' | 'onRemove' | 'onRemoveQuotes' | 'onFocusInput'
 >) {
 	const text = uiText();
-	if (!selection && !quotes?.length && refs.length === 0) return null;
+	if (!quotes?.length && refs.length === 0) return null;
 	return (
 		<ul className="scribe-context-chips" aria-label={text.chatContextLabel}>
 			{Boolean(quotes?.length) && <li className="scribe-context-chip scribe-chat-quote-chip">
@@ -89,31 +87,13 @@ export function ContextChips({ refs, selection, quotes, disabled, onRemove, onRe
 					<summary><ChatIcon name="quote" />{text.chatQuotedText.replace('{n}', String(quotes?.length))}</summary>
 					<pre className="scribe-chat-pre" tabIndex={0} aria-label={text.chatSelectionPreview}>{quotes?.join('\n\n')}</pre>
 				</details>
-				<button type="button" className="scribe-context-chip-remove" aria-label={text.chatRemoveSelection}
-					title={text.chatRemoveSelection} disabled={disabled} onClick={() => {
+				<button type="button" className="scribe-context-chip-remove" aria-label={text.chatRemoveQuotes}
+					title={text.chatRemoveQuotes} disabled={disabled} onClick={() => {
 						onFocusInput?.();
 						onRemoveQuotes?.();
 					}}><ChatIcon name="x" /></button>
 			</li>}
-			{selection ? (
-				<li className="scribe-context-chip">
-					<details className="scribe-selection-preview">
-						<summary title={selection.path}><ChatIcon name="text-select" />{selection.title}</summary>
-						<pre className="scribe-chat-pre" tabIndex={0} aria-label={text.chatSelectionPreview}>{selection.text}</pre>
-					</details>
-					<button
-						type="button"
-						className="scribe-context-chip-remove"
-						aria-label={text.chatRemoveSelection}
-						title={text.chatRemoveSelection}
-						disabled={disabled}
-						onClick={() => {
-							onFocusInput?.();
-							onRemoveSelection?.();
-						}}
-					><ChatIcon name="x" /></button>
-				</li>
-			) : refs.map((ref) => {
+			{refs.map((ref) => {
 				const label = `${text.remove} ${ref.path}`;
 				return (
 					<li className="scribe-context-chip" key={ref.path}>

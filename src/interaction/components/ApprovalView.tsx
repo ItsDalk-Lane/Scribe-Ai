@@ -1,4 +1,5 @@
 import { useId } from 'react';
+import type { ReactNode } from 'react';
 import type { ChatApproval } from '../context';
 import { uiText } from '../uiText';
 import ChatIcon from './ChatIcon';
@@ -17,7 +18,7 @@ function preserveApprovalFocus(card: HTMLElement | null) {
 	};
 }
 
-export default function ApprovalView({ approval }: { approval: ChatApproval | null }) {
+export default function ApprovalView({ approval, source }: { approval: ChatApproval | null; source?: ReactNode }) {
 	const headingId = useId();
 	const warningId = useId();
 	if (!approval) return null;
@@ -30,7 +31,8 @@ export default function ApprovalView({ approval }: { approval: ChatApproval | nu
 		<section className="scribe-approval-view" ref={preserveApprovalFocus} aria-labelledby={headingId} aria-describedby={warningId}>
 			<div className="scribe-approval-warning" id={warningId}>
 				<ChatIcon name="shield-question" />
-				{text.chatApprovalHeading}
+				<span>{text.chatApprovalHeading}</span>
+				{source}
 			</div>
 			<div className="scribe-approval-body" role="group" aria-labelledby={headingId} tabIndex={0}>
 				<h3 id={headingId}>{title}</h3>
@@ -38,6 +40,7 @@ export default function ApprovalView({ approval }: { approval: ChatApproval | nu
 				<div className="scribe-chat-path" title={approval.target} dir="auto">{approval.target}</div>
 				{approval.reason && <p className="scribe-chat-disclosure">{approval.reason}</p>}
 				{shell && <p className="scribe-chat-disclosure">{text.chatShellDisclosure}</p>}
+				{shell && approval.background && <p className="scribe-chat-disclosure">{text.chatBackgroundApproval}</p>}
 				{access && <p className="scribe-chat-disclosure">{text.chatApprovalPathDisclosure}</p>}
 				{approval.after !== undefined && (shell ? <div>
 					<strong>{text.chatCommand}</strong>

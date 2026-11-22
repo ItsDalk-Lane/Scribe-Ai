@@ -1,14 +1,19 @@
-import { isAbsolute } from 'node:path';
+import { Buffer } from 'node:buffer';
+import { realpath } from 'node:fs/promises';
+import { isAbsolute, resolve } from 'node:path';
+import { MAX_REVIEW_MATERIAL_BYTES } from '../constants';
+import { readOnlySkillTools } from '../tools/skillTools';
+import { isWithinPath } from '../tools/support/pathUtils';
 import { createPermissionPolicy } from './policies/permissions';
 import { createReadDelivery } from '../runtime/readDelivery';
 import type { ExecutionMode, RunContext, Task } from '../types';
 
-const sideChatTools = new Set(['Read', 'Glob', 'Grep']);
+const sideChatTools = new Set([...readOnlySkillTools, 'Read', 'Glob', 'Grep']);
 
 export async function createRunContext(
 	task: Task,
 	options: Pick<RunContext, 'cwd' | 'model' | 'signal' | 'observer' | 'checkModel' | 'reviewTool' | 'resumeReview' | 'history' | 'agreements' | 'record'
-		| 'takeSteering' | 'rejectSteering'>,
+		| 'takeSteering' | 'rejectSteering' | 'writingRules' | 'manualSummary'>,
 	configDir: string,
 	toolsEnabled: () => boolean = () => true,
 	sideChat = false,
@@ -16,31 +21,34 @@ export async function createRunContext(
 ): Promise<RunContext> {
 	const { cwd, signal } = options;
 	signal.throwIfAborted();
-	const readDelivery = createReadDelivery();
-	// 选区快照已经包含授权的全部资料，封住读取文件与命令的入口。
-	if (task.request.selection) {
-		return {
-			...options,
-			task,
-			readFiles: new Map(),
-			readDelivery,
-			permissions: {
-				canRead: () => false,
-				canWrite: () => false,
-				canCallTool: () => false,
-				canSendOutbound: () => true,
-			},
-		};
+	if (task.request.selection) throw new Error('选区问答已停用，请新建普通提问。');
+	const { intent, reviewMaterial } = task.request;
+	if (reviewMaterial !== undefined && (intent !== 'review' || Buffer.byteLength(reviewMaterial) > MAX_REVIEW_MATERIAL_BYTES)) {
+		throw new Error('检查资料过长，请缩小范围后重试。');
 	}
+	const readDelivery = createReadDelivery();
 	// 侧聊只把本次明确转交的库外单个文件加入读取范围。
-	const refs = sideChat ? task.request.refs.filter((ref) => isAbsolute(ref.path) && ref.kind === 'file' && ref.addedExternal) : task.request.refs;
-	const permissions = await createPermissionPolicy(cwd, configDir, refs, toolsEnabled, sideChat ? undefined : executionMode);
+	const refs = sideChat ? task.request.refs.filter((ref) => isAbsolute(ref.path) && ref.kind === 'file' && ref.addedExternal)
+		: intent === 'review' ? [] : intent === 'plan'
+			? task.request.refs.filter(({ path }) => !isAbsolute(path) && isWithinPath(cwd, resolve(cwd, path))) : task.request.refs;
+	const permissions = await createPermissionPolicy(cwd, configDir, refs, toolsEnabled, sideChat || intent ? undefined : executionMode);
 	signal.throwIfAborted();
 	if (sideChat) {
 		return { ...options, task, sideChat, readFiles: new Map(), readDelivery, permissions: {
 			...permissions,
 			canWrite: () => false,
 			canCallTool: (tool) => tool.isReadOnly && sideChatTools.has(tool.name) && permissions.canCallTool(tool),
+		} };
+	}
+	if (intent) {
+		const vaultRoot = await realpath(cwd);
+		const protectedPaths = [resolve(cwd, configDir), resolve(vaultRoot, configDir)];
+		signal.throwIfAborted();
+		return { ...options, task, readFiles: new Map(), readDelivery, permissions: {
+			...permissions,
+			canRead: (path) => intent === 'plan' && permissions.canRead(path) && protectedPaths.every((dir) => !isWithinPath(dir, path)),
+			canWrite: () => false,
+			canCallTool: (tool) => intent === 'plan' && tool.isReadOnly && sideChatTools.has(tool.name) && permissions.canCallTool(tool),
 		} };
 	}
 	return { ...options, task, permissions, readFiles: new Map(), readDelivery };

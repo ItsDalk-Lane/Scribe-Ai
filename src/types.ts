@@ -9,6 +9,7 @@ import type {
 	Usage,
 } from '@earendil-works/pi-ai';
 import type { App } from 'obsidian';
+import type { ShellJobHistory, ShellJobs } from './tools/external/shellJobs';
 
 /** 占位骨架期各层尚未实现的统一信号 */
 export class NotImplementedError extends Error {
@@ -45,11 +46,35 @@ export interface ReportedUsage {
 	cacheRead?: number;
 	cacheWrite?: number;
 	output?: number;
+	total?: number;
+}
+
+export interface ModelUsageReceipt {
+	reportedUsage?: ReportedUsage;
+	cost?: number;
+}
+
+export interface AuxiliaryUsage extends ModelUsageReceipt {
+	kind: 'review' | 'summary';
 }
 
 export interface Message {
+	skillInputLength?: number;
+	skillMentions?: SkillMention[];
+	skillScope?: string[];
 	role: MessageRole;
 	content: string;
+	/** 应用生成的回复，只在聊天中显示，不计入模型用量。 */
+	local?: true;
+	/** 收件确认中按原题顺序保存等待回传的子任务。 */
+	deliveryAgents?: string[];
+	/** 保存协作消息在收到时的聊天位置。 */
+	subagentActivity?: {
+		id: string;
+		agentId: string;
+		agentName: string;
+		kind: 'result' | 'instruction' | 'question';
+	};
 	/** 用于将流式更新与保存后的同一回复关联起来。 */
 	id?: string;
 	/** 原始响应无法保留时，记录时间线上已显示的思考和正文位置。 */
@@ -67,6 +92,9 @@ export interface Message {
 	/** 仅保留服务商确实报告的用量。空对象表示未报告。 */
 	reportedUsage?: ReportedUsage;
 	toolDurationMs?: number;
+	shellStatus?: ShellStatus;
+	approvalReview?: ToolReviewStatus;
+	noteChange?: NoteChange;
 	/** assistant 消息中由模型发起的工具调用 */
 	toolCalls?: ToolCall[];
 	/** 保留同一模型继续当前任务时所需的原始内容和签名 */
@@ -89,12 +117,41 @@ export interface NoteSelection {
 	lines: [number, number];
 }
 
+export interface SkillMention {
+	sourceLabel?: string;
+	id: string;
+	name: string;
+	start: number;
+	end: number;
+}
+
+export interface SkillSettings {
+	sharedDirectories: string[];
+	disabledIds: string[];
+	catalogBudgetPercent: number;
+	catalogBudgetMaxTokens: number;
+}
+
 export interface TaskRequest {
+	intent?: 'plan' | 'review';
+	reviewMaterial?: string;
+	goalRound?: true;
+	/** 子助手按名称和来源继承已投递的用户选择。 */
+	inheritedSkills?: Pick<SkillMention, 'name' | 'id'>[];
+	/** 兼容只记录了来源的旧任务。 */
+	inheritedSkillIds?: string[];
+	skillMentions?: SkillMention[];
+	skillScope?: string[];
 	conversationId: string;
 	instruction: string;
 	refs: NoteRef[];
+	/** 仅用于读取旧版选区问答记录。 */
 	selection?: NoteSelection;
 	chatQuotes?: string[];
+	/** 子任务审核使用真实用户指令，派工文字只作为上下文。 */
+	approvalSource?: string;
+	/** 本次分派或返工所属的上级任务。 */
+	subagentCallerTaskId?: string;
 }
 
 export interface QueuedMessage {
@@ -138,12 +195,29 @@ export interface ToolCall {
 	input: unknown;
 }
 
+export const TOOL_NOT_APPROVED = '用户未批准本次操作。';
+
+export type ToolReviewStatus = 'approved' | 'denied' | 'incomplete';
+export class ToolReviewDeniedError extends Error {}
+
+export type NoteChange = { path: string } & ({ before?: string; after: string } | { omitted: true });
+
 export interface ToolResult {
 	callId: string;
 	content: string;
 	isError: boolean;
 	durationMs?: number;
 	fileRead?: FileReadPage;
+	shellStatus?: ShellStatus;
+	approvalReview?: ToolReviewStatus;
+	noteChange?: NoteChange;
+}
+
+export type ShellStatus = 'success' | 'failed' | 'timed-out' | 'stopped' | 'start-failed';
+
+export interface ShellOutputPreview {
+	stdout: string;
+	stderr: string;
 }
 
 export interface FileReadPage {
@@ -162,6 +236,9 @@ export interface ReadDelivery {
 }
 
 export interface ToolContext {
+	skillRun?: SkillRun;
+	subagents?: SubagentToolAccess;
+	subagentId?: string;
 	task: Task;
 	app: App;
 	signal: AbortSignal;
@@ -169,7 +246,9 @@ export interface ToolContext {
 	readFiles: Map<string, string>;
 	readDelivery: ReadDelivery;
 	cwd: string;
-	approve?: (approval: ToolApproval) => Promise<boolean>;
+	approve?: (approval: ToolApproval, identity?: string) => Promise<boolean>;
+	retryApproval?: { approval: ToolApproval; identity: string };
+	onShellOutput?: (output: ShellOutputPreview) => void;
 }
 
 export interface ToolApproval {
@@ -179,12 +258,14 @@ export interface ToolApproval {
 	after?: string;
 	kind?: 'shell' | 'access';
 	reason?: string;
+	background?: true;
 }
 
 export interface PreparedTool {
 	approval?: ToolApproval;
+	approvalIdentity?: string;
 	independent?: true;
-	run(): Promise<string | { content: string; fileRead: FileReadPage }> | string;
+	run(): Promise<string | { content: string; fileRead: FileReadPage } | { content: string; shellStatus: ShellStatus } | { content: string; noteChange: NoteChange }> | string;
 }
 
 export interface ToolDefinition extends ToolSpec {
@@ -242,11 +323,22 @@ export interface ModelStream extends AsyncIterable<ModelStreamEvent> {
 export type TerminalRunStatus = 'done' | 'file-changes-done' | 'partial' | 'failed' | 'cancelled' | 'limit' | 'interrupted';
 export type RunStatus = 'idle' | 'running' | 'awaiting-approval' | TerminalRunStatus;
 
+export interface ContextCompaction {
+	reason: 'budget' | 'overflow';
+	summary: 'none' | 'saved' | 'reused' | 'failed';
+	droppedHistory: number;
+	droppedCurrent: number;
+	shortenedToolResults: number;
+	throughMessage?: number;
+}
+
 export interface RunState {
 	taskId: string;
 	turn: number;
 	messages: Message[];
 	pendingCalls: ToolCall[];
+	auxiliaryUsage?: AuxiliaryUsage[];
+	contextCompaction?: ContextCompaction;
 	status: RunStatus;
 	createdAt?: number;
 	finishedAt?: number;
@@ -257,15 +349,19 @@ export interface RunState {
 export type RunEvent =
 	| { type: 'state'; state: RunState }
 	| { type: 'turn-start'; turn: number }
+	| { type: 'context-compaction'; compaction: ContextCompaction }
 	| { type: 'model-retry'; messageId: string; waiting: boolean; reason?: 'context' }
 	| { type: 'model-intent'; intent: string }
 	| { type: 'text-delta'; messageId: string; contentIndex: number; text: string }
 	| { type: 'thinking-delta'; messageId: string; contentIndex: number; text: string }
 	| { type: 'thinking-end'; messageId: string; contentIndex: number; durationMs: number }
 	| { type: 'tool-start'; call: ToolCall }
+	| { type: 'tool-output'; callId: string; output: ShellOutputPreview }
 	| { type: 'tool-end'; call: ToolCall; result: ToolResult; skipped?: boolean };
 
-export type RunCheckpoint = Exclude<RunEvent, { type: 'text-delta' | 'thinking-delta' | 'thinking-end' | 'model-retry' | 'model-intent' }>;
+export type RunCheckpoint = Exclude<RunEvent, {
+	type: 'text-delta' | 'thinking-delta' | 'thinking-end' | 'model-retry' | 'model-intent' | 'tool-output';
+}>;
 
 export interface SavedRetry {
 	beforeMessage: number;
@@ -276,9 +372,16 @@ export interface SavedRetry {
 
 export interface RunObserver {
 	onEvent?: (event: RunEvent) => void;
+	onAutoReviewDenied?: (denial: AutoReviewDenial) => void;
 	approve?: (approval: ToolApproval, signal: AbortSignal) => Promise<boolean>;
 	retryConnection?: (signal: AbortSignal) => Promise<void>;
 	confirmResume?: (preview: ResumePreview, signal: AbortSignal) => Promise<boolean>;
+}
+
+export interface AutoReviewDenial {
+	id: string;
+	approval: ToolApproval;
+	retry(signal: AbortSignal): Promise<ToolResult>;
 }
 
 export interface ResumePreview {
@@ -368,12 +471,13 @@ export interface ModelService {
 		levels: string[];
 		level?: string;
 	};
+	modelOrigin?(model: RunContext['model']): string | undefined;
 	contextLimits?(model: RunContext['model']): Pick<ProviderModelInfo, 'contextWindow' | 'maxTokens'> | undefined;
 	login(providerId: string, interaction: AuthInteraction, options?: LoginOptions): Promise<Credential>;
 	refresh(providerId?: string): Promise<void>;
 	/** 自建/本地服务商：直接向它的 /models 查询模型清单 */
 	listCustomModels(providerId: string, baseUrl: string): Promise<{ models: string[]; baseUrl: string }>;
-	send(request: ModelRequest): Promise<ModelResponse>;
+	send(request: ModelRequest, onUsage?: (usage: ModelUsageReceipt) => void): Promise<ModelResponse>;
 	stream(request: ModelRequest): ModelStream;
 }
 
@@ -430,6 +534,7 @@ export interface ToolLayer {
 	registry: ToolRegistry;
 	executor: ToolExecutor;
 	external: ExternalToolModules;
+	shellJobs: ShellJobs;
 }
 
 /* ───────────── 第二层：编排层接口 ───────────── */
@@ -437,16 +542,19 @@ export interface ToolLayer {
 export class MissingConversationError extends Error {}
 
 export interface ConversationStore {
+	shellJobHistory: ShellJobHistory;
 	list(): Promise<ConversationSummary[]>;
 	load(id: string): Promise<ConversationSnapshot>;
 	rename(id: string, title: string): Promise<void>;
+	setArchived(id: string, archived: boolean): Promise<void>;
+	saveManualCompaction(id: string, summary: HistorySummary): Promise<void>;
 	delete(id: string): Promise<void>;
 	lastOpened(): Promise<string | undefined>;
 	setLastOpened(id: string): Promise<void>;
 	append(id: string, entries: ConversationEntry[], consumption?: { messages: QueuedMessage[]; fifo?: boolean }): Promise<void>;
 	getQueued(id: string): Promise<QueuedMessage[]>;
 	enqueue(id: string, message: QueuedMessage): Promise<void>;
-	editQueued(id: string, messageId: string, instruction: string): Promise<void>;
+	editQueued(id: string, messageId: string, instruction: string, skillMentions?: SkillMention[]): Promise<void>;
 	deleteQueued(id: string, messageId: string): Promise<void>;
 	fork(id: string, taskId: string): Promise<ConversationSnapshot>;
 	replaceFrom(id: string, taskId: string, entries: ConversationEntry[]): Promise<void>;
@@ -458,36 +566,157 @@ export interface RunStep {
 	call?: Pick<ToolCall, 'id' | 'name'>;
 }
 
-export type ConversationEntry =
+export type ConversationEntry = MainConversationEntry
+	| ({ type: 'subagent' } & SavedSubagentEntry)
+	| { type: 'subagent-report'; taskId: string; report: SubagentReport };
+
+export type MainConversationEntry =
 	| { type: 'queue-add'; message: QueuedMessage }
-	| { type: 'queue-edit'; messageId: string; instruction: string }
+	| { type: 'queue-edit'; messageId: string; instruction: string; skillMentions?: SkillMention[] }
 	| { type: 'queue-delete'; messageId: string }
 	| { type: 'start'; task: Task; model: RunContext['model']; consumedQueueIds?: string[] }
 	| { type: 'messages'; taskId: string; messages: Message[]; step?: RunStep; consumedQueueIds?: string[] }
 	| { type: 'step'; taskId: string; step: RunStep }
 	| { type: 'retry'; taskId: string; retry: SavedRetry }
+	| { type: 'history-summary'; taskId: string; summary: HistorySummary }
+	| { type: 'run-summary'; taskId: string; summary: RunSummary }
+	| { type: 'context-compaction'; taskId: string; compaction: ContextCompaction }
+	| { type: 'auxiliary-usage'; taskId: string; usage: AuxiliaryUsage }
 	| { type: 'finish'; taskId: string; status: TerminalRunStatus; turn: number; error?: string; partial?: string; resumed?: boolean; finishedAt?: number };
+
+export interface HistorySummary {
+	throughTaskId: string;
+	text: string;
+}
+
+export interface RunSummary {
+	throughMessage: number;
+	text: string;
+}
 
 export interface SavedRun {
 	request: TaskRequest;
 	model: RunContext['model'];
 	state: RunState;
 	step?: RunStep;
+	subagentReport?: SubagentReport;
 	partial?: string;
 	finalized?: boolean;
 	retries?: SavedRetry[];
+	historySummary?: HistorySummary;
+	runSummary?: RunSummary;
+}
+
+export interface SubagentRole {
+	name: string;
+	description: string;
+	instructions: string;
+	model?: RunContext['model'];
+	readOnly?: boolean;
+}
+
+export interface SubagentSettings {
+	mode: 'auto' | 'explicit' | 'off';
+	maxConcurrent: number;
+	maxDepth: number;
+	roles: SubagentRole[];
+}
+
+export interface SubagentIdentity {
+	id: string;
+	parentId?: string;
+	parentTaskId?: string;
+	rootTaskId: string;
+	name: string;
+	role: string;
+	model: RunContext['model'];
+}
+
+export interface SubagentNote {
+	id: string;
+	from: string;
+	to: string;
+	text: string;
+	kind: 'message' | 'result' | 'question' | 'answer';
+	status?: RunStatus;
+	agentName?: string;
+	questionId?: string;
+	path?: string;
+	inline?: boolean;
+	review?: { status: 'pending' | 'returned' | 'passed' | 'blocked'; reason?: string };
+}
+
+export type SubagentRecord =
+	| { kind: 'create'; agent: SubagentIdentity; history?: Message[]; instructions?: string; readOnly?: boolean; allowProvider?: boolean; modelOrigin?: string }
+	| { kind: 'run'; entry: Exclude<MainConversationEntry, { type: 'queue-add' | 'queue-edit' | 'queue-delete' }> }
+	| { kind: 'visibility'; closed: boolean }
+	| { kind: 'note'; note: SubagentNote }
+	| { kind: 'review'; noteId: string; disposition: 'use' | 'defer' | 'revise' | 'blocked'; reason?: string; errorKey?: string }
+	| { kind: 'delivered'; ids: string[] };
+
+export interface SavedSubagentEntry {
+	agentId: string;
+	record: SubagentRecord;
+}
+
+export interface SubagentView extends SubagentIdentity {
+	closed?: boolean;
+	runs: SavedRun[];
+	notes?: SubagentNote[];
+	status: RunStatus;
+}
+
+export type SubagentRequest = { id: string; agentId: string; createdAt: number } & (
+	| { kind: 'approval'; approval: ToolApproval }
+	| { kind: 'retry' }
+	| { kind: 'send'; preview: ResumePreview }
+);
+
+export interface SubagentReport {
+	content: string;
+	sentAt: number;
+}
+
+export interface SubagentSnapshot {
+	reports?: Readonly<Record<string, SubagentReport>>;
+	submissions?: Readonly<Record<string, SubagentNote>>;
+	agents: SubagentView[];
+	requests: SubagentRequest[];
+	error?: string;
+}
+
+export interface SubagentController {
+	subscribe(conversationId: string, listener: () => void): () => void;
+	snapshot(conversationId: string): SubagentSnapshot;
+	load(conversationId: string): Promise<void>;
+	addInstruction(conversationId: string, agentId: string, text: string, executionMode?: ExecutionMode): Promise<void>;
+	stop(conversationId: string, agentId?: string): Promise<void>;
+	close(conversationId: string, agentId: string): Promise<void>;
+	reopen(conversationId: string, agentId: string): Promise<void>;
+	resume(conversationId: string, agentId: string, executionMode?: ExecutionMode): Promise<void>;
+	respond(conversationId: string, requestId: string, accepted: boolean): void;
+}
+
+export interface SubagentToolAccess {
+	canSpawn: boolean;
+	canAskParent?: boolean;
+	execute(name: string, input: unknown, signal: AbortSignal): Promise<string>;
 }
 
 export interface ConversationSnapshot {
+	subagents?: SavedSubagentEntry[];
 	id: string;
 	runs: SavedRun[];
 	queue?: QueuedMessage[];
+	manualCompaction?: HistorySummary;
 }
 
 export interface ConversationSummary {
 	id: string;
 	title: string;
 	updatedAt: number;
+	unreadResult?: boolean;
+	archived?: true;
 }
 
 export interface SessionRunOptions {
@@ -497,6 +726,7 @@ export interface SessionRunOptions {
 }
 
 export interface SessionController {
+	subagents?: SubagentController;
 	createConversation(): Promise<string>;
 	listConversations(): Promise<ConversationSummary[]>;
 	openConversation(id?: string): Promise<ConversationSnapshot | null>;
@@ -516,7 +746,7 @@ export interface SessionController {
 
 export interface SideChat {
 	id: string;
-	submit(draft: Pick<TaskRequest, 'instruction' | 'chatQuotes'> & { refs?: NoteRef[]; model?: RunContext['model'] }, observer?: RunObserver): {
+	submit(draft: Pick<TaskRequest, 'instruction' | 'chatQuotes' | 'skillMentions' | 'skillScope'> & { refs?: NoteRef[]; model?: RunContext['model'] }, observer?: RunObserver): {
 		taskId: string; request: TaskRequest; model: SavedRun['model']; result: Promise<RunState>;
 	};
 	stop(): void;
@@ -524,14 +754,19 @@ export interface SideChat {
 }
 
 export interface SkillInfo {
+	id: string;
 	name: string;
 	description: string;
+	sourceLabel: string;
+	displayName?: string;
+	defaultPrompt?: string;
+	enabled: boolean;
+	manual: boolean;
+	implicit: boolean;
 }
 
-export interface SkillRegistry {
-	list(): SkillInfo[];
-	load(name: string): Promise<string>;
-}
+export type SkillRegistry = import('./orchestration/context/skills').SkillRegistry;
+export type SkillRun = import('./orchestration/context/skillRun').SkillRun;
 
 export type ExecutionMode = 'ask' | 'auto-review' | 'full-access';
 
@@ -546,6 +781,18 @@ export interface PermissionPolicy {
 }
 
 export interface RunContext {
+	manualSummary?: string;
+	skillRun?: SkillRun;
+	subagents?: SubagentToolAccess;
+	subagentId?: string;
+	subagentPrompt?: string;
+	destinationCheck?: (request: ModelRequest, address: string) => Promise<void>;
+	inbox?: () => readonly SubagentNote[];
+	acceptInbox?: (ids: string[]) => Promise<void>;
+	collaboration?: {
+		pending(): { blocking: boolean; questions: boolean; actionable: boolean };
+		waitForProgress(signal: AbortSignal): Promise<void>;
+	};
 	task: Task;
 	sideChat?: boolean;
 	permissions: PermissionPolicy;
@@ -555,13 +802,22 @@ export interface RunContext {
 	reviewTool?: (approval: ToolApproval) => Promise<boolean>;
 	resumeReview?: ResumeReview;
 	takeSteering?: () => readonly QueuedMessage[];
-	rejectSteering?: (ids: string[]) => void;
+	rejectSteering?: (ids: string[], reason?: string) => void;
 	signal: AbortSignal;
 	observer: RunObserver;
 	readFiles: Map<string, string>;
 	readDelivery: ReadDelivery;
 	history?: Message[];
 	agreements?: string[];
+	summarizeHistory?: (dropped: ReadonlySet<Message>, room: number, maxBytes: number) => Promise<{
+		text?: string;
+		status: ContextCompaction['summary'];
+	}>;
+	runCompaction?: {
+		summary?: RunSummary;
+		summarize(messages: Message[], throughMessage: number, room: number, maxBytes: number): Promise<ContextCompaction['summary']>;
+	};
+	writingRules?: string;
 	record?: (event: RunCheckpoint) => Promise<void>;
 }
 
@@ -570,6 +826,7 @@ export interface ContextBuilder {
 		ctx: RunContext,
 		current: Message[],
 		maxBytes: number,
+		reason?: ContextCompaction['reason'],
 	): Promise<ModelRequest>;
 }
 
@@ -627,13 +884,26 @@ export interface CommunicationSettings {
 
 export type ChatLocation = 'right-sidebar' | 'left-sidebar' | 'editor-tab';
 
+export interface WritingRules {
+	vault: string;
+	folders: Record<string, string>;
+}
+
 export interface ScribeSettings {
+	skillSettings?: SkillSettings;
+	subagents?: SubagentSettings;
 	/** 当前生效的模型；providerId + model 指向同一个服务商 */
 	providerId: string;
 	model: string;
 	/** 每个已添加服务商的模型列表，键是内部服务商 ID */
 	providerModels: Record<string, string[]>;
 	chatLocation: ChatLocation;
+	/** Days before the one-shot startup cleanup removes spill files; 0 disables cleanup. */
+	spillCleanupDays: number;
+	/** 仅用于读取并迁移旧版配置。 */
+	writingRules?: WritingRules;
+	/** 与现有 AGENTS.md 冲突或无法迁移的旧内容，仅供恢复。 */
+	writingRulesBackup?: WritingRules;
 	/** providerId → modelId → 该模型的覆盖配置 */
 	modelOverrides: Record<string, Record<string, ModelOverride>>;
 	/** [服务商 ID, 模型 ID] 编码为键，记住各模型上次选中的推理档位。 */

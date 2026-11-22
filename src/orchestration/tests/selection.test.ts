@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -13,7 +13,7 @@ import { createToolCoordinator } from '../../runtime/toolCoordinator';
 import { createToolRegistry } from '../../tools';
 import { createToolExecutor } from '../../tools/executor';
 import { readTools } from '../../tools/readTools';
-import type { ModelRequest, ModelStream, NoteSelection, ToolCall } from '../../types';
+import type { ModelRequest, ModelStream, NoteSelection, Task } from '../../types';
 import { createContextBuilder } from '../context/contextBuilder';
 import { createSessionController } from '../sessionController';
 import { normalizeSettings } from '../settings/defaults';
@@ -21,12 +21,18 @@ import { createConversationStore } from '../storage/conversationStore';
 
 const model = { providerId: 'test-provider', model: 'selection-fixture' };
 
-function reply(content: string, call?: ToolCall): ModelStream {
+void test('spill cleanup days default to 30, accept 0 and reject invalid values', () => {
+	assert.equal(normalizeSettings({}).spillCleanupDays, 30);
+	assert.equal(normalizeSettings({ spillCleanupDays: 0 }).spillCleanupDays, 0);
+	assert.equal(normalizeSettings({ spillCleanupDays: 90 }).spillCleanupDays, 90);
+	assert.equal(normalizeSettings({ spillCleanupDays: -1 }).spillCleanupDays, 30);
+	assert.equal(normalizeSettings({ spillCleanupDays: 1.5 }).spillCleanupDays, 30);
+});
+
+function reply(content: string): ModelStream {
 	const raw: AssistantMessage = {
 		role: 'assistant',
-		content: call
-			? [{ type: 'toolCall', id: call.id, name: call.name, arguments: call.input as Record<string, string> }]
-			: [{ type: 'text', text: content }],
+		content: [{ type: 'text', text: content }],
 		api: 'openai-completions',
 		provider: model.providerId,
 		model: model.model,
@@ -34,96 +40,90 @@ function reply(content: string, call?: ToolCall): ModelStream {
 			input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
-		stopReason: call ? 'toolUse' : 'stop',
+		stopReason: 'stop',
 		timestamp: Date.now(),
 	};
 	return {
 		async *[Symbol.asyncIterator]() {
 			if (content) yield { type: 'text_delta', delta: content, contentIndex: 0, partial: raw };
 		},
-		result: () => Promise.resolve({
-			raw, content, toolCalls: call ? [call] : [], stopReason: call ? 'tool-calls' : 'end',
-		}),
+		result: () => Promise.resolve({ raw, content, toolCalls: [], stopReason: 'end' }),
 		cancel() {},
 	};
 }
 
-void test('an attached selection sends the exact snapshot and blocks whole-note tool access', async (t) => {
+void test('retired selection questions remain visible in saved history and cannot be sent again', async (t) => {
 	const root = await mkdtemp(join(tmpdir(), 'scribe-selection-test-'));
 	t.after(() => rm(root, { recursive: true, force: true }));
 	const cwd = join(root, 'vault');
-	const directory = join(root, 'conversations');
 	await mkdir(cwd);
-	const selection: NoteSelection = {
-		path: 'selected.md',
-		title: '选区笔记',
-		text: '  唐然在九点前完成核查 ⏳  ',
-		lines: [1, 1],
-	};
-	const outside = ['LEFT-OF-SELECTION', 'RIGHT-OF-SELECTION', 'OTHER-FILE-CONTENT'];
-	await writeFile(join(cwd, selection.path), outside[0] + selection.text + outside[1]);
-	await writeFile(join(cwd, 'unrelated.md'), outside[2]!);
 	const app = { vault: {
 		adapter: { getBasePath: () => cwd },
 		configDir: 'fixture-vault-config',
 		getFileByPath: () => null,
 	} } as unknown as App;
-	let readsAttempted = 0;
-	const registry = createToolRegistry([() => readTools().map((tool) => ({
-		...tool,
-		prepare(input, context) {
-			readsAttempted++;
-			return tool.prepare(input, context);
-		},
-	}))]);
+	const registry = createToolRegistry([readTools]);
 	const sent: ModelRequest[] = [];
 	const models = createModelCoordinator({ stream(request) {
 		sent.push(request);
-		if (sent.length === 1) return reply('EARLIER-CHAT-ANSWER');
-		if (sent.length === 2) return reply('', {
-			id: 'read-whole-note', name: 'Read', input: { file_path: selection.path },
-		});
-		return reply('已处理选区。');
+		return reply('普通聊天回复。');
 	} }, createContextBuilder(registry));
 	const tools = createToolCoordinator(app, createToolExecutor(registry));
+	const store = createConversationStore(join(root, 'conversations'));
 	const sessions = createSessionController(app, normalizeSettings(model), {
 		newState: createRunState, createAgent: bindAgent(createAgentLoop(models, tools)), models, tools,
-	}, createConversationStore(directory));
+	}, store);
+	t.after(() => sessions.dispose());
 	const id = await sessions.createConversation();
 	const prior = await sessions.submit({ conversationId: id, instruction: 'EARLIER-CHAT-PROMPT', refs: [] }).result;
 	assert.equal(prior.status, 'done', prior.error);
-	assert.deepEqual(sent[0]?.tools.map(({ name }) => name), ['Read']);
 
-	const instruction = '把选区改成一句交接提醒。';
-	const selected = await sessions.submit({
-		conversationId: id, instruction, selection, refs: [{ path: 'unrelated.md' }],
-	}).result;
-	assert.equal(selected.status, 'done', selected.error);
-	const requests = sent.slice(1);
-	assert.equal(requests.length, 2);
-	const firstRequest = requests[0]!;
-	assert.deepEqual(firstRequest.messages.map(({ role }) => role), ['user']);
-	assert.notEqual(firstRequest.sessionId, id);
-	for (const request of requests) {
-		assert.deepEqual(request.tools, []);
-		assert.equal(request.sessionId, firstRequest.sessionId);
-		const content = request.messages.map((message) => message.content).join('\n');
-		const payload = JSON.stringify(request);
-		assert.ok(content.includes(instruction));
-		assert.ok(content.includes(selection.text));
-		assert.ok(content.includes(selection.path));
-		assert.ok(content.includes(selection.title));
-		for (const marker of [...outside, 'unrelated.md', 'EARLIER-CHAT-PROMPT', 'EARLIER-CHAT-ANSWER']) {
-			assert.ok(!payload.includes(marker), `发现选区范围外的内容：${marker}`);
-		}
-	}
-	assert.equal(readsAttempted, 0);
-	assert.ok(selected.messages.some((message) => message.toolCallId === 'read-whole-note' && message.isError));
+	const selection: NoteSelection = {
+		path: 'legacy-selected.md',
+		title: '旧选区笔记',
+		text: '  旧选区正文 LEGACY-SELECTION-SNAPSHOT ⏳  ',
+		lines: [1, 1],
+	};
+	const legacyTask: Task = {
+		id: 'legacy-selection-task',
+		request: { conversationId: id, instruction: 'LEGACY-SELECTION-QUESTION', refs: [], selection },
+		status: 'running',
+		createdAt: Date.now(),
+		updatedAt: Date.now(),
+	};
+	const queued = { id: 'legacy-selection-queued', request: legacyTask.request };
+	await store.append(id, [
+		{ type: 'start', task: legacyTask, model },
+		{ type: 'messages', taskId: legacyTask.id, messages: [
+			{ role: 'user', content: selection.text },
+			{ role: 'assistant', content: 'LEGACY-SELECTION-ANSWER' },
+		] },
+		{ type: 'queue-add', message: queued },
+	]);
 
-	sessions.dispose();
-	const saved = await createConversationStore(directory).load(id);
-	assert.equal(saved.runs.length, 2);
-	assert.equal(saved.runs[0]?.state.messages.at(-1)?.content, 'EARLIER-CHAT-ANSWER');
-	assert.deepEqual(saved.runs[1]?.request.selection, selection);
-	assert.deepEqual(saved.runs[1]?.request.refs, []);
+	const saved = await sessions.openConversation(id);
+	assert.deepEqual(saved?.runs[1]?.request.selection, selection);
+	assert.equal(saved?.runs[1]?.state.messages[0]?.content, selection.text);
+	assert.deepEqual(saved?.queue, [queued]);
+
+	assert.throws(() => sessions.submit(legacyTask.request), /选区问答已停用/u);
+	assert.throws(() => sessions.submitQueued(queued, {}, () => assert.fail('旧选区不能从队列发送')), /选区问答已停用/u);
+	await assert.rejects(sessions.resume(id, legacyTask.id).result, /无法从此处继续任务/u);
+	assert.equal(sent.length, 1);
+
+	const followed = sessions.submit({
+		conversationId: id, instruction: '现在用普通提问。', refs: [{ path: 'normal-note.md' }], chatQuotes: ['这是附上的聊天引文。'],
+	});
+	await assert.rejects(sessions.steer(followed.taskId, queued), /选区问答已停用/u);
+	assert.equal((await followed.result).status, 'done');
+	assert.equal(sent.length, 2);
+	const [normal] = sent.slice(1);
+	assert.equal(normal?.sessionId, id);
+	assert.deepEqual(normal?.tools.map(({ name }) => name), ['Read']);
+	const payload = JSON.stringify(normal);
+	assert.match(payload, /EARLIER-CHAT-PROMPT/u);
+	assert.match(payload, /normal-note\.md/u);
+	assert.match(payload, /这是附上的聊天引文/u);
+	assert.doesNotMatch(payload, /LEGACY-SELECTION|legacy-selected\.md|旧选区笔记/u);
+	assert.deepEqual(await store.getQueued(id), [queued]);
 });

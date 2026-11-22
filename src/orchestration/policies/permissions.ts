@@ -1,3 +1,4 @@
+import { skillWriteProtected } from '../../skills/library/writeProtection';
 import { realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { ExecutionMode, NoteRef, PermissionPolicy } from '../../types';
@@ -46,6 +47,8 @@ export async function createPermissionPolicy(
 	const isProtected = (path: string) => protectedRoots.some((root) => includesPath(root, path));
 
 	function access(path: string, forWrite: boolean): boolean {
+		if (forWrite && executionMode !== 'full-access' && roots.some((root) =>
+			includesPath(root, path) && skillWriteProtected(vaultRoot, resolve(vaultRoot, relative(root, path))))) return false;
 		const matches = matchingReferences(path);
 		if (matches.some(({ ref, paths }) => !ref.lines && (
 				executionMode === 'full-access' || !isProtected(path) || paths.some(isProtected)

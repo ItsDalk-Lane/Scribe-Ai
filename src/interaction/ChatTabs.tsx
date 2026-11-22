@@ -8,6 +8,8 @@ import App from './App';
 import { executionModeKey, loadExecutionMode, replaceActiveTabPane } from './chatTabWorkspace';
 import ChatTabBar from './components/ChatTabBar';
 import { uiText } from './uiText';
+import type { SkillDraft } from './components/skillMentionText';
+import { clearChatGoal } from './useChatGoal';
 
 export interface ChatTabActivity {
 	status?: 'running' | 'attention' | 'error';
@@ -22,6 +24,7 @@ interface Pane extends ChatTabActivity {
 	unread?: boolean;
 	customTitle?: string;
 	initialError?: string;
+	initialDraft?: SkillDraft;
 	openedAt: number;
 }
 
@@ -34,7 +37,10 @@ function newPane(executionMode: ExecutionMode, conversation: ConversationSnapsho
 	return { conversation, executionMode, open: true, hasDraft: false, openedAt: Date.now() };
 }
 
-export default function ChatTabs({ plugin }: { plugin: ScribeAiPlugin }) {
+export default function ChatTabs({ plugin, registerDraftTarget }: {
+	plugin: ScribeAiPlugin;
+	registerDraftTarget: (target?: (draft: SkillDraft) => void) => void;
+}) {
 	const text = uiText();
 	const app = plugin.app;
 	const { conversations, sessions } = plugin.services.orchestration;
@@ -53,11 +59,13 @@ export default function ChatTabs({ plugin }: { plugin: ScribeAiPlugin }) {
 		void Promise.allSettled([sessions.listConversations(), sessions.openConversation()]).then(([history, last]) => {
 			if (closed) return;
 			if (history.status === 'fulfilled') setIndex(history.value);
-			const conversation = last.status === 'fulfilled' ? last.value ?? undefined : undefined;
+			const recent = last.status === 'fulfilled' ? last.value ?? undefined : undefined;
+			const conversation = history.status === 'fulfilled' && history.value.some(({ id, archived }) => id === recent?.id && archived)
+				? undefined : recent;
 			const savedId = conversation && (conversation.runs.length || conversation.queue?.length) ? conversation.id : undefined;
 			const pane = newPane(loadExecutionMode(app, savedId), conversation);
 			if (history.status === 'rejected' || last.status === 'rejected') pane.initialError = text.chatHistoryError;
-			if (last.status === 'rejected' || !last.value) unopenedPane.current = pane.conversation.id;
+			if (!conversation) unopenedPane.current = pane.conversation.id;
 			setWorkspace({ activeId: pane.conversation.id, panes: [pane] });
 		});
 		return () => { closed = true; mounted.current = false; };
@@ -67,6 +75,18 @@ export default function ChatTabs({ plugin }: { plugin: ScribeAiPlugin }) {
 	useLayoutEffect(() => { activePane.current = activeId; }, [activeId]);
 	const active = workspace?.panes.find(({ conversation }) => conversation.id === activeId);
 	const activeMode = active?.executionMode;
+	useLayoutEffect(() => {
+		if (!activeMode) return;
+		registerDraftTarget((draft) => {
+			const pane = newPane(activeMode);
+			pane.initialDraft = draft;
+			pane.hasDraft = true;
+			selection.current++;
+			unopenedPane.current = pane.conversation.id;
+			setWorkspace((current) => current && { activeId: pane.conversation.id, panes: [...current.panes, pane] });
+		});
+		return () => registerDraftTarget();
+	}, [activeMode, registerDraftTarget]);
 	const hasSavedConversation = Boolean(active && (active.title || active.conversation.runs.length || active.conversation.queue?.length));
 	useLayoutEffect(() => {
 		if (!activeId || !activeMode) return;
@@ -112,14 +132,24 @@ export default function ChatTabs({ plugin }: { plugin: ScribeAiPlugin }) {
 		});
 	}
 
-	function newConversationInActiveTab() {
-		selection.current++;
+	function titledPane(title?: string) {
 		const pane = newPane(activeMode ?? loadExecutionMode(app));
+		if (title) {
+			pane.customTitle = title;
+			pendingTitles.current.set(pane.conversation.id, title);
+		}
 		unopenedPane.current = pane.conversation.id;
+		return pane;
+	}
+
+	function newConversationInActiveTab(title?: string) {
+		selection.current++;
+		const pane = titledPane(title);
 		setWorkspace((current) => current && replaceActiveTabPane(current, pane, pendingTitles.current));
 	}
 
 	async function openHistory(id: string) {
+		if (index.some((row) => row.id === id && row.archived)) await setArchived(id, false);
 		const existing = workspace?.panes.find(({ conversation }) => conversation.id === id);
 		if (existing) {
 			show(existing);
@@ -200,8 +230,10 @@ export default function ChatTabs({ plugin }: { plugin: ScribeAiPlugin }) {
 
 	async function remove(id: string) {
 		await sessions.deleteConversation(id);
+		plugin.subagentTabs.closeConversation(id);
 		try {
 			app.saveLocalStorage(executionModeKey(id), null);
+			clearChatGoal(app, id);
 		} catch {
 			new Notice(text.saveFailed);
 		}
@@ -209,6 +241,13 @@ export default function ChatTabs({ plugin }: { plugin: ScribeAiPlugin }) {
 		refreshVersion.current++;
 		setIndex((previous) => previous.filter((row) => row.id !== id));
 		close(id, true);
+	}
+
+	async function setArchived(id: string, archived: boolean) {
+		await conversations.setArchived(id, archived);
+		refreshVersion.current++;
+		setIndex((rows) => rows.map((row) => row.id === id ? { ...row, archived: archived ? true : undefined } : row));
+		if (archived) close(id);
 	}
 
 	if (!workspace) return <div className="scribe-chat-workspace"><p className="scribe-chat-loading" role="status">{text.chatLoadingHistory}</p></div>;
@@ -222,22 +261,25 @@ export default function ChatTabs({ plugin }: { plugin: ScribeAiPlugin }) {
 	const tabs = workspace.panes.filter((pane) => pane.open).map((pane) => ({
 		id: pane.conversation.id,
 		title: pane.customTitle ?? saved.get(pane.conversation.id)?.title ?? pane.title ?? text.chatUntitled,
-		status: pane.status ?? (pane.unread ? 'attention' as const : undefined),
+		status: pane.status,
 	}));
 
 	return <div className="scribe-chat-workspace">
 		<ChatTabBar tabs={tabs} activeId={workspace.activeId} onNew={() => show(newPane(activeMode ?? loadExecutionMode(app)))}
 			onActivate={(id) => { const pane = workspace.panes.find(({ conversation }) => conversation.id === id); if (pane) show(pane); }}
 			onClose={close} onRename={rename} />
-		{workspace.panes.map(({ conversation, initialError, executionMode }) => {
+		{workspace.panes.map(({ conversation, initialError, executionMode, initialDraft, open }) => {
 			const selected = conversation.id === workspace.activeId;
 			return <div key={conversation.id} className="scribe-chat-tab-panel" id={`scribe-tab-panel-${conversation.id}`}
 				role="tabpanel" aria-labelledby={`scribe-tab-${conversation.id}`} hidden={!selected}>
-				<App plugin={plugin} conversation={conversation} mode={executionMode} selected={selected} conversations={all} initialError={initialError ?? ''}
+				<App plugin={plugin} conversation={conversation} mode={executionMode} selected={selected} open={open} conversations={all} initialError={initialError ?? ''} initialDraft={initialDraft}
 					onModeChange={(mode) => setWorkspace((current) => current && { ...current, panes: current.panes.map((pane) =>
 						pane.conversation.id === conversation.id ? { ...pane, executionMode: mode } : pane) })}
-					onNew={newConversationInActiveTab} onOpen={openHistory} onRename={rename} onDelete={remove} onRefresh={refresh}
-					onFork={(snapshot) => show(newPane(executionMode, snapshot), activePane.current === conversation.id)} onActivity={updateActivity} />
+					onNew={newConversationInActiveTab} onNewTab={(title) => show(titledPane(title))}
+					onClose={() => close(conversation.id)} onArchive={setArchived}
+					onOpen={openHistory} onRename={rename} onDelete={remove} onRefresh={refresh}
+					onFork={(snapshot, title) => show({ ...newPane(executionMode, snapshot), customTitle: title },
+						activePane.current === conversation.id)} onActivity={updateActivity} />
 			</div>;
 		})}
 	</div>;

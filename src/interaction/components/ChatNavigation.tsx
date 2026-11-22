@@ -1,152 +1,78 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import type { ConversationSummary } from '../../types';
+import { useCallback, useRef } from 'react';
+import type { ConversationStore, ConversationSummary } from '../../types';
+import { conversationPreview } from '../context';
 import { uiText } from '../uiText';
 import ChatIcon from './ChatIcon';
+import EditableConversation from './EditableConversation';
+import { tr } from '../skills/dialog';
+import type { EditableConversationProps } from './EditableConversation';
+import HistoryPreviewCard from './HistoryPreviewCard';
+import type { HistoryExcerpt } from './HistoryPreviewCard';
+import JumpNavigator from './JumpNavigator';
 
-interface ConversationListProps {
+interface ConversationListProps extends Omit<EditableConversationProps, 'conversation'> {
 	conversations: ConversationSummary[];
-	conversationId?: string | null;
-	disabled: boolean;
+	conversationId: string;
 	onSelect: (id: string) => void;
-	onRename: (id: string, title: string) => Promise<boolean>;
-	onDelete: (conversation: ConversationSummary, trigger: HTMLButtonElement) => void;
 }
 
-interface ConversationRowProps extends Omit<ConversationListProps, 'conversations' | 'conversationId'> {
-	conversation: ConversationSummary;
-	current: boolean;
-}
-
-function ConversationRow({ conversation, current, disabled, onSelect, onRename, onDelete }: ConversationRowProps) {
+export function ConversationList({ conversations, conversationId, disabled, onSelect, onRename, onDelete }: ConversationListProps) {
 	const text = uiText();
-	const { id, title, updatedAt } = conversation;
-	const label = title || text.chatUntitled;
-	const [draft, setDraft] = useState<string | null>(null);
-	const edit = useRef<HTMLButtonElement>(null);
-	const field = useRef<HTMLInputElement>(null);
-	const restoreFocus = useRef(false);
-	const editing = draft !== null;
-	useLayoutEffect(() => {
-		if (editing) {
-			field.current?.focus({ preventScroll: true });
-			field.current?.select();
-		} else if (restoreFocus.current) {
-			restoreFocus.current = false;
-			edit.current?.focus({ preventScroll: true });
-		}
-	}, [editing]);
-
-	if (draft !== null) {
-		return <li>
-			<form className="scribe-conversation-editor" onSubmit={(event) => {
-				event.preventDefault();
-				const name = draft.trim();
-				if (!disabled && name) void onRename(id, name).then((saved) => { if (saved) setDraft(null); });
-			}} onKeyDown={(event) => {
-				if (event.key !== 'Escape' || event.nativeEvent.isComposing) return;
-				event.preventDefault();
-				event.stopPropagation();
-				if (!disabled) setDraft(null);
-			}}>
-				<input ref={field} type="text" aria-label={text.chatConversationTitle} value={draft} maxLength={120} readOnly={disabled}
-					onChange={(event) => setDraft(event.currentTarget.value)} />
-				<button type="submit" className="scribe-chat-icon-button" aria-label={text.save} title={text.save}
-					disabled={disabled || !draft.trim()}><ChatIcon name="check" /></button>
-				<button type="button" className="scribe-chat-icon-button" aria-label={text.cancel} title={text.cancel}
-					disabled={disabled} onClick={() => setDraft(null)}><ChatIcon name="x" /></button>
-			</form>
-		</li>;
-	}
-	return <li className="scribe-conversation-item" data-disabled={disabled || undefined}>
-		<button type="button" className="scribe-conversation-row" disabled={disabled}
-			aria-current={current ? 'true' : undefined} onClick={() => onSelect(id)}>
-			<ChatIcon name="message-circle" />
-			<span className="scribe-conversation-title" title={label}>{label}</span>
-			<time>{new Date(updatedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</time>
-		</button>
-		<div className="scribe-conversation-actions">
-			<button type="button" ref={edit} className="scribe-chat-icon-button" disabled={disabled}
-				aria-label={`${text.chatRenameConversation} ${label}`} title={text.chatRenameConversation} onClick={() => {
-					restoreFocus.current = true;
-					setDraft(title);
-				}}><ChatIcon name="pencil" /></button>
-			<button type="button" className="scribe-chat-icon-button scribe-conversation-delete" disabled={disabled}
-				aria-label={`${text.chatDeleteConversation} ${label}`} title={text.chatDeleteConversation}
-				onClick={(event) => onDelete(conversation, event.currentTarget)}><ChatIcon name="trash-2" /></button>
-		</div>
-	</li>;
-}
-
-export function ConversationList({ conversations, conversationId, ...actions }: ConversationListProps) {
-	return (
-		<ul className="scribe-conversation-list">
-			{conversations.map((conversation) => (
-				<ConversationRow key={conversation.id} conversation={conversation} current={conversation.id === conversationId} {...actions} />
-			))}
-		</ul>
-	);
-}
-
-export default function ChatNavigation({ conversations, conversationId, disabled, managing, onSelect, onNew, onRename, onDelete, onRefresh }:
-	ConversationListProps & { managing: boolean; onNew: () => void; onRefresh: () => Promise<void> }) {
-	const text = uiText();
-	const group = useRef<HTMLDivElement>(null);
-	const trigger = useRef<HTMLButtonElement>(null);
-	const panelId = useId();
-	const [open, setOpen] = useState(false);
-	const [refreshing, setRefreshing] = useState(false);
-	const showHistory = open && !disabled;
-
-	function toggleHistory() {
-		setOpen(!open);
-		if (open || refreshing) return;
-		setRefreshing(true);
-		void onRefresh().finally(() => setRefreshing(false));
-	}
-
-	useEffect(() => {
-		if (disabled) setOpen(false);
-	}, [disabled]);
-	useEffect(() => {
-		const element = group.current;
-		if (!showHistory || !element) return;
-		const doc = element.ownerDocument;
-		const dismiss = (event: PointerEvent) => {
-			if (!event.composedPath().includes(element) && !(event.target as Element | null)?.closest?.('.modal-container')) setOpen(false);
-		};
-		doc.addEventListener('pointerdown', dismiss);
-		return () => doc.removeEventListener('pointerdown', dismiss);
-	}, [showHistory]);
-	return (
-		<nav className="scribe-chat-navigation" aria-label={text.chatConversation}>
-			<button type="button" className="scribe-chat-icon-button" disabled={disabled || managing}
-				aria-label={text.chatNewConversation} title={text.chatNewConversation} onClick={onNew}>
-				<ChatIcon name="message-circle-plus" />
-			</button>
-			<div className="scribe-chat-history" ref={group} onKeyDown={(event) => {
-				if (!showHistory || event.key !== 'Escape') return;
-				event.preventDefault();
-				event.stopPropagation();
-				setOpen(false);
-				trigger.current?.focus();
-			}}>
-				<button type="button" className="scribe-chat-icon-button" ref={trigger} disabled={disabled || managing}
-					aria-label={text.chatHistory} title={text.chatHistory} aria-expanded={showHistory}
-					aria-controls={showHistory ? panelId : undefined} onClick={toggleHistory}>
-					<ChatIcon name="history" />
+	return <ul className="scribe-conversation-list">
+		{conversations.map((conversation) => <li key={conversation.id}>
+			<EditableConversation conversation={conversation} disabled={disabled} onRename={onRename} onDelete={onDelete}>
+				<button type="button" className="scribe-conversation-row" disabled={disabled}
+					aria-current={conversation.id === conversationId || undefined} onClick={() => onSelect(conversation.id)}>
+					<ChatIcon name="message-circle" />
+					<span className="scribe-conversation-title">{conversation.title || text.chatUntitled}
+						{conversation.archived ? ` · ${tr('已归档', 'Archived')}` : ''}</span>
+					<time>{new Date(conversation.updatedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</time>
 				</button>
-				{showHistory && <section className="scribe-history-panel" id={panelId} aria-label={text.chatHistory}>
-					{refreshing || !conversations.length ? <p className="scribe-chat-loading" role="status">
-						{refreshing ? text.chatLoadingHistory : text.chatNoSavedConversations}
-					</p> : <ConversationList conversations={conversations} conversationId={conversationId} disabled={disabled || managing}
-						onRename={onRename} onDelete={onDelete}
-						onSelect={(id) => {
-							setOpen(false);
-							trigger.current?.focus();
-							onSelect(id);
-						}} />}
-				</section>}
-			</div>
-		</nav>
-	);
+			</EditableConversation>
+		</li>)}
+	</ul>;
+}
+
+interface HistoryProps extends ConversationListProps {
+	store: Pick<ConversationStore, 'load'>;
+	onRefresh: () => Promise<void>;
+}
+
+export default function ChatNavigation({ conversations, conversationId, disabled,
+	store, onSelect, onRename, onDelete, onRefresh }: HistoryProps) {
+	const text = uiText();
+	const refreshing = useRef(false);
+	const cache = useRef(new Map<string, { updatedAt: number; value: Promise<HistoryExcerpt> }>());
+
+	function refresh() {
+		if (refreshing.current || disabled) return;
+		refreshing.current = true;
+		void onRefresh().finally(() => { refreshing.current = false; });
+	}
+
+	const readExcerpt = useCallback((id: string, updatedAt: number) => {
+		const last = cache.current.get(id);
+		if (last?.updatedAt === updatedAt) return last.value;
+		const value = store.load(id).then(conversationPreview).catch((error: unknown) => {
+			if (cache.current.get(id)?.value === value) cache.current.delete(id);
+			throw error;
+		});
+		cache.current.set(id, { updatedAt, value });
+		return value;
+	}, [store]);
+
+	const entries = conversations.map((row) => ({ ...row, label: `${row.title || text.chatUntitled}${row.archived ? ` · ${tr('已归档', 'Archived')}` : ''}` }));
+
+	function card(row: ConversationSummary, onChoose: () => void, compact: boolean) {
+		return <HistoryPreviewCard key={row.id} conversation={row} current={row.id === conversationId}
+			compact={compact} disabled={disabled}
+			readExcerpt={readExcerpt} onChoose={onChoose} onRename={onRename} onDelete={onDelete} />;
+	}
+
+	return <JumpNavigator side="right" icon="history" label={text.chatHistory} entries={entries} current={conversationId}
+		onJump={onSelect} onInteract={refresh} disabled={disabled}
+		renderPreview={(row, choose) => card(row, choose, false)} renderCompactEntry={(row, choose) => card(row, choose, true)}
+		emptyLabel={text.chatNoSavedConversations} renderEmpty={() => <div className="scribe-history-empty">
+			<p role="status">{text.chatNoSavedConversations}</p>
+		</div>} />;
 }

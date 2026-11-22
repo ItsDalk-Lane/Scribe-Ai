@@ -1,4 +1,4 @@
-import type { Api } from '@earendil-works/pi-ai';
+import type { Api, Usage } from '@earendil-works/pi-ai';
 import type { ReportedUsage } from '../types';
 
 function record(value: unknown): Record<string, unknown> {
@@ -7,6 +7,11 @@ function record(value: unknown): Record<string, unknown> {
 
 function count(value: unknown): number | undefined {
 	return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+export function reportedCost(usage?: Usage): number | undefined {
+	const cost = usage?.cost;
+	return cost?.totalFromProvider === true && Number.isFinite(cost.total) && cost.total >= 0 ? cost.total : undefined;
 }
 
 function counters(api: Api, event: Record<string, unknown>): ReportedUsage {
@@ -21,7 +26,7 @@ function counters(api: Api, event: Record<string, unknown>): ReportedUsage {
 				prompt: count(usage.prompt_tokens), input: count(usage.prompt_cache_miss_tokens),
 				cacheRead: count(detail.cached_tokens ?? detail.cachedTokens ?? usage.prompt_cache_hit_tokens
 					?? usage.cached_tokens ?? usage.num_cached_tokens ?? usage.numCachedTokens),
-				cacheWrite: count(detail.cache_write_tokens), output: count(usage.completion_tokens),
+				cacheWrite: count(detail.cache_write_tokens), output: count(usage.completion_tokens), total: count(usage.total_tokens),
 			};
 		}
 		case 'openai-responses':
@@ -30,7 +35,7 @@ function counters(api: Api, event: Record<string, unknown>): ReportedUsage {
 			const usage = record(record(event.response).usage);
 			const detail = record(usage.input_tokens_details);
 			return { prompt: count(usage.input_tokens), cacheRead: count(detail.cached_tokens),
-				cacheWrite: count(detail.cache_write_tokens), output: count(usage.output_tokens) };
+				cacheWrite: count(detail.cache_write_tokens), output: count(usage.output_tokens), total: count(usage.total_tokens) };
 		}
 		case 'anthropic-messages': {
 			const usage = record(event.usage ?? record(event.message).usage);
@@ -40,7 +45,7 @@ function counters(api: Api, event: Record<string, unknown>): ReportedUsage {
 		case 'bedrock-converse-stream': {
 			const usage = record(record(event.metadata).usage);
 			return { input: count(usage.inputTokens), cacheRead: count(usage.cacheReadInputTokens),
-				cacheWrite: count(usage.cacheWriteInputTokens), output: count(usage.outputTokens) };
+				cacheWrite: count(usage.cacheWriteInputTokens), output: count(usage.outputTokens), total: count(usage.totalTokens) };
 		}
 		case 'google-generative-ai':
 		case 'google-vertex': {
@@ -48,12 +53,12 @@ function counters(api: Api, event: Record<string, unknown>): ReportedUsage {
 			const candidates = count(usage.candidatesTokenCount);
 			const thoughts = count(usage.thoughtsTokenCount);
 			return { prompt: count(usage.promptTokenCount), cacheRead: count(usage.cachedContentTokenCount),
-				output: candidates === undefined ? undefined : candidates + (thoughts ?? 0) };
+				output: candidates === undefined ? undefined : candidates + (thoughts ?? 0), total: count(usage.totalTokenCount) };
 		}
 		case 'pi-messages': {
 			const usage = record(event.usage);
 			return { input: count(usage.input), cacheRead: count(usage.cacheRead),
-				cacheWrite: count(usage.cacheWrite), output: count(usage.output) };
+				cacheWrite: count(usage.cacheWrite), output: count(usage.output), total: count(usage.totalTokens) };
 		}
 		default: return {};
 	}
@@ -64,7 +69,7 @@ export function captureReportedUsage(api: Api) {
 	return {
 		observe(this: void, event: unknown) {
 			const update = counters(api, record(event));
-			for (const key of ['prompt', 'input', 'cacheRead', 'cacheWrite', 'output'] as const) {
+			for (const key of ['prompt', 'input', 'cacheRead', 'cacheWrite', 'output', 'total'] as const) {
 				if (update[key] !== undefined) values[key] = update[key];
 			}
 		},

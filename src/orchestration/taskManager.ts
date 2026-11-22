@@ -3,18 +3,14 @@ import type { RunState, Task, TaskRequest } from '../types';
 
 export function createTask(request: TaskRequest): Task {
 	const now = Date.now();
-	const { selection } = request;
-	if (selection && (!selection.text.trim() || !selection.path.trim() || !selection.title.trim()
-		|| selection.lines.length !== 2 || !selection.lines.every(Number.isSafeInteger)
-		|| selection.lines[0] < 1 || selection.lines[0] > selection.lines[1])) {
-		throw new Error('选区内容无效，请重新附上选区。');
-	}
+	if (request.selection) throw new Error('选区问答已停用，请新建普通提问。');
 	return {
 		id: randomUUID(),
 		request: {
 			...request,
-			refs: selection ? [] : request.refs.map((ref) => ({ ...ref, lines: ref.lines && [...ref.lines] })),
-			selection: selection && { path: selection.path, title: selection.title, text: selection.text, lines: [...selection.lines] },
+			...(request.skillScope && { skillScope: [...request.skillScope] }),
+			...(request.skillMentions && { skillMentions: request.skillMentions.map((mention) => ({ ...mention })) }),
+			refs: request.refs.map((ref) => ({ ...ref, lines: ref.lines && [...ref.lines] })),
 			chatQuotes: request.chatQuotes?.slice(),
 		},
 		status: 'pending',

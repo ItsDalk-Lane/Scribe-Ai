@@ -1,17 +1,29 @@
-import type { Message, ReportedUsage, RunState } from '../types';
+import type { AuxiliaryUsage, Message, ReportedUsage, RunState } from '../types';
+import { reportedCost } from '../communication/reportedUsage';
 
 function nonNegative(value: unknown): value is number {
 	return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
 export function completedMessages(messages: readonly Message[]) {
-	return messages.filter((message) => message.role === 'assistant' && !message.incomplete);
+	return messages.filter((message) => message.role === 'assistant' && !message.incomplete && !message.local);
 }
 
-export function messageUsage(message: Message) {
+function normalizeUsage(reported: ReportedUsage | undefined, cost: number | undefined) {
+	const { output, cacheRead, cacheWrite } = reported ?? {};
+	let { input, prompt } = reported ?? {};
+	if (cacheRead !== undefined && cacheWrite !== undefined) {
+		if (prompt === undefined && input !== undefined) prompt = input + cacheRead + cacheWrite;
+		else if (input === undefined && prompt !== undefined && prompt >= cacheRead + cacheWrite) input = prompt - cacheRead - cacheWrite;
+	}
+	return {
+		input, prompt, cacheRead, cacheWrite, output, cost,
+		total: reported?.total ?? (prompt === undefined || output === undefined ? undefined : prompt + output),
+	};
+}
+
+function messageUsage(message: Message) {
 	const usage = message.usage ?? message.rawAssistant?.usage;
-	const billed = usage?.cost;
-	const cost = billed?.totalFromProvider === true && nonNegative(billed.total) ? billed.total : undefined;
 	let reported = message.reportedUsage;
 	if (!reported && usage) {
 		// 旧记录没有字段来源，无法将适配器补入的零与服务商报告的零区分开。
@@ -19,18 +31,13 @@ export function messageUsage(message: Message) {
 		const input = positive(usage.input);
 		const cacheRead = positive(usage.cacheRead);
 		const cacheWrite = positive(usage.cacheWrite);
-		reported = { input, cacheRead, cacheWrite, output: positive(usage.output),
-			prompt: input === undefined ? undefined : input + (cacheRead ?? 0) + (cacheWrite ?? 0) };
+		reported = { input, cacheRead, cacheWrite, output: positive(usage.output) };
 	}
-	if (cost === undefined && !Object.values(reported ?? {}).some(nonNegative)) return;
-	if (reported && reported.input === undefined && reported.prompt !== undefined && reported.cacheRead !== undefined) {
-		const input = reported.prompt - reported.cacheRead - (reported.cacheWrite ?? 0);
-		if (nonNegative(input)) reported = { ...reported, input };
-	}
-	return { ...reported, cost };
+	return normalizeUsage(reported, reportedCost(usage));
 }
 
 export interface UsageTotals {
+	count: number;
 	input?: number;
 	cacheRead?: number;
 	cacheWrite?: number;
@@ -38,7 +45,10 @@ export interface UsageTotals {
 	total?: number;
 	hit?: number;
 	cost?: number;
-	partialTotal?: boolean;
+}
+
+export interface UsageBreakdown extends UsageTotals {
+	byKind: Record<'main' | AuxiliaryUsage['kind'], UsageTotals | undefined>;
 }
 
 export interface ContextUsage {
@@ -55,8 +65,9 @@ export interface ConversationMetrics {
 	toolMs: number | undefined;
 	lagMs: number | undefined;
 	speed: number | undefined;
-	usage: UsageTotals | undefined;
+	usage: UsageBreakdown | undefined;
 	context: ContextUsage | undefined;
+	contextCompaction: RunState['contextCompaction'];
 }
 
 function sum(values: (number | undefined)[]): number | undefined {
@@ -64,43 +75,61 @@ function sum(values: (number | undefined)[]): number | undefined {
 	return measured.length ? measured.reduce((total, value) => total + value, 0) : undefined;
 }
 
-export function usageTotals(messages: readonly Message[]): UsageTotals | undefined {
-	const entries = messages.map(messageUsage);
-	if (!entries.some(Boolean)) return;
-	const fields = (key: keyof ReportedUsage) => entries.map((entry) => entry?.[key]);
-	const prompts = fields('prompt');
-	const cacheReads = fields('cacheRead');
-	const total = entries.map((entry) => entry?.prompt === undefined || entry.output === undefined ? undefined : entry.prompt + entry.output);
-	const prompt = prompts.every(nonNegative) ? sum(prompts) : undefined;
-	const read = cacheReads.every(nonNegative) ? sum(cacheReads) : undefined;
-	const partialTotal = !total.every(nonNegative);
-	return { input: sum(fields('input')), cacheRead: sum(cacheReads), cacheWrite: sum(fields('cacheWrite')),
-		output: sum(fields('output')), total: sum(total), hit: prompt && read !== undefined ? read / prompt : undefined,
-		cost: sum(entries.map((entry) => entry?.cost)),
-		...(partialTotal ? { partialTotal: true } : {}),
+type RequestUsage = ReturnType<typeof normalizeUsage>;
+
+function usageTotals(entries: RequestUsage[]): UsageTotals | undefined {
+	if (!entries.length) return;
+	const totalOf = (key: keyof RequestUsage) => {
+		const values = entries.map((entry) => entry[key]);
+		return values.every(nonNegative) ? values.reduce((total, value) => total + value, 0) : undefined;
+	};
+	const prompt = totalOf('prompt');
+	const read = totalOf('cacheRead');
+	return {
+		count: entries.length,
+		input: totalOf('input'), cacheRead: read, cacheWrite: totalOf('cacheWrite'),
+		output: totalOf('output'), total: totalOf('total'), cost: totalOf('cost'),
+		hit: prompt && read !== undefined ? read / prompt : undefined,
 	};
 }
 
+function usageBreakdown(messages: readonly Message[], auxiliary: readonly AuxiliaryUsage[]): UsageBreakdown | undefined {
+	const main = messages.map(messageUsage);
+	const review: RequestUsage[] = [];
+	const summary: RequestUsage[] = [];
+	for (const { kind, reportedUsage, cost } of auxiliary) {
+		(kind === 'review' ? review : summary).push(normalizeUsage(reportedUsage, cost));
+	}
+	const total = usageTotals([...main, ...review, ...summary]);
+	return total && { ...total, byKind: { main: usageTotals(main), review: usageTotals(review), summary: usageTotals(summary) } };
+}
+
+export function runUsage(state: RunState): UsageBreakdown | undefined {
+	return usageBreakdown(completedMessages(state.messages), state.auxiliaryUsage ?? []);
+}
+
 export function messageTime(message: Message | undefined) {
+	if (message?.local) return;
 	if (message?.metrics?.endedAt) return message.metrics.endedAt;
 	const { timestamp, durationMs } = message?.rawAssistant ?? {};
 	return timestamp && nonNegative(durationMs) ? timestamp + durationMs : undefined;
 }
 
-export function conversationMetrics(runs: readonly RunState[]): ConversationMetrics {
-	const all = runs.flatMap(({ messages }) => messages);
+export function conversationMetrics(runs: readonly RunState[], subagentRuns: readonly RunState[] = []): ConversationMetrics {
+	const allRuns = [...new Map([...subagentRuns, ...runs].map((run) => [run.taskId, run])).values()];
+	const all = allRuns.flatMap(({ messages }) => messages);
 	const messages = completedMessages(all);
-	const usage = usageTotals(messages);
+	const usage = usageBreakdown(messages, allRuns.flatMap(({ auxiliaryUsage }) => auxiliaryUsage ?? []));
 	const lags = messages.flatMap(({ metrics }) => nonNegative(metrics?.firstDeltaMs) ? [metrics.firstDeltaMs] : []);
 	const decode = messages.map(({ metrics }) => metrics?.decodeMs);
 	const decodeMs = decode.every(nonNegative) ? sum(decode) : undefined;
-	const output = messages.map((message) => messageUsage(message)?.output);
+	const output = messages.map((message) => messageUsage(message).output);
 	const outputTokens = output.every(nonNegative) ? sum(output) : undefined;
-	const latest = messages.at(-1);
-	const prompt = latest && messageUsage(latest)?.prompt;
+	const latest = (subagentRuns.length ? completedMessages(runs.flatMap(({ messages }) => messages)) : messages).at(-1);
+	const prompt = latest && messageUsage(latest).prompt;
 	const capacity = latest?.metrics?.contextWindow;
 	return {
-		rounds: runs.length,
+		rounds: allRuns.length,
 		count: messages.length,
 		modelMs: sum(messages.map(({ metrics, rawAssistant }) => metrics?.modelMs ?? rawAssistant?.durationMs)),
 		toolMs: sum(all.map(({ toolDurationMs }) => toolDurationMs)),
@@ -109,6 +138,7 @@ export function conversationMetrics(runs: readonly RunState[]): ConversationMetr
 		usage,
 		context: prompt !== undefined && capacity && capacity > 0
 			? { prompt, capacity, remaining: Math.max(0, capacity - prompt), percent: Math.ceil(prompt * 10_000 / capacity) / 100 } : undefined,
+		contextCompaction: runs.reduce<RunState['contextCompaction']>((latest, run) => run.contextCompaction ?? latest, undefined),
 	};
 }
 

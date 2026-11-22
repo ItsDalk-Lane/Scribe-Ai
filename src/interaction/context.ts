@@ -1,6 +1,6 @@
-import type { Message, RunEvent, RunState, RunStep, SavedRun, ToolApproval } from '../types';
+import type { ConversationSnapshot, Message, RunEvent, RunState, RunStep, SavedRun, ToolApproval } from '../types';
 import { toolSignature } from '../tools/support/toolSignature';
-import { recordedTimeline, skippedNotice, toolRowId } from './chatTurnContent';
+import { chatTurnPreview, recordedTimeline, skippedNotice, toolRowId } from './chatTurnContent';
 import { applyTimelineChange, attemptGroup, blockId, retryNotice } from './chatTimeline';
 import type { NoticeRow, TimelineItem, ToolRow } from './chatTimeline';
 
@@ -71,6 +71,7 @@ function acceptState(previous: ChatExecution, state: RunState, step?: RunStep, r
 			return [recorded];
 		}
 		if ((row.kind === 'text' || row.kind === 'thinking') && row.draft && savedIds.has(row.messageId)) return [];
+		if (state.status !== 'running' && row.kind === 'tool' && row.shellOutput) return [{ ...row, shellOutput: undefined }];
 		return [row];
 	});
 	items.push(...confirmed.values());
@@ -90,7 +91,7 @@ function acceptState(previous: ChatExecution, state: RunState, step?: RunStep, r
 
 export function restoreExecution(run: DisplayedRun): ChatExecution {
 	if (run.displayed) return run.displayed;
-	const hasUser = run.state.messages.some(({ role }) => role === 'user');
+	const hasUser = run.state.messages.some(({ role, subagentActivity }) => role === 'user' && !subagentActivity);
 	const state = hasUser ? run.state : {
 		...run.state,
 		messages: [{ role: 'user' as const, content: run.request.instruction }, ...run.state.messages],
@@ -106,10 +107,17 @@ export function restoreExecution(run: DisplayedRun): ChatExecution {
 	return { ...restored, items };
 }
 
+export function conversationPreview(conversation: ConversationSnapshot) {
+	const run = conversation.runs.at(-1);
+	return run ? chatTurnPreview(restoreExecution(run), run.request.instruction, run.subagentReport) : { prompt: '', reply: '' };
+}
+
 export function updateExecution(previous: ChatExecution, event: RunEvent): ChatExecution {
 	switch (event.type) {
 		case 'turn-start':
 			return { ...previous, turn: event.turn, modelRetry: undefined, modelIntent: undefined };
+		case 'context-compaction':
+			return previous.state ? { ...previous, state: { ...previous.state, contextCompaction: event.compaction } } : previous;
 		case 'model-intent':
 			return previous.modelIntent === event.intent ? previous : { ...previous, modelIntent: event.intent, modelRetry: undefined };
 		case 'model-retry': {
@@ -129,8 +137,15 @@ export function updateExecution(previous: ChatExecution, event: RunEvent): ChatE
 		case 'thinking-end':
 			return { ...previous, items: applyTimelineChange(previous.items, event) };
 		case 'tool-start':
+		case 'tool-output':
 		case 'tool-end': {
-			const id = toolRowId(previous.messageId ?? `assistant:${previous.state?.taskId}:${previous.turn}`, event.call.id);
+			const callId = event.type === 'tool-output' ? event.callId : event.call.id;
+			const id = toolRowId(previous.messageId ?? `assistant:${previous.state?.taskId}:${previous.turn}`, callId);
+			if (event.type === 'tool-output') {
+				const row = previous.items.find((item) => item.id === id);
+				if (previous.state?.status !== 'running' || row?.kind !== 'tool' || row.result) return previous;
+				return { ...previous, items: put(previous.items, { ...row, shellOutput: event.output }) };
+			}
 			const item: ToolRow = { kind: 'tool', id, call: event.call };
 			if (event.type === 'tool-start' && previous.items.some((row) => row.id === id)) return previous;
 			if (event.type === 'tool-end') {

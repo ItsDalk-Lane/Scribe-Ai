@@ -1,5 +1,19 @@
-import type { CustomProviderSettings, ModelOverride, ScribeSettings } from '../../types';
+import type { CustomProviderSettings, ModelOverride, ScribeSettings, SkillSettings, WritingRules } from '../../types';
+import { writingRulePath } from '../context/writingRules';
+import { DEFAULT_SUBAGENT_SETTINGS, normalizeSubagentSettings } from './subagentSettings';
 import { chatModelKey, isThinkingLevel } from './thinking';
+
+export function normalizeSkillSettings(raw?: Partial<SkillSettings>): SkillSettings {
+	const strings = (items: unknown) => Array.isArray(items) ? [...new Set(items.filter((x): x is string => typeof x === 'string' && Boolean(x.trim())))] : [];
+	const percent = raw?.catalogBudgetPercent;
+	const max = raw?.catalogBudgetMaxTokens;
+	return {
+		sharedDirectories: strings(raw?.sharedDirectories),
+		disabledIds: strings(raw?.disabledIds),
+		catalogBudgetPercent: typeof percent === 'number' && percent > 0 && percent <= 100 ? percent : 2,
+		catalogBudgetMaxTokens: typeof max === 'number' && Number.isSafeInteger(max) && max > 0 ? max : 10_000,
+	};
+}
 
 export const DEFAULT_SETTINGS: ScribeSettings = {
 	providerId: '',
@@ -9,6 +23,9 @@ export const DEFAULT_SETTINGS: ScribeSettings = {
 	thinkingByModel: {},
 	customProviders: {},
 	chatLocation: 'right-sidebar',
+	spillCleanupDays: 30,
+	subagents: DEFAULT_SUBAGENT_SETTINGS,
+	skillSettings: normalizeSkillSettings(),
 	communication: { credentialIds: {}, proxyUrl: '', providerNames: {}, baseUrls: {}, protocols: {} },
 };
 
@@ -22,6 +39,16 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 				.filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
 		);
 	};
+	const legacyRules = (value: WritingRules | undefined): WritingRules | undefined => {
+		const vault = typeof value?.vault === 'string' ? value.vault.trim() : '';
+		const folders = Object.fromEntries(Object.entries(strings(value?.folders)).flatMap(([path, rule]) => {
+			const folder = writingRulePath(path);
+			return folder && rule.trim() ? [[folder, rule.trim()]] : [];
+		}));
+		return vault || Object.keys(folders).length ? { vault, folders } : undefined;
+	};
+	const writingRules = legacyRules(stored.writingRules);
+	const writingRulesBackup = legacyRules(stored.writingRulesBackup);
 	const providerId = stored.providerId ?? DEFAULT_SETTINGS.providerId;
 	const model = stored.model ?? DEFAULT_SETTINGS.model;
 	const providerModels: Record<string, string[]> = {};
@@ -87,6 +114,15 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 			|| stored.chatLocation === 'editor-tab'
 			? stored.chatLocation
 			: DEFAULT_SETTINGS.chatLocation,
+		spillCleanupDays: typeof stored.spillCleanupDays === 'number'
+			&& Number.isSafeInteger(stored.spillCleanupDays)
+			&& stored.spillCleanupDays >= 0
+			? stored.spillCleanupDays
+			: DEFAULT_SETTINGS.spillCleanupDays,
+		subagents: normalizeSubagentSettings(stored.subagents),
+		skillSettings: normalizeSkillSettings(stored.skillSettings),
+		...(writingRules ? { writingRules } : {}),
+		...(writingRulesBackup ? { writingRulesBackup } : {}),
 		communication: {
 			credentialIds: strings(stored.communication?.credentialIds),
 			proxyUrl: typeof stored.communication?.proxyUrl === 'string' ? stored.communication.proxyUrl : '',

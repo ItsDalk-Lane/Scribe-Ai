@@ -9,7 +9,7 @@ export class ResumeThinkingUnavailable extends Error {
 }
 
 export function canResumeRun(run: SavedRun | undefined): run is SavedRun {
-	return Boolean(run && !run.finalized && run.state.status === 'interrupted'
+	return Boolean(run && !run.request.selection && !run.finalized && run.state.status === 'interrupted'
 		&& (run.step?.phase !== 'tool' || run.state.pendingCalls.length === 0));
 }
 

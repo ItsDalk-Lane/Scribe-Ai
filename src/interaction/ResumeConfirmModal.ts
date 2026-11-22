@@ -3,7 +3,9 @@ import type { App } from 'obsidian';
 import type { Message, ResumePreview } from '../types';
 import { uiText } from './uiText';
 
-export function confirmResume(app: App, preview: ResumePreview, signal: AbortSignal): Promise<boolean> {
+export function confirmResume(app: App, preview: ResumePreview, signal: AbortSignal, labelsOverride: {
+	title?: string; confirm?: string; disclosure?: string; scope?: string;
+} = {}): Promise<boolean> {
 	if (signal.aborted) return Promise.resolve(false);
 	const text = uiText();
 	const { address, request, source } = preview;
@@ -19,16 +21,16 @@ export function confirmResume(app: App, preview: ResumePreview, signal: AbortSig
 			signal.removeEventListener('abort', close);
 			resolve(approved && !signal.aborted);
 		};
-		modal.titleEl.setText(text.chatResumeReview);
+		modal.titleEl.setText(labelsOverride.title ?? text.chatResumeReview);
 		const destination = modal.contentEl.createEl('p');
 		destination.createEl('strong', { text: text.chatResumeAddress });
 		destination.createDiv({ cls: 'scribe-chat-content', text: address });
 		destination.createDiv({ text: request.model });
-		modal.contentEl.createEl('p', { text: text.chatResumeDisclosure });
+		modal.contentEl.createEl('p', { text: labelsOverride.disclosure ?? text.chatResumeDisclosure });
 
 		if (source.refs.length) {
 			const scope = modal.contentEl.createEl('details');
-			scope.createEl('summary', { text: text.chatResumeScope });
+			scope.createEl('summary', { text: labelsOverride.scope ?? text.chatResumeScope });
 			const paths = scope.createEl('ul');
 			for (const ref of source.refs) paths.createEl('li', { text: ref.path });
 		}
@@ -45,7 +47,7 @@ export function confirmResume(app: App, preview: ResumePreview, signal: AbortSig
 		}
 		const actions = modal.contentEl.createDiv({ cls: 'scribe-modal-actions is-end' });
 		new ButtonComponent(actions).setButtonText(text.cancel).onClick(close);
-		new ButtonComponent(actions).setClass('mod-cta').setButtonText(text.chatResume).onClick(() => {
+		new ButtonComponent(actions).setClass('mod-cta').setButtonText(labelsOverride.confirm ?? text.chatResume).onClick(() => {
 			approved = true;
 			close();
 		});

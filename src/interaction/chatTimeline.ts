@@ -1,17 +1,22 @@
-import type { RunEvent, ToolCall, ToolResult } from '../types';
+import type { Message, RunEvent, ShellOutputPreview, ToolCall, ToolResult } from '../types';
+import { subagentToolNames } from '../tools/subagentTools';
 import { toolKind } from './toolCardDetails';
 
 export type TextRow = { kind: 'text'; id: string; messageId: string; content: string; draft?: boolean; abandoned?: boolean; final?: true };
 export type ThinkingRow = {
 	kind: 'thinking'; id: string; messageId: string; content: string; pending?: boolean; durationMs?: number; draft?: boolean;
 };
-export type ToolRow = { kind: 'tool'; id: string; call: ToolCall; result?: ToolResult; skipped?: boolean; resolved?: boolean };
+export type ToolRow = {
+	kind: 'tool'; id: string; call: ToolCall; result?: ToolResult; shellOutput?: ShellOutputPreview; skipped?: boolean; resolved?: boolean;
+};
 export type NoticeRow = {
 	kind: 'notice'; id: string;
-	code: 'reconnect' | 'connection' | 'context' | 'skipped' | 'failed' | 'cancelled' | 'interrupted' | 'limit';
+	code: 'reconnect' | 'connection' | 'context' | 'skipped' | 'failed' | 'cancelled' | 'interrupted' | 'limit' | 'collaboration';
 	tone: 'info' | 'warning' | 'error'; detail?: string; resolved?: boolean; messageId?: string;
 };
-export type TimelineItem = TextRow | ThinkingRow | ToolRow | NoticeRow;
+export type SubagentRow = { kind: 'subagent'; id: string; activity: NonNullable<Message['subagentActivity']>; content: string };
+type SkillSteeringRow = { kind: 'skill-steering'; id: string; content: string; mentions: NonNullable<Message['skillMentions']> };
+export type TimelineItem = TextRow | ThinkingRow | ToolRow | NoticeRow | SubagentRow | SkillSteeringRow;
 export type TimelineRow = TimelineItem | { kind: 'tool-group'; id: string; members: [ToolRow, ...ToolRow[]] };
 
 export type TimelineChange =
@@ -53,7 +58,8 @@ export function applyTimelineChange(items: readonly TimelineItem[], change: Time
 	return index < 0 ? [...items, next] : items.map((item, position) => position === index ? next : item);
 }
 
-function groupKind(call: ToolCall): string {
+function groupKind({ id, call }: ToolRow): string {
+	if (subagentToolNames.has(call.name)) return `agent:${id}`;
 	const kind = toolKind(call.name);
 	return kind === 'generic' ? 'tool:' + call.name : kind === 'notebook' ? 'edit' : kind;
 }
@@ -63,7 +69,7 @@ export function timelineRows(items: readonly TimelineItem[]): TimelineRow[] {
 	let group: Extract<TimelineRow, { kind: 'tool-group' }> | undefined;
 	for (const item of items) {
 		const last = rows.at(-1);
-		if (item.kind === 'tool' && group && groupKind(group.members[0].call) === groupKind(item.call)) {
+		if (item.kind === 'tool' && group && groupKind(group.members[0]) === groupKind(item)) {
 			group.members.push(item);
 			continue;
 		}
@@ -72,7 +78,7 @@ export function timelineRows(items: readonly TimelineItem[]): TimelineRow[] {
 			rows[rows.length - 1] = { ...last, content: last.content + item.content };
 			continue;
 		}
-		if (item.kind === 'tool' && last?.kind === 'tool' && groupKind(last.call) === groupKind(item.call)) {
+		if (item.kind === 'tool' && last?.kind === 'tool' && groupKind(last) === groupKind(item)) {
 			group = { kind: 'tool-group', id: `group:${last.id}`, members: [last, item] };
 			rows[rows.length - 1] = group;
 		} else {

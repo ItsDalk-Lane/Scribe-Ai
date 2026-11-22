@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
@@ -9,7 +10,9 @@ import type { App } from 'obsidian';
 import { createModelService } from '../../communication/providers';
 import { chatTurnContent } from '../../interaction/chatTurnContent';
 import { emptyExecution, restoreExecution, updateExecution } from '../../interaction/context';
-import { createContextBuilder } from '../../orchestration/context/contextBuilder';
+import { createContextBuilder, taskMessage } from '../../orchestration/context/contextBuilder';
+import { createSkillRegistry } from '../../orchestration/context/skills';
+import { createSkillRun } from '../../orchestration/context/skillRun';
 import { createRunContext } from '../../orchestration/runContext';
 import { createSessionController } from '../../orchestration/sessionController';
 import { normalizeSettings } from '../../orchestration/settings/defaults';
@@ -17,12 +20,13 @@ import { createConversationStore } from '../../orchestration/storage/conversatio
 import { createTask } from '../../orchestration/taskManager';
 import { createToolLayer, createToolRegistry } from '../../tools';
 import { createToolExecutor } from '../../tools/executor';
+import { shellTools } from '../../tools/external/shellTool';
 import { readTools } from '../../tools/readTools';
 import { writeTools } from '../../tools/writeTools';
 import { ContextOverflowError, RetryableModelError } from '../../types';
 import type {
 	CredentialStore, Message, ModelRequest, ModelResponse, ModelService, ModelStream, QueuedMessage,
-	RunObserver, RuntimeLayer, ToolCall, ToolModule, Transport,
+	RunObserver, RuntimeLayer, SkillRegistry, SubagentNote, TaskRequest, ToolCall, ToolLayer, ToolModule, Transport,
 } from '../../types';
 import { createAgentLoop } from '../agentLoop';
 import { mayHaveStoppedEarly } from '../continuationText';
@@ -78,15 +82,17 @@ function fakeStream(response: ModelResponse, signal?: AbortSignal): ModelStream 
 	};
 }
 
-function sessionsFor(app: App, service: Pick<ModelService, 'stream' | 'contextLimits'>, modules: ToolModule[], settings = normalizeSettings(null)) {
+function sessionsFor(app: App, service: Pick<ModelService, 'stream' | 'contextLimits'>, modules: ToolModule[] | ToolLayer, settings = normalizeSettings(null), skills?: SkillRegistry) {
 	settings.providerId = 'test-model-service';
 	settings.model = 'test-model';
-	const registry = createToolRegistry(modules);
+	const registry = Array.isArray(modules) ? createToolRegistry(modules) : modules.registry;
 	const models = createModelCoordinator(service, createContextBuilder(registry));
-	const tools = createToolCoordinator(app, createToolExecutor(registry));
+	const tools = createToolCoordinator(app, Array.isArray(modules) ? createToolExecutor(registry) : modules.executor);
 	const runtime: RuntimeLayer = { newState: createRunState, createAgent: bindAgent(createAgentLoop(models, tools)), models, tools };
 	const adapter = app.vault.adapter as import('obsidian').FileSystemAdapter;
-	return createSessionController(app, settings, runtime, createConversationStore(join(adapter.getBasePath(), 'transcripts')));
+	const store = createConversationStore(join(adapter.getBasePath(), 'transcripts'));
+	return createSessionController(app, settings, runtime, store, undefined, undefined,
+		Array.isArray(modules) ? undefined : modules.shellJobs, skills);
 }
 
 void test('steering reaches the next natural model request, keeps its paired tool result and commits after success', async (t) => {
@@ -207,6 +213,75 @@ void test('stopping while a steering model request is running leaves the message
 	const result = await loop.run(ctx, createRunState(ctx));
 	assert.equal(result.status, 'cancelled');
 	assert.ok(!result.messages.some(({ id }) => id === 'steer:stopped'));
+});
+
+void test('collaboration answers questions between tools and waits without exposing an early final reply', async (t) => {
+	const { cwd, app } = await fixture(t);
+	const replies: string[] = [];
+	const ctx = await createRunContext(createTask({ conversationId: 'collaboration', instruction: '完成核对', refs: [] }), {
+		cwd, model: { providerId: 'fake', model: 'fake' }, signal: new AbortController().signal,
+		observer: { onEvent: (event) => { if (event.type === 'text-delta') replies.push(event.text); } },
+	}, app.vault.configDir);
+	const question: SubagentNote = { id: 'question', from: 'child', to: 'root', kind: 'question', text: '使用哪个版本？' };
+	const result: SubagentNote = { id: 'result', from: 'child', to: 'root', kind: 'result', text: '新版的结果', path: 'subagent-result:result' };
+	let inbox: SubagentNote[] = [];
+	let blocking = true;
+	let waits = 0;
+	ctx.inbox = () => inbox;
+	ctx.collaboration = {
+		pending: () => ({ blocking, questions: inbox.includes(question), actionable: inbox.length > 0 }),
+		waitForProgress: async () => { waits++; inbox = [result]; },
+	};
+	const first = { id: 'first', name: 'Write', input: {} };
+	const second = { id: 'second', name: 'Write', input: {} };
+	const answer = { id: 'answer', name: 'answer_subagent', input: {} };
+	const review = { id: 'review', name: 'review_subagent_result', input: {} };
+	const context = createContextBuilder(createToolRegistry([]));
+	const executed: string[] = [];
+	const loop = createAgentLoop({
+		async nextTurn(state, current) {
+			switch (state.turn) {
+				case 1: return emptyModelResponse('', [first, second]);
+				case 2:
+					assert.deepEqual(current.inbox?.(), [question]);
+					return emptyModelResponse('', [answer]);
+				case 3:
+					current.observer.onEvent?.({ type: 'text-delta', text: '提前结尾', contentIndex: 0, messageId: 'preview' });
+					return emptyModelResponse('提前结尾');
+				case 4: {
+					assert.deepEqual(current.inbox?.(), [result]);
+					const request = await context.build(current, state.messages, 32_000);
+					assert.equal(request.messages.some(({ subagentActivity }) => subagentActivity !== undefined), false);
+					assert.match(request.system ?? '', /subagent-result:result/u);
+					return emptyModelResponse('', [review]);
+				}
+				default: return emptyModelResponse('核对完成');
+			}
+		},
+	}, {
+		async *runCalls(state, _ctx, _approve, skip) {
+			for (const call of state.pendingCalls) {
+				const reason = await skip?.(call);
+				if (!reason) {
+					executed.push(call.id);
+					if (call.id === first.id) inbox = [question];
+					if (call.id === answer.id) inbox = [];
+					if (call.id === review.id) { inbox = []; blocking = false; }
+				}
+				yield { call, result: { callId: call.id, isError: Boolean(reason), content: reason ?? '完成' }, skipped: Boolean(reason) };
+			}
+		},
+	});
+	const completed = await loop.run(ctx, createRunState(ctx));
+	assert.equal(completed.status, 'done');
+	assert.deepEqual(executed, [first.id, answer.id, review.id]);
+	assert.equal(completed.messages.find(({ toolCallId }) => toolCallId === second.id)?.skipped, true);
+	assert.equal(waits, 1);
+	assert.deepEqual(replies, []);
+	assert.deepEqual(completed.messages.flatMap(({ subagentActivity }) => subagentActivity ? [subagentActivity.id] : []),
+		[question.id, result.id]);
+	assert.equal(completed.messages.some(({ content }) => content === '提前结尾'), false);
+	assert.equal(completed.messages.at(-1)?.content, '核对完成');
 });
 
 void test('oversized steering retries the original turn only when no provider request has been sent', async (t) => {
@@ -974,6 +1049,388 @@ void test('cancel during an approval settles before the approval responds', asyn
 		[['1', true], ['2', true]]);
 });
 
+void test('shell output updates one live row and stopping preserves its captured ends in reopened chat', {
+	skip: !shellTools().find(({ name }) => name === 'Bash')?.isAvailable?.(),
+}, async (t) => {
+	const { app, cwd } = await fixture(t);
+	const command = [
+		"printf '标准输出首行\\n'; printf '%s\\n' {1..6000}; printf '标准输出第一阶段\\n'",
+		"{ printf '错误输出首行\\n'; printf '%s\\n' {1..6000}; printf '错误输出第一阶段\\n'; } >&2",
+		'while [[ ! -f next-step.txt ]]; do sleep 0.05; done',
+		"printf '%0800d\\n标准输出末行\\n' 0; printf '%0800d\\n停止前的诊断\\n' 0 >&2",
+		'sleep 30',
+	].join('; ');
+	const call = { id: 'shell', name: 'Bash', input: { command } };
+	const queued = { id: 'queued', name: 'Bash', input: { command: 'printf unexpected > queued.txt' } };
+	const sessions = sessionsFor(app, {
+		stream: ({ signal }) => fakeStream(emptyModelResponse('', [call, queued]), signal),
+	}, [shellTools]);
+	const conversationId = 'shell-stop';
+	let live = emptyExecution;
+	const run = sessions.submit({ conversationId, instruction: '运行命令', refs: [] }, {
+		approve: async () => true,
+		onEvent(event) { live = updateExecution(live, event); },
+	});
+	async function waitForOutput(stdout: string, stderr: string) {
+		const deadline = Date.now() + 5_000;
+		while (true) {
+			const row = live.items.find((item) => item.kind === 'tool' && item.call.id === call.id);
+			if (row?.kind === 'tool' && row.shellOutput?.stdout.includes(stdout) && row.shellOutput.stderr.includes(stderr)) {
+				assert.equal(row.result, undefined);
+				for (const stream of [row.shellOutput.stdout, row.shellOutput.stderr]) {
+					assert.ok(stream.trimEnd().split('\n').length <= 3);
+					assert.ok(Buffer.byteLength(stream) <= 512);
+				}
+				return row.id;
+			}
+			assert.ok(Date.now() < deadline, 'shell preview did not show both output streams');
+			await delay(25);
+		}
+	}
+	try {
+		const rowId = await waitForOutput('标准输出第一阶段', '错误输出第一阶段');
+		await writeFile(join(cwd, 'next-step.txt'), '');
+		assert.equal(await waitForOutput('标准输出末行', '停止前的诊断'), rowId);
+		assert.equal(live.items.filter((item) => item.kind === 'tool' && item.call.id === call.id).length, 1);
+	} finally {
+		await sessions.cancel(run.taskId);
+	}
+	const result = await run.result;
+	assert.equal(result.status, 'cancelled');
+	assert.equal(result.messages.find(({ toolCallId }) => toolCallId === queued.id)?.skipped, true);
+	const saved = (await sessions.openConversation(conversationId))?.runs[0];
+	assert.ok(saved);
+	for (const execution of [live, restoreExecution(saved)]) {
+		const row = execution.items.find((item) => item.kind === 'tool' && item.call.id === call.id);
+		assert.ok(row?.kind === 'tool');
+		assert.equal(row.shellOutput, undefined);
+		assert.equal(row.result?.shellStatus, 'stopped');
+		assert.match(row.result?.content ?? '', /标准输出首行[\s\S]*中间已截断[\s\S]*标准输出末行/);
+		assert.match(row.result?.content ?? '', /错误输出首行[\s\S]*中间已截断[\s\S]*停止前的诊断/);
+	}
+});
+
+void test('a background command releases the chat and only its owner can read incremental output and stop it', {
+	skip: !shellTools().find(({ name }) => name === 'Bash')?.isAvailable?.(),
+}, async (t) => {
+	const { app, cwd } = await fixture(t);
+	const layer = createToolLayer();
+	const owner = 'background-owner';
+	let pending: ToolCall[] = [];
+	let approvals = 0;
+	const sessions = sessionsFor(app, {
+		stream({ signal }) {
+			const calls = pending;
+			pending = [];
+			return fakeStream(calls.length ? emptyModelResponse('', calls) : emptyModelResponse('这轮聊天已继续。'), signal);
+		},
+	}, layer);
+	const submit = (conversationId: string, calls: ToolCall[], allow = true) => {
+		pending = calls;
+		return sessions.submit({ conversationId, instruction: '处理这次后台命令。', refs: [] }, {
+			approve: async (approval) => {
+				approvals++;
+				assert.equal(approval.kind, 'shell');
+				return allow;
+			},
+		}, undefined, { executionMode: 'ask' }).result;
+	};
+	const command = [
+		"printf '开始普通输出\\n'; printf '开始错误输出\\n' >&2",
+		'while [[ ! -f next-step.txt ]]; do sleep 0.05; done',
+		"printf '%s\\n' {1..6000}; printf '最后普通输出\\n'; { printf '%s\\n' {1..6000}; printf '最后错误输出\\n'; } >&2",
+		'sleep 30',
+	].join('; ');
+	const start = { id: 'start', name: 'Bash', input: { command, elevated: true, run_in_background: true, timeout: 15_000 } };
+	try {
+		const denied = await submit(owner, [{ ...start, id: 'denied' }], false);
+		assert.equal(denied.messages.find(({ toolCallId }) => toolCallId === 'denied')?.isError, true);
+		assert.deepEqual(layer.shellJobs.list(owner), []);
+
+		const started = await submit(owner, [start]);
+		assert.equal(started.status, 'done', started.error);
+		assert.equal(started.messages.at(-1)?.content, '这轮聊天已继续。');
+		const receipt = started.messages.find(({ toolCallId }) => toolCallId === start.id)?.content ?? '';
+		const id = /后台任务编号：([\w-]+)/u.exec(receipt)?.[1];
+		assert.ok(id, receipt);
+		assert.equal(layer.shellJobs.list(owner)[0]?.status, 'running');
+		const read = { id: 'read', name: 'ShellJobOutput', input: { job_id: id } };
+		const stop = { id: 'stop', name: 'ShellJobStop', input: { job_id: id } };
+		const other = await submit('background-other', [read, stop]);
+		const deniedOperations = other.messages.filter(({ role }) => role === 'tool');
+		assert.deepEqual(deniedOperations.map(({ isError }) => isError), [true, true]);
+		assert.doesNotMatch(deniedOperations.map(({ content }) => content).join('\n'), /开始普通输出|开始错误输出/);
+		assert.deepEqual(layer.shellJobs.list('background-other'), []);
+		assert.equal(layer.shellJobs.list(owner)[0]?.status, 'running');
+
+		async function waitForBoth(jobId: string, stdoutMarker: string, stderrMarker: string) {
+			let stdout = '';
+			let stderr = '';
+			const deadline = Date.now() + 3_000;
+			while (!stdout.includes(stdoutMarker) || !stderr.includes(stderrMarker)) {
+				const output = layer.shellJobs.read(owner, jobId);
+				stdout += output?.stdout ?? '';
+				stderr += output?.stderr ?? '';
+				assert.ok(Date.now() < deadline, 'background output did not arrive');
+				await delay(25);
+			}
+		}
+		await waitForBoth(id, '开始普通输出', '开始错误输出');
+		const first = await submit(owner, [read]);
+		const firstOutput = first.messages.find(({ toolCallId }) => toolCallId === read.id)?.content ?? '';
+		assert.match(firstOutput, /开始普通输出/);
+		assert.match(firstOutput, /开始错误输出/);
+		await writeFile(join(cwd, 'next-step.txt'), '');
+		await waitForBoth(id, '最后普通输出', '最后错误输出');
+		const next = await submit(owner, [{ ...read, id: 'next' }]);
+		const nextOutput = next.messages.find(({ toolCallId }) => toolCallId === 'next')?.content ?? '';
+		assert.match(nextOutput, /最后错误输出/);
+		assert.match(nextOutput, /完整结果/);
+		assert.doesNotMatch(nextOutput, /开始普通输出|开始错误输出/);
+
+		const stopped = await submit(owner, [stop, { ...read, id: 'final', input: { job_id: id, final: true } }]);
+		assert.equal(stopped.messages.find(({ toolCallId }) => toolCallId === stop.id)?.isError, false);
+		assert.equal(layer.shellJobs.list(owner)[0]?.status, 'stopped');
+		const final = stopped.messages.find(({ toolCallId }) => toolCallId === 'final')?.content ?? '';
+		assert.match(final, /开始普通输出[\s\S]*中间已截断[\s\S]*最后普通输出/);
+		assert.match(final, /开始错误输出[\s\S]*中间已截断[\s\S]*最后错误输出/);
+		assert.equal(approvals, 2);
+	} finally {
+		sessions.dispose();
+	}
+});
+
+void test('a long foreground command resumes the chat with the same process and output, then runs without a deadline', {
+	skip: !shellTools().find(({ name }) => name === 'Bash')?.isAvailable?.(),
+	timeout: 10_000,
+}, async (t) => {
+	const { app, cwd } = await fixture(t);
+	const layer = createToolLayer();
+	const conversationId = 'automatic-background';
+	let approvals = 0;
+	let requests = 0;
+	let preview = { stdout: '', stderr: '' };
+	const command = [
+		'printf "%s\\n" "$$" >> started.txt',
+		"printf '移交前的输出\\n'; printf '移交前的诊断\\n' >&2",
+		'while [[ ! -f next-step.txt ]]; do sleep 0.05; done',
+		'printf "%s\\n" "$$" > continued.txt',
+		"printf '移交后的输出\\n'; printf '移交后的诊断\\n' >&2",
+		'sleep 30',
+	].join('; ');
+	const call = { id: 'shell', name: 'Bash', input: { command, elevated: true, timeout: 12_000 } };
+	const sessions = sessionsFor(app, {
+		stream({ signal }) {
+			const reply = requests++ ? emptyModelResponse('这轮聊天已继续。') : emptyModelResponse('', [call]);
+			return fakeStream(reply, signal);
+		},
+	}, layer);
+	t.after(() => sessions.dispose());
+	const realDelay = delay;
+	async function waitFor(check: () => boolean | Promise<boolean>, message: string) {
+		const deadline = Date.now() + 3_000;
+		while (!await check()) {
+			assert.ok(Date.now() < deadline, message);
+			await realDelay(25);
+		}
+	}
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+	const foreground = sessions.submit({ conversationId, instruction: '运行本地命令。', refs: [] }, {
+		approve: async (approval) => {
+			approvals++;
+			assert.equal(approval.background, undefined);
+			return true;
+		},
+		onEvent(event) {
+			if (event.type === 'tool-output' && event.callId === call.id) preview = event.output;
+		},
+	}, undefined, { executionMode: 'ask' });
+	const startedPath = join(cwd, 'started.txt');
+	await waitFor(async () => Boolean(await readFile(startedPath, 'utf8').catch(() => '')), 'Bash did not start');
+	let elapsed = 0;
+	await waitFor(() => {
+		elapsed += 250;
+		assert.ok(elapsed < 10_000, 'foreground output did not arrive');
+		t.mock.timers.tick(250);
+		return preview.stdout.includes('移交前的输出') && preview.stderr.includes('移交前的诊断');
+	}, 'Bash did not report foreground output');
+	t.mock.timers.tick(9_999 - elapsed);
+	assert.deepEqual(layer.shellJobs.list(conversationId), []);
+	t.mock.timers.tick(1);
+
+	const result = await foreground.result;
+	assert.equal(result.status, 'done', result.error);
+	assert.equal(result.messages.at(-1)?.content, '这轮聊天已继续。');
+	const receipt = result.messages.find(({ toolCallId }) => toolCallId === call.id)?.content ?? '';
+	const id = /后台任务编号：([\w-]+)/u.exec(receipt)?.[1];
+	assert.ok(id, receipt);
+	assert.equal(approvals, 1);
+	assert.deepEqual(layer.shellJobs.read(conversationId, id), { stdout: '移交前的输出\n', stderr: '移交前的诊断\n' });
+	await writeFile(join(cwd, 'next-step.txt'), '');
+	let stdout = '';
+	let stderr = '';
+	await waitFor(() => {
+		const output = layer.shellJobs.read(conversationId, id);
+		stdout += output?.stdout ?? '';
+		stderr += output?.stderr ?? '';
+		return stdout.includes('移交后的输出') && stderr.includes('移交后的诊断');
+	}, 'Bash did not continue in the background');
+	assert.deepEqual({ stdout, stderr }, { stdout: '移交后的输出\n', stderr: '移交后的诊断\n' });
+	const started = await readFile(startedPath, 'utf8');
+	assert.match(started, /^\d+\n$/u);
+	assert.equal(await readFile(join(cwd, 'continued.txt'), 'utf8'), started);
+
+	t.mock.timers.tick(1_999);
+	assert.equal(layer.shellJobs.get(conversationId, id)?.status, 'running');
+	assert.deepEqual(layer.shellJobs.listUnread(conversationId), []);
+	t.mock.timers.tick(1);
+	assert.equal(layer.shellJobs.get(conversationId, id)?.status, 'running');
+	await layer.shellJobs.stop(conversationId, id);
+	assert.equal(layer.shellJobs.get(conversationId, id)?.status, 'stopped');
+	assert.match(layer.shellJobs.get(conversationId, id)?.content ?? '', /移交前的输出[\s\S]*移交后的输出[\s\S]*移交前的诊断[\s\S]*移交后的诊断/u);
+	assert.deepEqual(layer.shellJobs.listUnread(conversationId), [{ id, status: 'stopped' }]);
+});
+
+void test('background completions restore only unread notices in their chat without waking the model', {
+	skip: !shellTools().find(({ name }) => name === 'Bash')?.isAvailable?.(),
+	timeout: 10_000,
+}, async (t) => {
+	const { app, cwd } = await fixture(t);
+	const directory = join(cwd, 'transcripts');
+	const owner = 'saved-background-owner';
+	const other = 'saved-background-other';
+	const layer = createToolLayer(createConversationStore(directory).shellJobHistory);
+	let pending: ToolCall[] = [];
+	let approvals = 0;
+	let modelRequests = 0;
+	const model = {
+		stream({ signal }: ModelRequest) {
+			modelRequests++;
+			const calls = pending;
+			pending = [];
+			return fakeStream(calls.length ? emptyModelResponse('', calls) : emptyModelResponse('处理完毕。'), signal);
+		},
+	};
+	const sessions = sessionsFor(app, model, layer);
+	const submit = (target: typeof sessions, conversationId: string, calls: ToolCall[]) => {
+		pending = calls;
+		return target.submit({ conversationId, instruction: '处理后台命令。', refs: [] }, {
+			approve: async () => { approvals++; return true; },
+		}, undefined, { executionMode: 'ask' }).result;
+	};
+	const call = (id: string, command: string): ToolCall => ({
+		id, name: 'Bash', input: { command, elevated: true, run_in_background: true, timeout: 9_000 },
+	});
+	const read = (id: string, jobId: string): ToolCall => ({ id, name: 'ShellJobOutput', input: { job_id: jobId, final: true } });
+	const unreadHistory = async (target: typeof sessions) => (await target.listConversations())
+		.filter(({ unreadResult }) => unreadResult).map(({ id }) => id);
+	const waitForRelease = 'while [[ ! -f finish.txt ]]; do sleep 0.05; done';
+	try {
+		const submitted = await submit(sessions, owner, [
+			call('complete', `${waitForRelease}; printf '普通输出首行\\n'; printf '%s\\n' {1..6000}; printf '普通输出末行\\n'; printf '最终诊断\\n' >&2`),
+			call('fail', `${waitForRelease}; exit 5`),
+			call('keep-running', 'printf "%s\\n" "$$" >> launches.txt; printf "关闭前输出\\n"; printf "关闭前诊断\\n" >&2; sleep 30'),
+		]);
+		assert.equal(submitted.status, 'done', submitted.error);
+		assert.equal(modelRequests, 2);
+		const receiptId = (callId: string) => /后台任务编号：([\w-]+)/u.exec(
+			submitted.messages.find(({ toolCallId }) => toolCallId === callId)?.content ?? '',
+		)?.[1];
+		const completedId = receiptId('complete');
+		const failedId = receiptId('fail');
+		const runningId = receiptId('keep-running');
+		assert.ok(completedId && failedId && runningId);
+		assert.equal(new Set([completedId, failedId, runningId]).size, 3);
+		assert.deepEqual(layer.shellJobs.listUnread(owner), []);
+		await writeFile(join(cwd, 'finish.txt'), '');
+		let stdout = '';
+		let stderr = '';
+		const deadline = Date.now() + 3_000;
+		while (true) {
+			const output = layer.shellJobs.read(owner, runningId);
+			stdout += output?.stdout ?? '';
+			stderr += output?.stderr ?? '';
+			if (stdout.includes('关闭前输出') && stderr.includes('关闭前诊断')
+				&& layer.shellJobs.listUnread(owner).length >= 2) break;
+			assert.ok(Date.now() < deadline, 'completion notices or the running command output did not arrive');
+			await delay(25);
+		}
+		assert.equal(layer.shellJobs.get(owner, runningId)?.status, 'running');
+		assert.deepEqual(layer.shellJobs.listUnread(other), []);
+		await layer.shellJobs.markRead(other, completedId);
+		assert.deepEqual(new Map(layer.shellJobs.listUnread(owner).map(({ id, status }) => [id, status])),
+			new Map([[completedId, 'success'], [failedId, 'failed']]));
+		await Promise.all([layer.shellJobs.markRead(owner, completedId), layer.shellJobs.markRead(owner, completedId)]);
+		assert.deepEqual(layer.shellJobs.listUnread(owner), [{ id: failedId, status: 'failed' }]);
+		assert.equal(modelRequests, 2);
+		const launchPath = join(cwd, 'launches.txt');
+		const launched = await readFile(launchPath, 'utf8');
+		assert.match(launched, /^\d+\n$/u);
+		sessions.dispose();
+		await layer.shellJobs.dispose();
+		if (process.platform !== 'win32') assert.throws(() => process.kill(Number(launched), 0), { code: 'ESRCH' });
+
+		const restoredLayer = createToolLayer(createConversationStore(directory).shellJobHistory);
+		const reopened = sessionsFor(app, model, restoredLayer);
+		try {
+			assert.equal(restoredLayer.shellJobs.hasUnread(owner), undefined);
+			assert.deepEqual(await unreadHistory(reopened), [owner]);
+			assert.equal((await reopened.openConversation(owner))?.id, owner);
+			assert.deepEqual(await unreadHistory(reopened), [owner]);
+			assert.deepEqual(restoredLayer.shellJobs.list(owner), []);
+			const saved = await restoredLayer.shellJobs.listSaved(owner);
+			assert.equal(saved.find(({ id }) => id === completedId)?.status, 'success');
+			assert.equal(saved.find(({ id }) => id === failedId)?.status, 'failed');
+			assert.equal(saved.find(({ id }) => id === runningId)?.status, 'stopped');
+			assert.deepEqual(restoredLayer.shellJobs.listUnread(owner), [
+				{ id: failedId, status: 'failed' }, { id: runningId, status: 'stopped' },
+			]);
+			await restoredLayer.shellJobs.listSaved(other);
+			assert.deepEqual(restoredLayer.shellJobs.listUnread(other), []);
+			await restoredLayer.shellJobs.markRead(owner, failedId);
+			assert.deepEqual(restoredLayer.shellJobs.listUnread(owner), [{ id: runningId, status: 'stopped' }]);
+			assert.deepEqual(await unreadHistory(reopened), [owner]);
+			assert.equal(modelRequests, 2);
+			const restored = await submit(reopened, owner, [read('saved-success', completedId), read('saved-stop', runningId)]);
+			const toolResults = restored.messages.filter(({ role }) => role === 'tool');
+			assert.deepEqual(toolResults.map(({ isError }) => isError), [false, false]);
+			assert.match(toolResults[0]?.content ?? '', /成功[\s\S]*普通输出首行[\s\S]*中间已截断[\s\S]*普通输出末行[\s\S]*最终诊断/u);
+			assert.match(toolResults[1]?.content ?? '', /停止[\s\S]*关闭前输出[\s\S]*关闭前诊断/u);
+			const wrongChat = await submit(reopened, other, [read('denied', completedId)]);
+			const rejected = wrongChat.messages.find(({ toolCallId }) => toolCallId === 'denied');
+			assert.equal(rejected?.isError, true);
+			assert.doesNotMatch(rejected?.content ?? '', /普通输出首行|最终诊断/u);
+			assert.equal(await readFile(launchPath, 'utf8'), launched);
+			assert.equal(approvals, 3);
+		} finally {
+			reopened.dispose();
+			await restoredLayer.shellJobs.dispose();
+		}
+
+		const reopenedAgain = createToolLayer(createConversationStore(directory).shellJobHistory);
+		const latest = sessionsFor(app, model, reopenedAgain);
+		try {
+			await reopenedAgain.shellJobs.listSaved(owner);
+			assert.deepEqual(reopenedAgain.shellJobs.listUnread(owner), [{ id: runningId, status: 'stopped' }]);
+			assert.deepEqual(reopenedAgain.shellJobs.list(owner), []);
+			const beforeReading = modelRequests;
+			const updates: (boolean | undefined)[] = [];
+			const unsubscribe = reopenedAgain.shellJobs.subscribeAll(() => updates.push(reopenedAgain.shellJobs.hasUnread(owner)));
+			await reopenedAgain.shellJobs.markRead(owner, runningId);
+			unsubscribe();
+			assert.deepEqual(updates, [false]);
+			assert.deepEqual(await unreadHistory(latest), []);
+			assert.equal(modelRequests, beforeReading);
+		} finally {
+			latest.dispose();
+			await reopenedAgain.shellJobs.dispose();
+		}
+	} finally {
+		sessions.dispose();
+		await layer.shellJobs.dispose();
+	}
+});
+
 void test('stopping a model stream prevents tool execution and further requests', async (t) => {
 	const { app } = await fixture(t);
 	let requests = 0;
@@ -1228,4 +1685,136 @@ void test('the model tool switch blocks execution before approval and is recheck
 	const enabled = await sessions.submit(submit, { approve: async () => true }).result;
 	assert.equal(enabled.status, 'done');
 	assert.equal(await readFile(join(cwd, call.input.file_path), 'utf8'), '临时笔记');
+});
+
+async function skillFixture(t: TestContext) {
+	const { app, root, cwd } = await fixture(t);
+	const shared = join(await realpath(root), 'skills');
+	const settings = normalizeSettings(null);
+	settings.skillSettings!.sharedDirectories = [shared];
+	const registry = createSkillRegistry(app, settings, () => Promise.resolve(), { draft: async () => false, install: async () => false });
+	async function draft(name: string): Promise<TaskRequest> {
+		const dir = join(shared, name);
+		await mkdir(dir, { recursive: true });
+		const id = join(dir, 'SKILL.md');
+		await writeFile(id, '---\nname: ' + name + '\ndescription: 有效技能说明\n---\n正文仅属于-' + name);
+		return { conversationId: 'skill-test', instruction: '$' + name, refs: [], skillScope: [],
+			skillMentions: [{ name, id, start: 0, end: name.length + 1 }] };
+	}
+	return { app, cwd, registry, settings, draft };
+}
+
+void test('技能撤回时，保留先前工作和已交付的插话，只退回本次未发送的失效插话', async (t) => {
+	const { app, cwd, registry, settings, draft } = await skillFixture(t);
+	const [request, earlier, stale] = await Promise.all([draft('primary'), draft('earlier'), draft('stale')]);
+	const normal = { ...request, instruction: '补充一条普通要求', skillMentions: [] };
+	const pending = new Map<string, TaskRequest>([['earlier', earlier]]);
+	const rejected: string[] = [];
+	const sent: ModelRequest[] = [];
+	const ctx = await createRunContext(createTask(request), {
+		cwd, model: { providerId: 'fake', model: 'fake' }, signal: new AbortController().signal, observer: {},
+	}, app.vault.configDir);
+	ctx.skillRun = createSkillRun(registry, request, 32_000, ctx.signal);
+	ctx.takeSteering = () => [...pending].map(([id, input]) => ({ id, request: input }));
+	ctx.rejectSteering = (ids, reason) => {
+		assert.match(reason ?? '', /stale/u);
+		for (const id of ids) { rejected.push(id); pending.delete(id); }
+	};
+	ctx.record = (event) => {
+		if (event.type === 'state') for (const m of event.state.messages) {
+			if (m.id?.startsWith('steer:')) pending.delete(m.id.slice(6));
+		}
+		return Promise.resolve();
+	};
+	const models = createModelCoordinator({ stream(input) {
+		return {
+			async *[Symbol.asyncIterator]() {
+				if (sent.length && input.messages.some((m) => m.id === 'steer:stale')) settings.skillSettings!.sharedDirectories = [];
+				await input.beforeSend?.('https://example.test/model');
+				sent.push(input);
+				yield* [];
+			},
+			async result() {
+				if (sent.length === 1) { pending.set('stale', stale); pending.set('valid', normal); }
+				return emptyModelResponse(sent.length === 1 ? '已保存此前工作。' : '普通要求已处理。');
+			},
+			cancel() {},
+		};
+	} }, createContextBuilder(createToolRegistry([])));
+	const result = await createAgentLoop(models, { async *runCalls() {} }).run(ctx, createRunState(ctx));
+	assert.equal(result.status, 'done', result.error);
+	assert.deepEqual(rejected, ['stale']);
+	assert.equal(sent.length, 2);
+	const previous = sent[0]!.messages.map((m) => m.content).join('\n');
+	assert.match(previous, /正文仅属于-primary/u);
+	assert.match(previous, /正文仅属于-earlier/u);
+	const latest = sent[1]!.messages.map((m) => m.content).join('\n');
+	assert.doesNotMatch(latest, /正文仅属于|stale/u);
+	assert.match(latest, /已保存此前工作。/u);
+	assert.match(latest, /普通要求/u);
+	assert.deepEqual(result.messages.flatMap((m) => m.id?.startsWith('steer:') ? [m.id] : []), ['steer:earlier', 'steer:valid']);
+});
+
+void test('模型重连前撤回已尝试发送的技能，只按新权限重发原消息', async (t) => {
+	const { app, cwd, registry, settings, draft } = await skillFixture(t);
+	const request = await draft('retry');
+	const ctx = await createRunContext(createTask(request), {
+		cwd, model: { providerId: 'fake', model: 'fake' }, signal: new AbortController().signal, observer: {},
+	}, app.vault.configDir);
+	ctx.skillRun = createSkillRun(registry, request, 32_000, ctx.signal);
+	const sent: ModelRequest[] = [];
+	const models = createModelCoordinator({ stream(input) {
+		return {
+			async *[Symbol.asyncIterator]() {
+				await input.beforeSend?.('https://example.test/model');
+				sent.push(input);
+				yield* [];
+			},
+			async result() {
+				if (sent.length === 1) { settings.skillSettings!.sharedDirectories = []; throw new RetryableModelError('连接中断'); }
+				return emptyModelResponse('已继续。');
+			},
+			cancel() {},
+		};
+	} }, createContextBuilder(createToolRegistry([])));
+	const state = await createAgentLoop(models, { async *runCalls() {} }).run(ctx, createRunState(ctx));
+	assert.equal(state.status, 'done', state.error);
+	assert.match(JSON.stringify(sent[0]?.messages), /正文仅属于-retry/u);
+	assert.doesNotMatch(JSON.stringify(sent[1]?.messages), /正文仅属于-retry/u);
+});
+
+void test('待发送的队首技能已停用时，原消息仍可在队列中编辑', async (t) => {
+	const { app, cwd, registry, settings, draft } = await skillFixture(t);
+	const sessions = sessionsFor(app, { stream: () => assert.fail('失效技能不能发给模型') }, [], settings, registry);
+	t.after(() => sessions.dispose());
+	const request = await draft('queued');
+	request.conversationId = await sessions.createConversation();
+	const row = { id: 'queued', request };
+	const store = createConversationStore(join(cwd, 'transcripts'));
+	await store.enqueue(request.conversationId, row);
+	settings.skillSettings!.disabledIds = [request.skillMentions![0]!.id];
+	await assert.rejects(sessions.submitQueued(row, {}, () => assert.fail('未执行的消息不能离开队列')).result, /已停用/u);
+	assert.deepEqual(await store.getQueued(request.conversationId), [row]);
+	assert.equal((await store.load(request.conversationId)).runs.length, 0);
+});
+
+void test('恢复已完成发送的技能选择，不会改选同名来源或重复发送旧目录', async (t) => {
+	const { cwd, registry, settings, draft } = await skillFixture(t);
+	const request = await draft('prior');
+	const first = taskMessage(request);
+	const history: Message[] = [first, { role: 'assistant', content: '先前的回答', toolCalls: [{ id: 'f', name: 'list_skill_files', input: { id: request.skillMentions![0]!.id } }] },
+		{ role: 'tool', content: '此前获得的私有文件名', toolName: 'list_skill_files', toolCallId: 'f' }];
+	const replacement = join(await realpath(cwd), 'other');
+	await mkdir(join(replacement, 'prior'), { recursive: true });
+	await writeFile(join(replacement, 'prior/SKILL.md'), '---\nname: prior\ndescription: 同名新来源\n---\n新的机密正文');
+	settings.skillSettings!.sharedDirectories = [replacement];
+	const run = createSkillRun(registry, request, 32_000, new AbortController().signal);
+	run.rememberCommitted(history);
+	const result = await run.project(history, true);
+	assert.equal(result.instructions, '');
+	assert.doesNotMatch(JSON.stringify(result.messages), /私有文件名/u);
+	const checkpoint: Message[] = [first, { role: 'user', id: 'steer:accepted', content: '已经收到的补充' }];
+	const interrupted = createSkillRun(registry, request, 32_000, new AbortController().signal);
+	interrupted.rememberCommitted(checkpoint);
+	assert.equal((await interrupted.project(checkpoint, true)).instructions, '');
 });

@@ -30,7 +30,7 @@ import { confirmModelRequest, modelRequestConfirmation } from './modelRequestCon
 import type { ModelRequestConfirmation } from './modelRequestConfirmation';
 import { modelNodeFetch, nodeFetch } from './nodeFetch';
 import { nodeRequire } from './nodeRequire';
-import { captureReportedUsage } from './reportedUsage';
+import { captureReportedUsage, reportedCost } from './reportedUsage';
 import { ContextOverflowError, RetryableModelError } from '../types';
 import { isBuiltInThinkingLevel, isThinkingLevel } from '../orchestration/settings/thinking';
 import type {
@@ -194,6 +194,7 @@ class PiModelStream implements ModelStream {
 		private cleanup: () => void,
 		private readUsage: () => ReportedUsage,
 		private confirmation?: ModelRequestConfirmation,
+		private onUsage?: Parameters<ModelService['send']>[1],
 	) {}
 
 	[Symbol.asyncIterator](): AsyncIterator<ModelStreamEvent> {
@@ -211,7 +212,9 @@ class PiModelStream implements ModelStream {
 		try {
 			const response = await this.source.result();
 			if (this.confirmation?.failure) throw this.confirmation.failure;
-			return toResponse(response, this.readUsage());
+			const reportedUsage = this.readUsage();
+			this.onUsage?.({ reportedUsage, cost: reportedCost(response.usage) });
+			return toResponse(response, reportedUsage);
 		} finally {
 			this.cleanup();
 		}
@@ -427,7 +430,7 @@ export function createModelService(
 		return { levels, level };
 	};
 
-	const stream = (request: ModelRequest): ModelStream => {
+	const stream = (request: ModelRequest, onUsage?: Parameters<ModelService['send']>[1]): ModelStream => {
 		syncCustomProviders();
 		const protocol = serviceOptions.protocols?.()[request.providerId]?.trim() ?? '';
 		const override = serviceOptions.modelOverrides?.()[request.providerId]?.[request.model];
@@ -503,7 +506,7 @@ export function createModelService(
 			const source = confirmation
 				? modelRequestConfirmation.run(confirmation, () => models.streamSimple(model, context, options))
 				: models.streamSimple(model, context, options);
-			return new PiModelStream(source, controller, cleanup, reportedUsage.read, confirmation);
+			return new PiModelStream(source, controller, cleanup, reportedUsage.read, confirmation, onUsage);
 		} catch (error) {
 			cleanup();
 			throw error;
@@ -512,6 +515,13 @@ export function createModelService(
 
 	return {
 		contextLimits,
+		modelOrigin: ({ providerId, model: id }) => {
+			syncCustomProviders();
+			const baseUrl = serviceOptions.modelOverrides?.()[providerId]?.[id]?.baseUrl?.trim()
+				|| serviceOptions.baseUrls?.()[providerId]?.trim()
+				|| findModel(providerId, id)?.baseUrl;
+			return baseUrl ? URL.parse(baseUrl)?.origin : undefined;
+		},
 		thinkingOptions,
 		providers: (): ModelProviderInfo[] => {
 			syncCustomProviders();
@@ -576,6 +586,6 @@ export function createModelService(
 			return { models: ids, baseUrl: endpoint };
 		},
 		stream,
-		send: (request) => stream(request).result(),
+		send: (request, onUsage) => stream(request, onUsage).result(),
 	};
 }

@@ -1,6 +1,36 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { ViewState, Workspace } from 'obsidian';
 import { executionModeKey, loadExecutionMode, replaceActiveTabPane } from '../chatTabWorkspace';
+import { readSubagentTabState, SubagentTabs } from '../subagentTabs';
+
+void test('同一子聊天重复打开时复用右栏标签，不同会话独立，删除仅关闭对应会话', async () => {
+	const right = {};
+	const leaves: { getViewState(): ViewState }[] = [];
+	const createLeaf = (split: boolean) => {
+		assert.equal(split, false);
+		let state: ViewState = { type: 'empty' };
+		const leaf = {
+			getRoot: () => right,
+			getViewState: () => state,
+			async setViewState(next: ViewState) { await Promise.resolve(); state = next; },
+			detach() { leaves.splice(leaves.indexOf(leaf), 1); },
+		};
+		leaves.push(leaf);
+		return leaf;
+	};
+	const tabs = new SubagentTabs({ rightSplit: right, getRightLeaf: createLeaf,
+		getLeavesOfType: () => [...leaves], revealLeaf: async () => {} } as unknown as Workspace);
+	const target = { conversationId: 'first', agentId: 'agent', name: '签到' };
+	await Promise.all([tabs.open(target, ''), tabs.open(target, '')]);
+	await tabs.open(target, '');
+	await tabs.open({ ...target, agentId: 'another-agent' }, '');
+	await tabs.open({ ...target, conversationId: 'second' }, '');
+	assert.equal(leaves.length, 3);
+	assert.deepEqual(readSubagentTabState(leaves[0]?.getViewState().state), target);
+	tabs.closeConversation('first');
+	assert.deepEqual(leaves.map((leaf) => leaf.getViewState().state?.conversationId), ['second']);
+});
 
 interface TestPane {
 	conversation: { id: string; runs: unknown[]; queue?: unknown[] };

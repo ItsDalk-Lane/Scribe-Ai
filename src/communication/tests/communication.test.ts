@@ -22,7 +22,7 @@ import { applyModelDraft } from '../../interaction/modelDraft';
 import { normalizeSettings } from '../../orchestration/settings/defaults';
 import { chatModelKey, updateChatThinking } from '../../orchestration/settings/thinking';
 import { configureProxy } from '../proxy';
-import type { CommunicationSettings, Transport } from '../../types';
+import type { CommunicationSettings, ModelUsageReceipt, Transport } from '../../types';
 
 let baseUrl = '';
 let proxyUrl = '';
@@ -119,13 +119,15 @@ const server = http.createServer((request, response) => {
 		if (url === '/reported-usage/chat/completions') {
 			const { model } = JSON.parse(body) as { model: string };
 			const prompt = model === 'with-zero' ? 0 : 810;
-			const usage = model === 'output-only' ? { completion_tokens: 42 } : {
+			let usage: Record<string, unknown> = {
 				prompt_tokens: prompt, completion_tokens: 42,
 				prompt_tokens_details: {
 					cached_tokens: prompt ? 800 : 0,
 					...(model === 'with-cache-read' ? {} : { cache_write_tokens: prompt ? 2 : 0 }),
 				},
 			};
+			if (model === 'output-only') usage = { completion_tokens: 42 };
+			if (model === 'total-only') usage = { total_tokens: 73 };
 			const chunk = { id: 'chat-usage-test', object: 'chat.completion.chunk', created: 1, model };
 			response.writeHead(200, { 'content-type': 'text/event-stream' });
 			response.write(`data: ${JSON.stringify({ ...chunk, choices: [{ index: 0, delta: { role: 'assistant', content: 'Done' }, finish_reason: 'stop' }] })}\n\n`);
@@ -479,10 +481,12 @@ void test('provider usage distinguishes real zeros, reported totals and missing 
 	const providerId = 'usage-test';
 	const service = createModelService(credentials, transport, {
 		customProviders: () => [{ id: providerId, label: 'Usage fixture', baseUrl: `${baseUrl}/reported-usage`,
-			protocol: 'openai-completions', models: ['with-counts', 'with-cache-read', 'output-only', 'with-zero'] }],
+			protocol: 'openai-completions', models: ['with-counts', 'with-cache-read', 'output-only', 'with-zero', 'total-only'] }],
 	});
 	async function measure(model: string) {
-		const response = await service.send({ providerId, model, messages: [], tools: [] });
+		const receipts: ModelUsageReceipt[] = [];
+		const response = await service.send({ providerId, model, messages: [], tools: [] }, (usage) => receipts.push(usage));
+		assert.deepEqual(receipts, [{ reportedUsage: response.reportedUsage, cost: undefined }]);
 		const metrics = conversationMetrics([{ taskId: model, turn: 1, status: 'done', pendingCalls: [], messages: [{
 			role: 'assistant', content: response.content, usage: response.usage, reportedUsage: response.reportedUsage,
 			metrics: { endedAt: 10, modelMs: 1000, decodeMs: 500, contextWindow: 1000 },
@@ -495,7 +499,7 @@ void test('provider usage distinguishes real zeros, reported totals and missing 
 	assert.equal(complete.metrics.usage?.total, 852);
 	const withCacheRead = await measure('with-cache-read');
 	assert.deepEqual(withCacheRead.report, { prompt: 810, cacheRead: 800, output: 42 });
-	assert.equal(withCacheRead.metrics.usage?.input, 10);
+	assert.equal(withCacheRead.metrics.usage?.input, undefined);
 	assert.equal(withCacheRead.metrics.usage?.cacheWrite, undefined);
 	assert.equal(withCacheRead.metrics.usage?.total, 852);
 	const partial = await measure('output-only');
@@ -511,6 +515,10 @@ void test('provider usage distinguishes real zeros, reported totals and missing 
 	assert.equal(zero.metrics.context?.percent, 0);
 	assert.equal(zero.metrics.usage?.input, 0);
 	assert.equal(zero.metrics.usage?.hit, undefined);
+	const totalOnly = await measure('total-only');
+	assert.deepEqual(totalOnly.report, { total: 73 });
+	assert.equal(totalOnly.metrics.usage?.total, 73);
+	assert.equal(totalOnly.metrics.usage?.output, undefined);
 });
 
 void test('Base URL override is used for every model of the provider', async () => {

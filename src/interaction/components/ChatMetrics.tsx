@@ -27,36 +27,44 @@ function cachePercent(hit: number, turn: boolean) {
 	return hit.toLocaleString(undefined, { style: 'percent', maximumFractionDigits: turn ? 1 : 0 });
 }
 
-export function UsagePopover({ usage, model, busy, turn = false }: {
-	usage: UsageTotals; model?: SavedRun['model']; busy?: boolean; turn?: boolean;
+function usageRows(usage: UsageTotals, turn: boolean): [string, string][] {
+	const text = uiText();
+	const unknown = text.chatUsageUnknown;
+	const cost = usage.cost?.toLocaleString(undefined, {
+		style: 'currency', currency: 'USD', minimumFractionDigits: 4, maximumFractionDigits: 10,
+	});
+	return [
+		[text.chatUsageRequests, usage.count.toLocaleString()],
+		[text.chatCacheHit, usage.hit === undefined ? unknown : cachePercent(usage.hit, turn)],
+		[text.chatUncachedInput, optionalTokens(usage.input) ?? unknown],
+		[text.chatCacheRead, optionalTokens(usage.cacheRead) ?? unknown],
+		[text.chatCacheWrite, optionalTokens(usage.cacheWrite) ?? unknown],
+		[text.chatOutputTokens, optionalTokens(usage.output) ?? unknown],
+		[text.chatTotalTokens, optionalTokens(usage.total) ?? unknown],
+		[text.chatReportedCost, cost ?? unknown],
+	];
+}
+
+export function UsagePopover({ usage, model, busy, turn = false, title }: {
+	usage: UsageTotals; model?: SavedRun['model']; busy?: boolean; turn?: boolean; title?: string;
 }) {
 	const text = uiText();
-	const heading = turn ? text.chatRunUsage : text.chatSessionUsage;
+	const heading = title ?? (turn ? text.chatRunUsage : text.chatSessionUsage);
 	const hit = usage.hit === undefined ? undefined : cachePercent(usage.hit, turn);
-	const label = [usage.partialTotal ? text.chatIncompleteUsage : undefined, optionalTokens(usage.total, true),
+	const label = [optionalTokens(usage.total, true) ?? `${heading} · ${text.chatUsageUnknown}`,
 		!turn && hit ? `${text.chatCacheHit} ${hit}` : undefined].filter(Boolean).join(' · ');
-	return <MetricPopover icon="database" label={label} heading={heading} value={optionalTokens(usage.total)} wrapValues>
-		<MetricRows rows={[
-			[text.chatProviderModel, model && `${model.providerId} / ${model.model}`],
-			[text.chatCacheHit, hit],
-			[text.chatUncachedInput, optionalTokens(usage.input)],
-			[text.chatCacheRead, optionalTokens(usage.cacheRead)],
-			[text.chatCacheWrite, optionalTokens(usage.cacheWrite)],
-			[text.chatOutputTokens, optionalTokens(usage.output)],
-			[usage.partialTotal ? text.chatIncompleteUsage : text.chatTotalTokens, optionalTokens(usage.total)],
-			[text.chatReportedCost, usage.cost?.toLocaleString(undefined, { style: 'currency', currency: 'USD',
-				minimumFractionDigits: 4, maximumFractionDigits: 4 })],
-		]} />
+	return <MetricPopover icon="database" label={label} heading={heading} value={optionalTokens(usage.total) ?? text.chatUsageUnknown} wrapValues>
+		<MetricRows rows={[[text.chatProviderModel, model && `${model.providerId} / ${model.model}`], ...usageRows(usage, turn)]} />
 		{busy && <p>{text.chatMetricsRunning}</p>}
 	</MetricPopover>;
 }
 
-export function useChatMetrics(history: readonly SavedRun[], live: RunState | null) {
+export function useChatMetrics(history: readonly SavedRun[], live: RunState | null, subagents?: readonly SavedRun[]) {
 	return useMemo(() => {
 		const runs = history.map(({ state }) => live?.taskId === state.taskId ? live : state);
 		if (live && !runs.some(({ taskId }) => taskId === live.taskId)) runs.push(live);
-		return conversationMetrics(runs);
-	}, [history, live]);
+		return conversationMetrics(runs, subagents?.map(({ state }) => state));
+	}, [history, live, subagents]);
 }
 
 export function ActivityMetric({ metrics, busy }: { metrics: ConversationMetrics; busy: boolean }) {
@@ -76,19 +84,31 @@ export function ActivityMetric({ metrics, busy }: { metrics: ConversationMetrics
 	</MetricPopover>;
 }
 
-export function ContextMetric({ context, busy }: {
-	context: ContextUsage; busy: boolean;
+export function ContextMetric({ context, compaction, busy }: {
+	context?: ContextUsage; compaction?: RunState['contextCompaction']; busy: boolean;
 }) {
 	const text = uiText();
-	const percent = context.percent.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-	const heading = text.chatContextStats.replace('{n}', percent);
-	return <MetricPopover icon={<ContextRing percent={context.percent} />}
-		label={text.chatContextUsed.replace('{n}', percent)}
-		heading={heading} value={`${abbreviatedNumber(context.prompt)} / ${abbreviatedNumber(context.capacity)}`}>
-		<progress className="scribe-context-progress" aria-label={heading}
-			value={Math.min(context.prompt, context.capacity)} max={context.capacity} />
-		<MetricRows rows={[[text.chatPromptTokens, tokens(context.prompt)], [text.chatWindowCapacity, tokens(context.capacity)],
-			[text.chatRemainingCapacity, tokens(context.remaining)]]} />
+	const percent = context?.percent.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+	const heading = percent === undefined ? text.chatContextCompaction : text.chatContextStats.replace('{n}', percent);
+	const label = [percent === undefined ? undefined : text.chatContextUsed.replace('{n}', percent),
+		compaction && text.chatContextCompacted].filter(Boolean).join(' · ');
+	return <MetricPopover icon={context ? <ContextRing percent={context.percent} /> : 'minimize-2'} label={label}
+		heading={heading} value={context && `${abbreviatedNumber(context.prompt)} / ${abbreviatedNumber(context.capacity)}`}>
+		{context && <>
+			<progress className="scribe-context-progress" aria-label={heading}
+				value={Math.min(context.prompt, context.capacity)} max={context.capacity} />
+			<MetricRows rows={[[text.chatPromptTokens, tokens(context.prompt)], [text.chatWindowCapacity, tokens(context.capacity)],
+				[text.chatRemainingCapacity, tokens(context.remaining)]]} />
+		</>}
+		{compaction && <MetricRows rows={[
+			[text.chatCompactionReason, text.chatCompactionReasons[compaction.reason]],
+			[text.chatCompactionDroppedHistory, compaction.droppedHistory.toLocaleString()],
+			[text.chatCompactionDroppedCurrent, compaction.droppedCurrent.toLocaleString()],
+			[text.chatCompactionShortenedTools, compaction.shortenedToolResults.toLocaleString()],
+			[text.chatCompactionSummary, text.chatCompactionSummaries[compaction.summary]],
+			[text.chatCompactionThrough, compaction.throughMessage === undefined ? undefined
+				: text.chatCompactionMessage.replace('{n}', compaction.throughMessage.toLocaleString())],
+		]} />}
 		{busy && <p>{text.chatMetricsRunning}</p>}
 	</MetricPopover>;
 }

@@ -4,6 +4,7 @@ import { createCredentialStore } from './communication/credentials';
 import { createModelService } from './communication/providers';
 import { createTransport } from './communication/transport';
 import { createContextBuilder } from './orchestration/context/contextBuilder';
+import type { SkillReviewActions } from './orchestration/context/skills';
 import { createSkillRegistry } from './orchestration/context/skills';
 import { createSessionController } from './orchestration/sessionController';
 import { createConversationStore } from './orchestration/storage/conversationStore';
@@ -22,9 +23,13 @@ import type {
 } from './types';
 
 /** 根级依赖组装：只负责按层创建服务并把它们连起来，业务留在各层 */
-export function createServices(app: App, settings: ScribeSettings, manifest: PluginManifest): ScribeServices {
+export function createServices(app: App, settings: ScribeSettings, manifest: PluginManifest,
+	saveSettings: () => Promise<void>, skillReview: SkillReviewActions): ScribeServices {
+	const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
+	const pluginDirectory = manifest.dir ?? join(app.vault.configDir, 'plugins', manifest.id);
+	const conversations = createConversationStore(resolve(cwd, pluginDirectory, 'conversations'));
 	// 第四层：工具层（模型通信之外的执行能力）
-	const tools = createToolLayer();
+	const tools = createToolLayer(conversations.shellJobHistory);
 
 	// 第五层：通信层（仅负责模型服务接入）
 	const credentials = createCredentialStore(app, settings.communication);
@@ -57,13 +62,13 @@ export function createServices(app: App, settings: ScribeSettings, manifest: Plu
 		tools: toolCoordinator,
 	};
 
-	const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
-	const pluginDirectory = manifest.dir ?? join(app.vault.configDir, 'plugins', manifest.id);
-	const conversations = createConversationStore(resolve(cwd, pluginDirectory, 'conversations'));
+	const skills = createSkillRegistry(app, settings, saveSettings, skillReview);
 	const orchestration: OrchestrationLayer = {
-		sessions: createSessionController(app, settings, runtime, conversations, communication.models.thinkingOptions, communication.models),
+		sessions: createSessionController(
+			app, settings, runtime, conversations, communication.models.thinkingOptions, communication.models, tools.shellJobs, skills,
+		),
 		context,
-		skills: createSkillRegistry(),
+		skills,
 		conversations,
 	};
 

@@ -73,8 +73,8 @@ export function useChatModel(plugin: ScribeAiPlugin, initialModel?: RunContext['
 		return false;
 	}
 
-	async function selectModel(value: string) {
-		if (pending.current || value === options.value) return;
+	async function selectModel(value: string, thinkingLevel?: string) {
+		if (pending.current || (value === options.value && thinkingLevel === undefined)) return;
 		for (const group of options.groups) {
 			const model = group.models.find((entry) => entry.value === value);
 			if (!model) continue;
@@ -82,9 +82,9 @@ export function useChatModel(plugin: ScribeAiPlugin, initialModel?: RunContext['
 			setSaving('model');
 			try {
 				const choice = { providerId: group.id, model: model.id };
-				await plugin.saveSettings(choice);
+				await plugin.saveSettings({ ...choice, thinkingLevel });
 				if (scoped) {
-					localChoice.current = choice;
+					localChoice.current = { ...choice, reasoning: thinkingLevel === 'off' ? null : thinkingLevel };
 					sync();
 				}
 			} finally {

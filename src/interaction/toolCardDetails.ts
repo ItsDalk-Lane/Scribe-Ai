@@ -35,6 +35,11 @@ function field(input: unknown, key: string): unknown {
 	return undefined;
 }
 
+export function toolTextField(input: unknown, key: string): string | undefined {
+	const value = field(input, key);
+	return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
 export function toolTarget({ name, input }: ToolCall): { field: string; value: string } | undefined {
 	for (const key of targetFields[toolKind(name)]) {
 		const value = field(input, key);

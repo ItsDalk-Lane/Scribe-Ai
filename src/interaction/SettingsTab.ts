@@ -2,14 +2,21 @@ import { App, PluginSettingTab, Setting } from 'obsidian';
 import type ScribeAiPlugin from '../main';
 import type { ChatLocation } from '../types';
 import { renderModelSettings } from './ModelSettings';
+import { renderSubagentSettings } from './SubagentSettings';
+import { renderWritingRulesSettings } from './WritingRulesSettings';
+import { subagentSettingsText } from './subagentSettingsText';
 import { uiText } from './uiText';
+import { tr } from './skills/dialog';
+import { renderSkillSettings } from './skills/skillUi';
+import type { SkillPageHandle } from './skills/skillUi';
 
-type SettingsSection = 'general' | 'models' | 'advanced';
-const SECTIONS: readonly SettingsSection[] = ['general', 'models', 'advanced'];
+type SettingsSection = 'general' | 'models' | 'skills' | 'subagents' | 'advanced';
+const SECTIONS: readonly SettingsSection[] = ['general', 'models', 'skills', 'subagents', 'advanced'];
 
 /** 设置界面：通用、模型配置与高级网络/诊断分开，避免主配置页过载 */
 export class ScribeAiSettingTab extends PluginSettingTab {
 	private activeSection: SettingsSection = 'general';
+	private skillPage?: SkillPageHandle;
 	private diagnosticsDispose?: () => void;
 
 	constructor(
@@ -20,7 +27,12 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 	}
 
 	display(): void {
-		const { containerEl } = this;
+		this.renderInto(this.containerEl);
+	}
+
+	renderInto(containerEl: HTMLElement): void {
+		this.skillPage?.dispose();
+		this.skillPage = undefined;
 		this.diagnosticsDispose?.();
 		this.diagnosticsDispose = undefined;
 		containerEl.empty();
@@ -28,6 +40,8 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		const settings = this.plugin.services.settings;
 		const transport = this.plugin.services.communication.transport;
 		const text = uiText();
+		const skillsTab = tr('技能', 'Skills');
+		const subagentsTab = subagentSettingsText().tab;
 		const phaseLabels = {
 			connecting: text.phaseConnecting,
 			streaming: text.phaseStreaming,
@@ -39,7 +53,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 
 		const tabList = containerEl.createDiv({
 			cls: 'scribe-settings-tabs',
-			attr: { role: 'tablist', 'aria-label': `${text.generalTab} / ${text.modelsTab} / ${text.advancedTab}` },
+			attr: { role: 'tablist', 'aria-label': `${text.generalTab} / ${text.modelsTab} / ${skillsTab} / ${subagentsTab} / ${text.advancedTab}` },
 		});
 		const panels: Record<SettingsSection, HTMLDivElement> = {
 			general: containerEl.createDiv({
@@ -49,6 +63,14 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 			models: containerEl.createDiv({
 				cls: 'scribe-settings-panel',
 				attr: { role: 'tabpanel', id: 'scribe-ai-settings-models' },
+			}),
+			skills: containerEl.createDiv({
+				cls: 'scribe-settings-panel',
+				attr: { role: 'tabpanel', id: 'scribe-ai-settings-skills' },
+			}),
+			subagents: containerEl.createDiv({
+				cls: 'scribe-settings-panel',
+				attr: { role: 'tabpanel', id: 'scribe-ai-settings-subagents' },
 			}),
 			advanced: containerEl.createDiv({
 				cls: 'scribe-settings-panel',
@@ -65,6 +87,16 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 				cls: 'scribe-settings-tab',
 				text: text.modelsTab,
 				attr: { role: 'tab', id: 'scribe-ai-settings-tab-models', 'aria-controls': 'scribe-ai-settings-models' },
+			}),
+			skills: tabList.createDiv({
+				cls: 'scribe-settings-tab',
+				text: skillsTab,
+				attr: { role: 'tab', id: 'scribe-ai-settings-tab-skills', 'aria-controls': 'scribe-ai-settings-skills' },
+			}),
+			subagents: tabList.createDiv({
+				cls: 'scribe-settings-tab',
+				text: subagentsTab,
+				attr: { role: 'tab', id: 'scribe-ai-settings-tab-subagents', 'aria-controls': 'scribe-ai-settings-subagents' },
 			}),
 			advanced: tabList.createDiv({
 				cls: 'scribe-settings-tab',
@@ -109,6 +141,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 							await this.plugin.saveSettings();
 						}),
 				);
+			renderWritingRulesSettings(this.app, panels.general, text);
 		};
 
 		const renderModels = () => {
@@ -129,6 +162,26 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 				);
 
 			new Setting(panel)
+				.setName(text.spillCleanupDays)
+				.setDesc(text.spillCleanupDaysDescription)
+				.addText((input) => {
+					input.inputEl.type = 'number';
+					input.inputEl.min = '0';
+					input.inputEl.step = '1';
+					input.setValue(String(settings.spillCleanupDays));
+					input.onChange(async (value) => {
+						const days = Number(value);
+						if (!Number.isSafeInteger(days) || days < 0) return;
+						settings.spillCleanupDays = days;
+						await this.plugin.saveSettings();
+					});
+					input.inputEl.addEventListener('blur', () => {
+						const days = Number(input.inputEl.value);
+						if (!Number.isSafeInteger(days) || days < 0) input.setValue(String(settings.spillCleanupDays));
+					});
+				});
+
+			new Setting(panel)
 				.setName(text.diagnostics)
 				.setHeading()
 				.addButton((button) => button.onClick(renderDiagnostics).setButtonText(text.refresh));
@@ -137,11 +190,20 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 			renderDiagnostics();
 		};
 
+		const updateSkillWarning = (count: number) => {
+			if (!buttons.skills.isConnected) return;
+			buttons.skills.toggleClass('has-skill-warning', count > 0);
+			buttons.skills.setAttribute('aria-label', count ? skillsTab + ' · ' + tr('部分技能加载失败', 'Some skills failed to load') : skillsTab);
+			buttons.skills.title = count ? tr('部分技能加载失败', 'Some skills failed to load') : '';
+		};
+		void this.plugin.services.orchestration.skills.library.list().then((skills) => updateSkillWarning(skills.filter((s) => s.error).length)).catch(() => {});
 		const activate = (section: SettingsSection, focus = false) => {
 			this.activeSection = section;
 			if (!rendered.has(section)) {
 				if (section === 'general') renderGeneral();
 				else if (section === 'models') renderModels();
+				else if (section === 'skills') this.skillPage = renderSkillSettings(this.plugin, panels.skills, updateSkillWarning);
+				else if (section === 'subagents') renderSubagentSettings(panels.subagents, this.plugin, text);
 				else renderAdvanced();
 				rendered.add(section);
 			}
@@ -162,12 +224,16 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 			}
 		};
 
+		const navigate = (section: SettingsSection, focus = false) => {
+			if (this.activeSection !== 'skills' || section === 'skills' || !this.skillPage) { activate(section, focus); return; }
+			void this.skillPage.beforeLeave().then(() => { if (containerEl.isConnected) activate(section, focus); }).catch(() => {});
+		};
 		for (const section of SECTIONS) {
-			buttons[section].addEventListener('click', () => activate(section));
+			buttons[section].addEventListener('click', () => navigate(section));
 			buttons[section].addEventListener('keydown', (event) => {
 				if (event.key === 'Enter' || event.key === ' ') {
 					event.preventDefault();
-					activate(section, true);
+					navigate(section, true);
 					return;
 				}
 				if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -178,7 +244,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 					: event.key === 'End'
 						? SECTIONS[SECTIONS.length - 1] ?? 'advanced'
 						: SECTIONS[(index + (event.key === 'ArrowRight' ? 1 : SECTIONS.length - 1)) % SECTIONS.length] ?? 'general';
-				activate(next, true);
+				navigate(next, true);
 			});
 		}
 
@@ -186,6 +252,8 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 	}
 
 	hide(): void {
+		this.skillPage?.dispose();
+		this.skillPage = undefined;
 		this.diagnosticsDispose?.();
 		this.diagnosticsDispose = undefined;
 		super.hide();

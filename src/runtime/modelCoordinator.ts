@@ -1,5 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { ContextBudgetError, inputBytes } from '../orchestration/context/contextBuilder';
+import { SkillAccessChangedError, SkillSteeringError } from '../skills/mentions';
 import { ContextOverflowError, RetryableModelError } from '../types';
 import type { ContextBuilder, ModelCoordinator, ModelRequest, ModelService } from '../types';
 import { splitResponseIntent, thinkingHeadingIntent } from './responseIntent';
@@ -20,18 +21,22 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 			const output = Math.min(Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 8_000, window / 3);
 			// shortcut: 按字节保守估算输入量，服务商有可用的计数接口时改用精确计数。
 			const maxBytes = Math.floor((window * 0.85 - output) * 2);
-			let request: ModelRequest;
-			try {
-				request = await context.build(ctx, state.messages, maxBytes);
-			} catch (error) {
-				if (error instanceof ContextBudgetError) throw new InitialContextBudgetError(error.message);
-				throw error;
-			}
+			let budget = maxBytes;
+			let shortened = false;
+			const build = async (first: boolean) => {
+				try { return await context.build(ctx, state.messages, budget, shortened ? 'overflow' : 'budget'); } catch (error) {
+					if (first && error instanceof ContextBudgetError) throw new InitialContextBudgetError(error.message);
+					if (!first && error instanceof SkillSteeringError) throw new Error(error.message);
+					throw error;
+				}
+			};
+			let request = await build(true);
 			let visibleText = false;
 			let visibleThinking = false;
-			let shortened = false;
 			let attempts = 0;
 			let requested = 0;
+			let transmitted = false;
+			let accessRetries = 0;
 			const query = async (input: ModelRequest, messageId: string) => {
 				ctx.signal.throwIfAborted();
 				ctx.checkModel?.();
@@ -44,10 +49,13 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 				const stream = service.stream({
 					...input,
 					...(attempts === 0 ? {} : { maxRetries: 0 }),
-					...(review ? { beforeSend: async (address: string) => {
+					...((review || ctx.destinationCheck || input.beforeSend) ? { beforeSend: async (address: string) => {
 						const waitingAt = performance.now();
 						try {
-							await review.beforeSend(address);
+							await review?.beforeSend(address);
+							await ctx.destinationCheck?.(input, address);
+							await input.beforeSend?.(address);
+							transmitted = true;
 						} finally {
 							reviewMs += performance.now() - waitingAt;
 						}
@@ -161,20 +169,29 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 					const response = await query(request, messageId);
 					ctx.signal.throwIfAborted();
 					ctx.readDelivery.accept(request.messages);
+					await ctx.skillRun?.accept(request.messages);
 					return { ...response, id: messageId };
 				} catch (error) {
 					ctx.signal.throwIfAborted();
+					if (error instanceof SkillAccessChangedError && !visibleText && !visibleThinking && accessRetries++ < 3) {
+						if (transmitted) ctx.skillRun?.rememberTransmission();
+						request = await build(!transmitted);
+						continue;
+					}
 					if (error instanceof ContextOverflowError && !visibleText && !shortened) {
 						ctx.checkModel?.();
 						const size = inputBytes(request);
-						const smaller = await context.build(ctx, state.messages, Math.floor(size / 2));
+						ctx.skillRun?.rememberTransmission();
+						budget = Math.floor(size / 2);
+						shortened = true;
+						const smaller = await build(false);
 						if (inputBytes(smaller) >= size) throw error;
 						request = smaller;
-						shortened = true;
 						if (visibleThinking) ctx.observer.onEvent?.({ type: 'model-retry', messageId, waiting: false, reason: 'context' });
 						continue;
 					}
 					if (!(error instanceof RetryableModelError)) throw error;
+					transmitted = true;
 					// 同一轮只重新请求模型，前面已经保存的工具结果继续作为输入。
 					const pause = reconnectDelays[attempts++];
 					if (pause !== undefined) {
@@ -187,6 +204,7 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 						ctx.observer.onEvent?.({ type: 'model-retry', messageId, waiting: false });
 						attempts = 0;
 					}
+					if (ctx.skillRun) { ctx.skillRun.rememberTransmission(); request = await build(false); }
 				}
 			}
 		},

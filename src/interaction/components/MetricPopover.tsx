@@ -45,7 +45,7 @@ export default function MetricPopover({ label, icon, heading, value, children, w
 		if (!open || !host || !button || !popup || !doc || !win) return;
 		closing.current = false;
 		const composer = host.querySelector('.scribe-task-input');
-		const inFooter = button.closest('.scribe-composer-metrics') !== null;
+		const inFooter = button.closest('.scribe-composer-capsules') !== null;
 		const alignEnd = button.closest('.scribe-composer-context') !== null;
 		const transcript = button.closest<HTMLElement>('.scribe-chat-scroll');
 		const position = () => {

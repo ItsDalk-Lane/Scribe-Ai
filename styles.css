@@ -48,7 +48,7 @@
 	outline-offset: 1px;
 }
 
-.workspace-leaf-content:is([data-type="scribe-chat-view"], [data-type="scribe-side-chat-view"]) > .view-content {
+.workspace-leaf-content:is([data-type="scribe-chat-view"], [data-type="scribe-side-chat-view"], [data-type="scribe-subagent-view"]) > .view-content {
 	padding: 0;
 	overflow: hidden;
 }
@@ -81,6 +81,8 @@
 }
 
 .scribe-chat-tab-item {
+	--scribe-tab-surface: var(--background-primary);
+	position: relative;
 	flex: 0 1 var(--scribe-tab-width);
 	inline-size: var(--scribe-tab-width);
 	border-radius: var(--radius-s);
@@ -88,7 +90,8 @@
 }
 
 .scribe-chat-tab-item[data-active] {
-	background: color-mix(in srgb, var(--interactive-accent) 10%, var(--background-primary));
+	--scribe-tab-surface: color-mix(in srgb, var(--interactive-accent) 10%, var(--background-primary));
+	background: var(--scribe-tab-surface);
 	box-shadow: inset 0 -2px var(--interactive-accent);
 	color: var(--text-normal);
 }
@@ -159,7 +162,14 @@ button.scribe-chat-tab-select {
 }
 
 .scribe-chat-tab-strip .scribe-chat-tab-close {
+	--scribe-hover: color-mix(in srgb, var(--text-normal) 10%, var(--scribe-tab-surface));
+	--scribe-active: color-mix(in srgb, var(--text-normal) 18%, var(--scribe-tab-surface));
+	position: absolute;
+	inset-inline-end: 0;
+	align-self: center;
 	inline-size: 24px;
+	block-size: 24px;
+	background: var(--scribe-tab-surface);
 }
 
 .scribe-chat-tab-close .scribe-chat-icon {
@@ -168,8 +178,9 @@ button.scribe-chat-tab-select {
 }
 
 @media (hover: hover) {
-	.scribe-chat-tab-item:not([data-active], :hover, :focus-within) .scribe-chat-tab-close {
+	.scribe-chat-tab-item:not(:hover) .scribe-chat-tab-close:not(:focus-visible) {
 		opacity: 0;
+		pointer-events: none;
 	}
 }
 
@@ -191,9 +202,16 @@ button.scribe-chat-tab-select {
 }
 
 .scribe-chat-tab-panel {
+	position: relative;
+	display: flex;
+	container: scribe-chat-workspace / inline-size;
 	flex: 1 1 auto;
 	min-block-size: 0;
 	min-inline-size: 0;
+}
+
+.scribe-chat-tab-panel > .scribe-app:first-child {
+	flex: 1 1 0;
 }
 
 .scribe-chat-tab-panel[hidden] {
@@ -346,13 +364,20 @@ button.scribe-chat-tab-select {
 	}
 }
 
-.scribe-compose-bar {
+.scribe-composer-capsules {
+	position: relative;
 	display: flex;
+	flex: none;
+	flex-wrap: wrap;
 	align-items: center;
-	gap: 4px;
-	min-width: 0;
-	padding: 4px 8px;
-	border-block-end: 1px solid var(--scribe-border);
+	justify-content: center;
+	gap: 4px 6px;
+	inline-size: var(--scribe-chat-width);
+	margin: 4px auto 8px;
+}
+
+.scribe-composer-capsules:empty {
+	display: none;
 }
 
 .scribe-app > .scribe-queued-messages {
@@ -532,14 +557,6 @@ button.scribe-chat-tab-select {
 	cursor: default;
 }
 
-.scribe-chat-navigation {
-	position: relative;
-	display: flex;
-	flex: none;
-	gap: 4px;
-	margin-inline-start: auto;
-}
-
 .scribe-app button.scribe-chat-icon-button {
 	display: grid;
 	width: 28px;
@@ -553,41 +570,17 @@ button.scribe-chat-tab-select {
 	color: var(--text-muted);
 }
 
-.scribe-history-panel {
-	position: absolute;
-	z-index: 3;
-	inset-inline-end: 0;
-	inset-block-end: calc(100% + 4px);
-	box-sizing: border-box;
-	width: min(320px, calc(var(--scribe-chat-width) - 8px));
-	max-height: min(400px, 42vh);
-	padding: 8px;
-	overflow-y: auto;
-	overscroll-behavior: contain;
-	border: 1px solid var(--scribe-border);
-	border-radius: var(--radius-m);
-	background: var(--scribe-page);
-	box-shadow: var(--shadow-s);
-}
-
 .scribe-app[data-layout="landing"] {
 	overflow-y: auto;
 }
 
-/* 主对话用原有的底部空间摆放按钮，侧聊继续单独留出状态栏的位置。 */
+/* 为底部状态栏留出间距。 */
 body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
-	--scribe-chat-bottom-space: var(--size-4-7, 28px);
+	--scribe-chat-bottom-space: calc(var(--size-4-7, 28px) / 2);
 }
 
 .scribe-app[data-layout="conversation"] {
 	padding-block-end: var(--scribe-chat-bottom-space, 0px);
-}
-
-.scribe-composer-metrics {
-	display: flex;
-	align-items: center;
-	gap: 4px;
-	min-inline-size: 0;
 }
 
 .scribe-composer-context {
@@ -639,11 +632,21 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 }
 
 .scribe-conversation-list li {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
 	min-width: 0;
 }
 
-.scribe-conversation-item {
-	position: relative;
+.scribe-conversation-list :is(.scribe-conversation-row, .scribe-history-actions) {
+	grid-area: 1 / 1;
+}
+
+.scribe-conversation-list .scribe-history-actions {
+	z-index: 1;
+	flex-direction: row;
+	place-self: center end;
+	gap: 4px;
+	margin-inline-end: 4px;
 }
 
 .scribe-app button.scribe-conversation-row {
@@ -693,37 +696,97 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	color: var(--scribe-muted);
 	font-size: var(--font-ui-smaller);
 	text-align: end;
-}
-
-.scribe-conversation-actions {
-	position: absolute;
-	inset-block-start: 50%;
-	inset-inline-end: 4px;
-	display: flex;
-	gap: 4px;
-	opacity: 0;
-	pointer-events: none;
-	transform: translateY(-50%);
-}
-
-.scribe-conversation-item:is(:hover, :focus-within):not([data-disabled]) time {
 	opacity: 0;
 }
 
-.scribe-conversation-item:is(:hover, :focus-within):not([data-disabled]) .scribe-conversation-actions {
-	opacity: 1;
-	pointer-events: auto;
-}
-
-@media (hover: none) {
-	.scribe-conversation-item:not([data-disabled]) time {
-		opacity: 0;
-	}
-
-	.scribe-conversation-item:not([data-disabled]) .scribe-conversation-actions {
+@media (hover: hover) {
+	.scribe-conversation-list li:not(:hover, :focus-within) time {
 		opacity: 1;
-		pointer-events: auto;
 	}
+
+	.scribe-conversation-list li:not(:hover, :focus-within) .scribe-history-actions {
+		opacity: 0;
+		pointer-events: none;
+	}
+}
+
+.scribe-history-card,
+.scribe-history-empty {
+	box-sizing: border-box;
+	max-block-size: 100%;
+	overflow-y: auto;
+	padding: var(--scribe-space-action);
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--scribe-radius-control);
+	background: var(--scribe-page);
+	box-shadow: var(--scribe-shadow);
+}
+
+.scribe-history-card {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: var(--scribe-space-row);
+}
+
+.scribe-history-card[data-compact] {
+	border: 0;
+	border-radius: var(--scribe-radius-compact);
+	box-shadow: none;
+}
+
+.scribe-history-card[data-compact][data-current] {
+	background: var(--scribe-hover);
+}
+
+.scribe-app button.scribe-history-choice {
+	display: grid;
+	align-content: start;
+	gap: var(--scribe-space-row);
+	width: 100%;
+	min-width: 0;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	text-align: start;
+	white-space: normal;
+}
+
+.scribe-history-choice > :is(strong, span) {
+	display: -webkit-box;
+	overflow: hidden;
+	overflow-wrap: anywhere;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 2;
+}
+
+.scribe-history-choice > strong {
+	font-weight: 600;
+}
+
+.scribe-history-choice time,
+.scribe-history-choice small {
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
+}
+
+.scribe-history-reply {
+	color: var(--scribe-muted);
+}
+
+.scribe-history-actions {
+	display: flex;
+	flex-direction: column;
+	align-self: start;
+}
+
+.scribe-history-card[data-compact] .scribe-history-actions {
+	flex-direction: row;
+}
+
+.scribe-history-empty p {
+	margin: 0;
+	padding: var(--scribe-space-action);
+	color: var(--scribe-muted);
 }
 
 .scribe-app button.scribe-conversation-delete:hover {
@@ -731,6 +794,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 }
 
 .scribe-conversation-editor {
+	grid-column: 1 / -1;
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) auto auto;
 	align-items: center;
@@ -795,13 +859,10 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	user-select: text;
 }
 
-.scribe-app textarea.scribe-input:focus {
+.scribe-app textarea.scribe-input:focus,
+.scribe-app textarea.scribe-input:focus-visible {
 	outline: none;
 	box-shadow: none;
-}
-
-.scribe-task-input:has(.scribe-input:focus-visible) {
-	border-color: color-mix(in srgb, var(--scribe-accent) 55%, var(--scribe-border));
 }
 
 .scribe-input::placeholder {
@@ -1172,45 +1233,23 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	fill: currentColor;
 }
 
-.scribe-context-actions {
-	position: relative;
-	flex: 0 0 auto;
-}
-
+.scribe-context-actions,
 .scribe-execution-picker {
 	position: relative;
-	min-inline-size: 40px;
-}
-
-.scribe-app button.scribe-compose-execution {
-	width: auto;
-	gap: 4px;
-	padding-inline: 4px;
-	white-space: nowrap;
+	flex: 0 0 auto;
 }
 
 .scribe-app button.scribe-compose-execution[data-full-access] {
 	color: var(--scribe-warning);
 }
 
-.scribe-compose-execution > .scribe-chat-icon:last-child {
-	width: 12px;
-	height: 12px;
-}
+@container (width < 26rem) {
+	.scribe-compose-toolbar {
+		position: relative;
+	}
 
-.scribe-compose-execution[aria-expanded="true"] > .scribe-chat-icon:last-child {
-	transform: rotate(180deg);
-}
-
-.scribe-execution-label {
-	min-inline-size: 0;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-
-@container (width < 290px) {
-	.scribe-execution-label {
-		display: none;
+	.scribe-context-actions {
+		position: static;
 	}
 }
 
@@ -1456,18 +1495,29 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 
 .scribe-turn-navigator {
 	--scribe-turn-marker-width: calc(var(--scribe-timeline-icon) + var(--scribe-space-row));
-	/* 默认短线的右端在左侧 12px 处，伸长只占用剩余留白。 */
+	/* 两侧的短线朝聊天内容伸长，最多占用边缘的留白。 */
 	--scribe-turn-tick-range: clamp(0px, calc((100cqw - var(--scribe-chat-width)) / 2 - 12px), 20px);
 	--scribe-turn-rail-width: max(var(--scribe-turn-marker-width), calc(8px + var(--scribe-turn-tick-range)));
 	--scribe-turn-preview-start: calc(var(--scribe-turn-marker-width) + var(--scribe-space-section));
 	position: absolute;
 	z-index: 2;
 	inset-block: 0;
-	inset-inline-start: var(--scribe-space-row);
+	inset-inline-start: var(--scribe-rail-inset, var(--scribe-space-row));
 	display: flex;
 	block-size: max-content;
 	max-block-size: calc(100% - 2 * var(--scribe-space-action));
 	margin-block: auto;
+}
+
+.scribe-turn-navigator[data-side="right"] {
+	inset-inline-start: auto;
+	inset-inline-end: var(--scribe-rail-inset, var(--scribe-space-row));
+}
+
+.scribe-turn-navigator[data-side="right"]:not([data-compact]) button.scribe-turn-marker {
+	justify-items: end;
+	justify-content: end;
+	padding-inline: 0 2px;
 }
 
 .scribe-turn-nav-items {
@@ -1548,16 +1598,16 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	opacity: 1;
 }
 
-.scribe-app button.scribe-turn-nav-toggle,
-.scribe-turn-nav-label {
-	display: none;
-}
-
 .scribe-turn-preview {
 	position: absolute;
 	inset-block-start: 0;
 	inset-inline-start: var(--scribe-turn-preview-start);
 	inline-size: 320px;
+}
+
+.scribe-turn-preview > :first-child {
+	max-block-size: var(--scribe-preview-max-height);
+	overflow-y: auto;
 }
 
 /* 保持两者之间的空隙可以经过，点击空隙不触发跳转。 */
@@ -1567,6 +1617,16 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	inset-inline-end: 100%;
 	inline-size: calc(var(--scribe-turn-preview-start) - var(--scribe-turn-rail-width));
 	content: "";
+}
+
+.scribe-turn-navigator[data-side="right"] .scribe-turn-preview {
+	inset-inline-start: auto;
+	inset-inline-end: var(--scribe-turn-preview-start);
+}
+
+.scribe-turn-navigator[data-side="right"] .scribe-turn-preview::before {
+	inset-inline-end: auto;
+	inset-inline-start: 100%;
 }
 
 .scribe-app button.scribe-turn-preview-action {
@@ -1604,62 +1664,60 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	color: var(--scribe-muted);
 }
 
-@container (width < 600px) {
-	.scribe-turn-navigator {
-		inset-block-start: auto;
-		inset-block-end: var(--scribe-space-action);
-		inset-inline-start: var(--scribe-chat-gutter);
-		margin-block: 0;
-	}
+.scribe-turn-navigator[data-compact] {
+	--scribe-rail-inset: var(--scribe-chat-gutter);
+	inset-block-start: auto;
+	inset-block-end: var(--scribe-space-action);
+	margin-block: 0;
+}
 
-	.scribe-app button.scribe-turn-nav-toggle {
-		display: grid;
-		inline-size: var(--scribe-height-control);
-		place-items: center;
-		padding: 0;
-		background-color: var(--scribe-page);
-	}
+.scribe-app .scribe-turn-navigator[data-compact] button.scribe-turn-nav-toggle {
+	display: grid;
+	inline-size: var(--scribe-height-control);
+	place-items: center;
+	padding: 0;
+	background-color: var(--scribe-page);
+}
 
-	.scribe-turn-preview,
-	.scribe-turn-nav-items[data-open="false"] {
-		display: none;
-	}
+.scribe-turn-navigator[data-compact] .scribe-turn-nav-items {
+	position: absolute;
+	inset-block-end: calc(100% + var(--scribe-space-row));
+	inset-inline-start: 0;
+	box-sizing: border-box;
+	inline-size: min(20rem, var(--scribe-chat-width));
+	padding: var(--scribe-space-row);
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--scribe-radius-compact);
+	background: var(--scribe-page);
+	box-shadow: var(--scribe-shadow);
+	scrollbar-width: thin;
+}
 
-	.scribe-turn-nav-items {
-		position: absolute;
-		inset-block-end: calc(100% + var(--scribe-space-row));
-		inset-inline-start: 0;
-		box-sizing: border-box;
-		inline-size: min(20rem, var(--scribe-chat-width));
-		padding: var(--scribe-space-row);
-		border: 1px solid var(--scribe-border);
-		border-radius: var(--scribe-radius-compact);
-		background: var(--scribe-page);
-		box-shadow: var(--scribe-shadow);
-		scrollbar-width: thin;
-	}
+.scribe-turn-navigator[data-compact][data-side="right"] .scribe-turn-nav-items {
+	inset-inline-start: auto;
+	inset-inline-end: 0;
+}
 
-	.scribe-app button.scribe-turn-marker {
-		--scribe-hover: inherit;
-		--scribe-active: inherit;
-		min-height: var(--scribe-space-section);
-		grid-template-columns: var(--scribe-space-section) minmax(0, 1fr);
-		justify-items: center;
-		padding: var(--scribe-space-row);
-		text-align: start;
-	}
+.scribe-app .scribe-turn-navigator[data-compact] button.scribe-turn-marker {
+	--scribe-hover: inherit;
+	--scribe-active: inherit;
+	min-height: var(--scribe-space-section);
+	grid-template-columns: var(--scribe-space-section) minmax(0, 1fr);
+	justify-items: center;
+	padding: var(--scribe-space-row);
+	text-align: start;
+}
 
-	.scribe-turn-nav-label {
-		display: grid;
-		justify-self: stretch;
-		min-width: 0;
-	}
+.scribe-turn-nav-label {
+	display: grid;
+	justify-self: stretch;
+	min-width: 0;
+}
 
-	.scribe-turn-nav-label > span + span {
-		color: var(--scribe-muted);
-		font: var(--scribe-type-caption) var(--font-interface);
-		-webkit-line-clamp: 1;
-	}
+.scribe-turn-nav-label > span + span {
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
+	-webkit-line-clamp: 1;
 }
 
 .scribe-app button.scribe-chat-jump {
@@ -1886,17 +1944,10 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	color: var(--text-faint, var(--text-muted));
 }
 
-.scribe-composer-metrics .scribe-metric-anchor {
-	min-inline-size: 24px;
-}
-
-:is(.scribe-composer-metrics, .scribe-composer-context) button.scribe-metric-label {
-	padding-inline: 5px;
-}
-
 .scribe-app .scribe-composer-context button.scribe-metric-label {
 	block-size: var(--scribe-height-compact);
 	padding-block: 0;
+	padding-inline: 5px;
 	font-size: var(--font-ui-small);
 }
 
@@ -2235,6 +2286,9 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 }
 
 .scribe-tool-status {
+	align-items: center;
+	gap: var(--scribe-space-action);
+	font: var(--scribe-type-caption);
 	color: var(--scribe-muted);
 }
 
@@ -2292,6 +2346,23 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	padding-block-start: 0;
 }
 
+.scribe-shell-preview {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: var(--scribe-timeline-detail-gap);
+	padding-inline-start: var(--scribe-space-section);
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption);
+}
+
+.scribe-shell-preview [data-stream="stderr"] > span {
+	color: var(--scribe-error);
+}
+
+.scribe-shell-preview .scribe-chat-pre {
+	max-height: 6em;
+}
+
 .scribe-tool-body,
 .scribe-tool-body section {
 	display: grid;
@@ -2335,6 +2406,449 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 
 .scribe-chat-error {
 	color: color-mix(in srgb, var(--scribe-error) 65%, var(--scribe-ink));
+}
+
+.scribe-job-control {
+	display: flex;
+	min-inline-size: 0;
+}
+
+.scribe-app button.scribe-job-trigger {
+	cursor: pointer;
+}
+
+.scribe-job-trigger:focus-visible {
+	color: var(--text-muted);
+	outline-offset: -2px;
+}
+
+@media (hover: hover) {
+	.scribe-app button.scribe-job-trigger:hover {
+		color: var(--text-muted);
+	}
+}
+
+.scribe-job-activity {
+	position: relative;
+	display: inline-flex;
+	flex: none;
+	align-items: center;
+	justify-content: center;
+	width: 14px;
+	height: 14px;
+	color: var(--text-muted);
+}
+
+.scribe-job-activity > .scribe-chat-icon {
+	width: 14px;
+	height: 14px;
+}
+
+.scribe-job-indicator {
+	position: absolute;
+	inset: 3px;
+	border-radius: 50%;
+	background: var(--interactive-accent);
+	animation: scribe-job-pulse 1.2s ease-in-out infinite;
+}
+
+.scribe-job-trigger[data-live] .scribe-job-activity > .scribe-chat-icon {
+	display: none;
+}
+
+.scribe-job-count {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	font-variant-numeric: tabular-nums;
+}
+
+@keyframes scribe-job-pulse {
+	0%, 100% { opacity: 1; transform: scale(1); }
+	50% { opacity: 0.55; transform: scale(0.82); }
+}
+
+.scribe-job-menu {
+	position: absolute;
+	z-index: 6;
+	box-sizing: border-box;
+	display: flex;
+	flex-direction: column;
+	width: 500px;
+	max-width: calc(100% - 16px);
+	max-height: min(480px, 70dvh);
+	overflow: hidden;
+	overscroll-behavior: contain;
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--scribe-radius-card);
+	background: var(--scribe-surface);
+	box-shadow: var(--scribe-shadow);
+	font: var(--scribe-type-caption) var(--font-interface);
+	--scribe-hover: color-mix(in srgb, var(--scribe-ink) 7%, transparent);
+	--scribe-active: color-mix(in srgb, var(--scribe-ink) 12%, transparent);
+}
+
+.scribe-job-menu-body {
+	display: flex;
+	flex: 1 1 auto;
+	flex-direction: column;
+	gap: 1px;
+	min-height: 0;
+	margin: 0;
+	padding: 4px;
+	overflow: auto;
+	list-style: none;
+}
+
+.scribe-job-section {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin: 4px 4px 1px;
+	padding: 4px 0 3px;
+	border-block-start: 0.5px solid var(--scribe-border);
+	color: var(--text-faint, var(--text-muted));
+	font-size: 11px;
+	line-height: 16px;
+}
+
+.scribe-job-section:first-child {
+	margin-block-start: 0;
+	border-block-start: 0;
+}
+
+.scribe-app button.scribe-job-section-toggle,
+.scribe-app button.scribe-job-clear {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	min-height: 20px;
+	padding: 2px 4px;
+	border: 0;
+	border-radius: var(--scribe-radius-compact);
+	background: transparent;
+	color: var(--text-faint, var(--text-muted));
+	font: 11px / 16px var(--font-interface);
+	cursor: pointer;
+	--scribe-hover: var(--background-modifier-hover, color-mix(in srgb, var(--scribe-ink) 7%, transparent));
+}
+
+.scribe-job-section-toggle:focus-visible,
+.scribe-job-clear:focus-visible {
+	color: var(--text-muted);
+}
+
+.scribe-job-section-chevron {
+	display: inline-flex;
+	width: 12px;
+	height: 12px;
+	color: var(--text-faint, var(--text-muted));
+	transform: rotate(-90deg);
+	transition: transform 120ms ease;
+}
+
+.scribe-job-section-chevron.is-open {
+	transform: none;
+}
+
+.scribe-job-section-chevron .scribe-chat-icon {
+	width: 12px;
+	height: 12px;
+}
+
+.scribe-job-item {
+	display: flex;
+	flex-direction: column;
+}
+
+.scribe-job-row-line {
+	display: flex;
+	align-items: stretch;
+	gap: 6px;
+	border-radius: var(--scribe-radius-compact);
+}
+
+.scribe-job-row-line.is-live {
+	padding: 4px 8px 4px 2px;
+	background: color-mix(in srgb, var(--scribe-ink) 6%, transparent);
+}
+
+@media (hover: hover) {
+	.scribe-job-row-line.is-live:hover {
+		background: color-mix(in srgb, var(--scribe-ink) 9%, transparent);
+	}
+}
+
+.scribe-job-row-line > .scribe-job-row {
+	flex: 1;
+	min-width: 0;
+}
+
+.scribe-app button.scribe-job-row,
+.scribe-app span.scribe-job-row {
+	display: flex;
+	box-sizing: border-box;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	min-height: 28px;
+	padding: 4px 7px;
+	border: 0;
+	border-radius: var(--scribe-radius-compact);
+	background: transparent;
+	color: var(--text-normal);
+	font: 12px / 17px var(--font-interface);
+	text-align: start;
+	cursor: pointer;
+}
+
+.scribe-app button.scribe-job-row.is-live,
+.scribe-app span.scribe-job-row.is-live {
+	border-radius: var(--scribe-radius-detail);
+	--scribe-hover: transparent;
+}
+
+.scribe-app button.scribe-job-row.is-settled,
+.scribe-app span.scribe-job-row.is-settled {
+	color: var(--text-muted);
+}
+
+.scribe-app button.scribe-job-row.is-static,
+.scribe-app span.scribe-job-row.is-static {
+	cursor: default;
+	--scribe-hover: transparent;
+}
+
+.scribe-job-dot {
+	flex: none;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--text-muted);
+}
+
+.scribe-job-dot[data-state="running"] {
+	background: var(--interactive-accent);
+	animation: scribe-job-pulse 1.2s ease-in-out infinite;
+}
+
+.scribe-job-dot[data-state="done"] {
+	background: var(--text-success, #3fa65c);
+}
+
+.scribe-job-dot[data-state="warning"] {
+	background: var(--text-warning, #d9922e);
+}
+
+.scribe-job-dot[data-state="error"] {
+	background: var(--text-error);
+}
+
+.scribe-job-main {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 0;
+}
+
+.scribe-job-primary,
+.scribe-job-secondary {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+
+.scribe-job-kind {
+	flex: none;
+	padding: 0 5px;
+	border-radius: var(--scribe-radius-detail);
+	background: color-mix(in srgb, var(--scribe-ink) 8%, transparent);
+	color: var(--text-muted);
+	font-size: 10px;
+	line-height: 16px;
+}
+
+.scribe-job-row-line.is-live .scribe-job-kind {
+	background: var(--scribe-surface);
+}
+
+.scribe-job-label {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	color: inherit;
+	font-family: var(--font-monospace);
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.scribe-job-status {
+	flex: none;
+	max-width: 60%;
+	overflow: hidden;
+	color: var(--text-faint, var(--text-muted));
+	font-size: 10px;
+	line-height: 16px;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.scribe-job-duration {
+	flex: none;
+	color: var(--text-faint, var(--text-muted));
+	font-size: 11px;
+	line-height: 18px;
+	font-variant-numeric: tabular-nums;
+}
+
+.scribe-job-chevron-box {
+	display: inline-flex;
+	flex: none;
+	align-items: center;
+	justify-content: center;
+	align-self: center;
+	width: 20px;
+	height: 20px;
+	border: 0.5px solid var(--background-modifier-border);
+	border-radius: var(--scribe-radius-compact);
+	background: var(--scribe-surface);
+	color: var(--text-muted);
+}
+
+.scribe-job-chevron-box .scribe-chat-icon {
+	width: 12px;
+	height: 12px;
+}
+
+.scribe-app button.scribe-job-stop {
+	display: inline-flex;
+	flex: none;
+	align-items: center;
+	align-self: center;
+	justify-content: center;
+	gap: 4px;
+	width: 20px;
+	height: 20px;
+	min-height: 20px;
+	padding: 0;
+	border: 0.5px solid var(--background-modifier-border);
+	border-radius: var(--scribe-radius-compact);
+	background: var(--scribe-surface);
+	color: var(--text-muted);
+	cursor: pointer;
+	--scribe-hover: transparent;
+}
+
+.scribe-job-stop .scribe-chat-icon {
+	width: 10px;
+	height: 10px;
+}
+
+@media (hover: hover) {
+	.scribe-job-stop:hover {
+		border-color: color-mix(in srgb, var(--text-error) 45%, transparent);
+		color: var(--text-error);
+	}
+}
+
+.scribe-app button.scribe-job-stop.is-armed {
+	width: auto;
+	padding: 0 7px;
+	border-color: color-mix(in srgb, var(--text-error) 45%, transparent);
+	background: color-mix(in srgb, var(--text-error) 12%, transparent);
+	color: var(--text-error);
+	font-size: 11px;
+	line-height: 18px;
+	white-space: nowrap;
+	--scribe-hover: color-mix(in srgb, var(--text-error) 12%, transparent);
+	--scribe-active: color-mix(in srgb, var(--text-error) 18%, transparent);
+}
+
+.scribe-app button.scribe-job-stop.is-failed {
+	color: var(--text-error);
+	font-size: 11px;
+	line-height: 18px;
+	white-space: nowrap;
+}
+
+.scribe-job-panel {
+	margin: 0 8px 8px;
+}
+
+.scribe-job-terminal {
+	overflow: hidden;
+	border: 0.5px solid var(--background-modifier-border);
+	border-radius: var(--scribe-radius-compact);
+	background: var(--background-primary);
+}
+
+.scribe-job-terminal-command {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 8px 10px 6px;
+	border-block-end: 0.5px solid var(--background-modifier-border);
+	color: var(--text-faint, var(--text-muted));
+	font: 11px / 18px var(--font-monospace);
+}
+
+.scribe-job-prompt {
+	flex: none;
+	color: var(--text-faint, var(--text-muted));
+}
+
+.scribe-job-terminal-command code {
+	flex: 1;
+	min-width: 0;
+	overflow-wrap: anywhere;
+	white-space: pre-wrap;
+	color: var(--text-normal);
+	font: inherit;
+}
+
+.scribe-app button.scribe-job-copy {
+	flex: none;
+	min-height: 18px;
+	height: 18px;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	color: var(--text-faint, var(--text-muted));
+	font: 11px / 18px var(--font-interface);
+	cursor: pointer;
+	--scribe-hover: transparent;
+}
+
+.scribe-app button.scribe-job-copy:hover,
+.scribe-app button.scribe-job-copy:focus-visible {
+	color: var(--text-muted);
+}
+
+.scribe-job-output {
+	max-height: 288px;
+	margin: 0;
+	padding: 8px 10px;
+	overflow: auto;
+	overscroll-behavior: contain;
+	color: var(--text-normal);
+	font: 11px / 18px var(--font-monospace);
+	overflow-wrap: anywhere;
+	white-space: pre-wrap;
+	tab-size: 4;
+}
+
+.scribe-job-notice {
+	margin: 0 8px 6px;
+	color: var(--text-faint, var(--text-muted));
+	font-size: 11px;
+	line-height: 16px;
+}
+
+.scribe-job-notice:first-child {
+	margin-block-start: 6px;
 }
 
 .scribe-approval-view {
@@ -2493,6 +3007,12 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	margin: -4px 0 8px;
 	color: var(--text-muted);
 	font-size: var(--font-ui-smaller);
+}
+
+.scribe-writing-rule-input {
+	display: block;
+	width: 100%;
+	resize: vertical;
 }
 
 .scribe-models-panel {
@@ -3566,4 +4086,745 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	font: var(--scribe-type-caption) var(--font-interface);
 	overflow-wrap: anywhere;
 	white-space: normal;
+}
+
+.scribe-composer-capsules > * {
+	min-inline-size: 0;
+	max-inline-size: 100%;
+}
+
+.scribe-composer-capsules button:is(.scribe-metric-label, .scribe-subagent-toggle, .scribe-job-trigger) {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 30px;
+	max-inline-size: 100%;
+	padding: 4px 10px 4px 8px;
+	border: 1px solid var(--scribe-border);
+	border-radius: 999px;
+	background: var(--scribe-page);
+	color: var(--scribe-ink);
+	box-shadow: var(--scribe-shadow);
+	white-space: nowrap;
+}
+
+.scribe-subagent-count,
+.scribe-subagent-note,
+.scribe-subagent-status,
+.scribe-subagent-model {
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
+}
+
+.scribe-agent-badge {
+	position: relative;
+	display: inline-flex;
+	flex: none;
+	align-items: center;
+	justify-content: center;
+	gap: 2px;
+	width: 16px;
+	height: 16px;
+	border-radius: 5px;
+	background: #4384ff;
+}
+
+.scribe-agent-badge::before,
+.scribe-agent-badge::after {
+	width: 3px;
+	height: 4px;
+	border-radius: 2px;
+	background: white;
+	content: "";
+}
+
+.scribe-agent-mark {
+	position: absolute;
+	inset: auto auto -2px -2px;
+	display: grid;
+	place-items: center;
+	width: 9px;
+	height: 9px;
+	border-radius: 50%;
+	background: #697078;
+	box-shadow: 0 0 0 1px var(--scribe-page);
+	color: white;
+}
+
+.scribe-agent-badge[data-tone="done"] .scribe-agent-mark {
+	background: #17813c;
+}
+
+.scribe-agent-badge[data-tone="error"] .scribe-agent-mark {
+	background: var(--scribe-error);
+}
+
+.scribe-agent-mark .scribe-chat-icon {
+	width: 7px;
+	height: 7px;
+}
+
+.scribe-agent-mark svg {
+	stroke-width: 4;
+}
+
+.scribe-agent-mark:empty::after {
+	width: 3px;
+	height: 3px;
+	border-radius: 1px;
+	background: currentColor;
+	content: "";
+}
+
+.scribe-subagent-popover {
+	position: absolute;
+	z-index: 6;
+	inset-block-end: calc(100% + 5px);
+	left: 50%;
+	transform: translateX(-50%);
+	box-sizing: border-box;
+	inline-size: min(320px, calc(100cqw - 16px));
+	max-block-size: min(50dvh, 24rem);
+	overflow: auto;
+	overscroll-behavior: contain;
+	padding: 6px;
+	border: 1px solid var(--scribe-border);
+	border-radius: 12px;
+	background: var(--scribe-page);
+	box-shadow: var(--shadow-m, var(--scribe-shadow));
+}
+
+@supports (anchor-scope: --scribe-subagent-toggle) and (left: anchor(center)) {
+	.scribe-composer-capsules {
+		anchor-scope: --scribe-subagent-toggle;
+	}
+
+	.scribe-subagent-toggle {
+		anchor-name: --scribe-subagent-toggle;
+	}
+
+	.scribe-subagent-popover {
+		position-anchor: --scribe-subagent-toggle;
+		left: clamp(min(50%, 160px), anchor(center), max(50%, calc(100% - 160px)));
+		inset-block-end: calc(anchor(top) + 5px);
+	}
+}
+
+.scribe-subagent-list {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.scribe-subagent-entry {
+	position: relative;
+}
+
+.scribe-app button.scribe-subagent-row {
+	display: grid;
+	grid-template-columns: 16px minmax(0, 1fr);
+	align-items: start;
+	gap: 8px;
+	inline-size: 100%;
+	min-height: var(--scribe-height-compact);
+	padding: 9px 10px;
+	border: 0;
+	border-radius: 8px;
+	background: transparent;
+	text-align: start;
+}
+
+.scribe-subagent-entry:is(:hover, :focus-within) .scribe-subagent-row {
+	background: var(--scribe-hover);
+}
+
+.scribe-subagent-row .scribe-agent-badge {
+	margin-block-start: 2px;
+}
+
+.scribe-subagent-copy {
+	display: grid;
+	align-content: start;
+	gap: 4px;
+	min-width: 0;
+}
+
+.scribe-subagent-row-name,
+.scribe-subagent-note {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-subagent-entry:has(.scribe-subagent-more) .scribe-subagent-row-name {
+	padding-inline-end: 24px;
+}
+
+.scribe-subagent-entry:has(.scribe-subagent-stop) .scribe-subagent-status {
+	padding-inline-end: 64px;
+}
+
+.scribe-app button:is(.scribe-subagent-stop, .scribe-subagent-more) {
+	position: absolute;
+	inset-inline-end: 6px;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-height: 24px;
+	padding: 1px 6px;
+	border: 0;
+	border-radius: var(--radius-s);
+	background: transparent;
+	font: var(--scribe-type-caption) var(--font-interface);
+}
+
+.scribe-subagent-stop {
+	inset-block-end: 6px;
+}
+
+.scribe-subagent-more {
+	inset-block-start: 6px;
+}
+
+.scribe-subagent-stop .scribe-chat-icon,
+.scribe-subagent-more .scribe-chat-icon {
+	width: 13px;
+	height: 13px;
+}
+
+@media (hover: hover) {
+	.scribe-subagent-entry:not(:hover, :focus-within) .scribe-subagent-more {
+		opacity: 0;
+	}
+}
+
+.scribe-subagent-detail {
+	display: flex;
+	flex: 1 1 auto;
+	flex-direction: column;
+	min-height: 0;
+	min-width: 0;
+}
+
+.scribe-subagent-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex: none;
+	flex-wrap: nowrap;
+	gap: var(--scribe-space-action);
+	padding: var(--scribe-space-action) var(--scribe-chat-gutter);
+	border-block-end: 1px solid var(--scribe-border);
+}
+
+.scribe-subagent-name, .scribe-subagent-model {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.scribe-subagent-name {
+	margin: 0;
+	font: var(--scribe-type-body) var(--font-interface);
+	font-weight: 600;
+}
+
+.scribe-subagent-model {
+	margin-inline-start: auto;
+	text-align: end;
+}
+
+.scribe-subagent-log {
+	padding-block-start: var(--scribe-space-card);
+}
+
+.scribe-subagent-log .scribe-chat-message.is-user {
+	align-self: flex-end;
+	max-inline-size: min(100%, max(65%, 21rem));
+}
+
+.scribe-subagent-compose {
+	display: flex;
+	align-items: flex-end;
+	gap: var(--scribe-space-action);
+	box-sizing: border-box;
+	inline-size: min(100%, var(--scribe-chat-width));
+	margin-inline: auto;
+	padding-block: var(--scribe-space-action);
+	border-block-start: 1px solid var(--scribe-border);
+}
+
+.scribe-subagent-compose textarea {
+	flex: 1;
+	min-width: 0;
+	max-height: 10rem;
+	resize: vertical;
+}
+
+.scribe-subagent-activity {
+	display: grid;
+	gap: var(--scribe-timeline-row-gap);
+	border-inline-start: 1px solid var(--scribe-border);
+	padding-inline-start: var(--scribe-space-row);
+}
+
+.scribe-app button.scribe-subagent-activity-link {
+	justify-content: flex-start;
+	gap: var(--scribe-space-action);
+	border-radius: var(--scribe-radius-detail);
+	text-align: start;
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+
+.scribe-collab-event {
+	display: flex;
+	align-items: baseline;
+	gap: var(--scribe-space-action);
+	min-width: 0;
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
+}
+
+.scribe-app button.scribe-collab-agent-name {
+	min-width: 0;
+	min-height: 24px;
+	height: auto;
+	padding: 0;
+	color: var(--text-accent);
+	background: transparent;
+	border: 0;
+	box-shadow: none;
+	font: inherit;
+	cursor: pointer;
+}
+
+.scribe-app button.scribe-collab-agent-name:is(:hover, :focus-visible) {
+	text-decoration: underline;
+	text-underline-offset: 0.18em;
+}
+
+.scribe-approval-warning {
+	flex-wrap: wrap;
+}
+
+.scribe-subagent-request-source {
+	margin-inline-start: auto;
+}
+
+.scribe-composer-skill-field {
+	position: relative;
+	min-width: 0;
+}
+
+/* 贴在输入框文字下方的背景层，只画技能标签底色，文字仍由 textarea 绘制。 */
+.scribe-skill-mention-layer {
+	position: absolute;
+	inset: 0;
+	box-sizing: border-box;
+	padding: 0 8px;
+	border-radius: var(--radius-m);
+	overflow: hidden;
+	color: transparent;
+	pointer-events: none;
+	user-select: none;
+	font: 14px / 20px var(--font-interface);
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
+}
+
+.scribe-skill-mention-chip {
+	padding: 0 .35em;
+	margin: 0 -.35em;
+	border-radius: 999px;
+	background: var(--tag-background, var(--background-modifier-hover));
+	box-shadow: inset 0 0 0 1px var(--tag-background-hover, transparent);
+}
+
+.scribe-queue-row > .scribe-composer-skill-field {
+	flex: 1 1 0;
+}
+
+.scribe-composer-skill-field .scribe-queue-editor {
+	width: 100%;
+}
+
+.scribe-queue-list:has(.scribe-skill-suggestions) {
+	overflow: visible;
+}
+
+.scribe-skill-suggestions.scribe-context-popover {
+	z-index: 6;
+	width: 100%;
+	max-width: 100%;
+}
+
+.scribe-skill-suggestions p {
+	margin: 4px 8px;
+	color: var(--text-muted);
+}
+
+.scribe-skill-scan-notices {
+	margin: 4px 8px;
+	font-size: var(--font-ui-small);
+	overflow-wrap: anywhere;
+}
+
+.scribe-skill-menu-row,
+.scribe-skill-menu-header {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.scribe-skill-menu-header {
+	padding: 4px;
+}
+
+.scribe-skill-menu-header input,
+.scribe-skill-menu-row > button:first-child {
+	flex: 1;
+	min-width: 0;
+}
+
+.scribe-app .scribe-skill-menu-row > button:first-child {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	height: auto;
+	min-width: 0;
+	text-align: start;
+	overflow: hidden;
+}
+
+.scribe-skill-menu-row button[aria-selected="true"] {
+	background: var(--background-modifier-hover);
+}
+
+.scribe-skill-menu-name { flex: 0 0 auto; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-normal); font-size: var(--font-ui-small); font-weight: 500; }
+.scribe-skill-menu-row > button:first-child .scribe-skill-badge { flex: 0 0 auto; white-space: nowrap; }
+.scribe-skill-menu-description { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.scribe-skill-menu-row > button[role="switch"] { flex: 0 0 auto; width: 28px; height: 28px; min-height: 0; padding: 0; }
+.scribe-skill-menu-row > button[role="switch"] .scribe-chat-icon { width: 16px; height: 16px; }
+
+/* 技能设置页与管理弹窗 */
+.scribe-skill-page, .scribe-skill-dialog-body { display: flex; flex-direction: column; gap: var(--size-4-4); min-width: 0; }
+.scribe-skill-page p, .scribe-skill-dialog-body p { margin: .3em 0; overflow-wrap: anywhere; }
+.scribe-skill-toolbar, .scribe-skill-inline, .scribe-skill-actions, .scribe-skill-dialog-actions, .scribe-skill-doc-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--size-4-2); }
+.scribe-skill-toolbar { flex-wrap: nowrap; gap: var(--size-4-3); font-size: var(--font-ui-small); }
+.scribe-skill-toolbar > strong { flex: none; }
+.scribe-skill-actions { margin-inline-start: auto; }
+.scribe-skill-actions button, .scribe-skill-detail-head button:not(.scribe-skill-switch), .scribe-skill-doc-head button { display: inline-flex; align-items: center; gap: .35em; }
+.scribe-skill-search { display: inline-flex; align-items: center; position: relative; flex: 1 1 12rem; width: 256px; min-width: 0; max-width: 100%; }
+.scribe-skill-search > .scribe-chat-icon { position: absolute; inset-inline-end: 12px; width: 16px; height: 16px; color: var(--text-muted); pointer-events: none; }
+.scribe-skill-search > .scribe-chat-icon svg { width: 16px; height: 16px; }
+.scribe-skill-search input[type=text] { box-sizing: border-box; width: 100%; height: 36px; padding: 4px 52px 4px 12px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: transparent; box-shadow: none; font-size: 14px; }
+.scribe-skill-search .scribe-skill-search-clear { position: absolute; inset-inline-end: 32px; display: grid; place-items: center; width: 16px; min-width: 0; height: 16px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-muted); box-shadow: none; }
+.scribe-skill-page .scribe-skill-actions > button, .scribe-skill-page .scribe-skill-menu-anchor > button { box-sizing: border-box; justify-content: center; flex: none; gap: 4px; height: 36px; padding: 8px 16px; border: 1px solid var(--background-modifier-border); border-radius: 8px; color: var(--text-normal); background: var(--background-primary); box-shadow: none; line-height: 20px; font-size: 14px; font-weight: 500; }
+.scribe-skill-page .scribe-skill-menu-anchor > button.mod-cta { background: var(--text-normal); border-color: var(--text-normal); color: var(--background-primary); }
+.scribe-skill-actions > button:hover, .scribe-skill-menu-anchor > button:hover { filter: brightness(.95); }
+.scribe-skill-actions .scribe-chat-icon, .scribe-skill-actions .scribe-chat-icon svg { width: 16px; height: 16px; }
+.scribe-skill-meta, .scribe-skill-page small, .scribe-skill-dialog-body small, .scribe-skill-description { color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.scribe-skill-list { display: flex; flex-direction: column; gap: var(--size-4-2); }
+.scribe-skill-card { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: var(--size-4-2) var(--size-4-4); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); padding: var(--size-4-3); min-width: 0; }
+.scribe-skill-card:hover { border-color: var(--background-modifier-border-hover); background: var(--background-modifier-hover); }
+.scribe-skill-page .scribe-skill-summary { flex: 1 1 12rem; min-width: 0; height: auto; padding: 0; text-align: start; display: grid; gap: 2px; box-shadow: none; background: none; border: 0; color: var(--text-normal); }
+.scribe-skill-list > .scribe-skill-card { box-sizing: border-box; min-height: 70.5px; padding: 12px; border-radius: 8px; }
+.scribe-skill-page .scribe-skill-list .scribe-skill-summary { display: block; box-sizing: border-box; min-height: 0; justify-content: start; align-content: start; text-align: start; }
+.scribe-skill-summary .scribe-skill-inline { flex-wrap: nowrap; justify-content: flex-start; text-align: start; gap: 8px; }
+.scribe-skill-summary strong { text-align: start; font-size: var(--font-ui-small); line-height: 1.5; font-weight: 500; }
+.scribe-skill-summary .scribe-skill-description { display: block; max-width: 540px; margin-top: 4px; line-height: 1.625; }
+.scribe-skill-summary small { display: block; margin-top: 2px; }
+.scribe-skill-list .scribe-skill-card > .scribe-skill-inline { flex-shrink: 0; gap: 8px; }
+.scribe-skill-card .clickable-icon { width: 28px; height: 28px; justify-content: center; border: 0; background: transparent; box-shadow: none; color: var(--text-muted); }
+.scribe-skill-card .clickable-icon:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.scribe-skill-card .clickable-icon svg { width: 16px; height: 16px; }
+.scribe-skill-page button.scribe-skill-switch { position: relative; display: inline-flex; flex: 0 0 var(--toggle-s-width,36px); align-items: center; justify-content: flex-start; box-sizing: border-box; width: var(--toggle-s-width,36px); min-width: 0; height: calc(var(--toggle-s-thumb-height,12px) + var(--toggle-s-border-width,2px) * 2); min-height: 0; margin: 0; padding: 0; border: 0; border-radius: var(--toggle-radius,24px); background: var(--background-modifier-border-hover); box-shadow: none; }
+.scribe-skill-page button.scribe-skill-switch[aria-checked=true] { background: var(--interactive-accent); }
+.scribe-skill-switch span { display: block; width: var(--toggle-s-thumb-width,18px); height: var(--toggle-s-thumb-height,12px); border-radius: var(--toggle-thumb-radius,24px); background: var(--toggle-thumb-color,white); transform: translateX(var(--toggle-s-border-width,2px)); transition: transform .12s; }
+.scribe-skill-switch[aria-checked=true] span { transform: translateX(calc(var(--toggle-s-width,36px) - var(--toggle-s-thumb-width,18px) - var(--toggle-s-border-width,2px))); }
+.scribe-skill-page :is(button,input,summary):focus-visible, .scribe-skill-dialog-body :is(button,input,textarea,summary):focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.scribe-skill-page button:disabled { opacity: .5; }
+@media (prefers-reduced-motion: reduce) { .scribe-skill-switch span { transition: none; } }
+.scribe-skill-summary strong, .scribe-skill-description { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scribe-skill-badge { flex: 0 0 auto; padding: 0 .4em; border-radius: var(--radius-s); color: var(--text-muted); background: var(--background-modifier-hover); font-size: var(--font-ui-smaller); }
+.scribe-skill-icon { width: 1.15rem; height: 1.15rem; object-fit: contain; border-radius: 3px; }
+.scribe-skill-menu-anchor { position: relative; }
+.scribe-skill-menu { z-index: 10; position: absolute; inset-inline-end: 0; top: calc(100% + 4px); display: grid; min-width: max-content; padding: 4px; border-radius: var(--radius-m); border: 1px solid var(--background-modifier-border); background: var(--background-primary); box-shadow: var(--shadow-s); }
+.scribe-skill-menu button { width: 100%; background: none; box-shadow: none; justify-content: flex-start; }
+.scribe-skill-menu button:is(:hover,:focus-visible) { background: var(--background-modifier-hover); }
+.scribe-skill-empty, .scribe-skill-dialog-body button.scribe-skill-drop { display: flex; flex-direction: column; text-align: center; align-items: center; justify-content: center; gap: .5rem; min-height: 9rem; padding: 1.5rem; border: 1px dashed var(--background-modifier-border); border-radius: var(--radius-m); color: var(--text-muted); background: transparent; box-shadow: none; }
+.scribe-skill-dialog-body button.scribe-skill-drop { width: 100%; height: auto; padding: 40px 24px; white-space: normal; font-size: var(--font-ui-small); }
+.scribe-skill-drop > .scribe-chat-icon, .scribe-skill-drop > .scribe-chat-icon svg { width: 32px; height: 32px; }
+.scribe-skill-dialog-body button.scribe-skill-drop:is(:hover,[data-dragging=true]) { border-color: var(--interactive-accent); background: var(--background-modifier-hover); }
+.scribe-skill-dialog-body button:not(.scribe-skill-drop), .scribe-skill-detail button.mod-cta, .scribe-skill-dependency-head button, .scribe-skill-metadata form button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; height: 36px; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 500; }
+.scribe-skill-dialog-body .scribe-chat-icon, .scribe-skill-dialog-body .scribe-chat-icon svg { flex-shrink: 0; }
+.scribe-skill-dialog-body .scribe-skill-inline .scribe-chat-icon svg { width: 16px; height: 16px; }
+.scribe-skill-modal { max-height: 88vh; }
+.scribe-skill-modal .modal-content { max-height: 75vh; overflow-y: auto; }
+.scribe-skill-warning { color: var(--text-warning); }
+.scribe-skill-error { color: var(--text-error); }
+.scribe-skill-dialog-actions { justify-content: flex-end; }
+.scribe-skill-field { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; padding: .4rem 0; }
+.scribe-skill-field input, .scribe-skill-field select { max-width: 100%; }
+.scribe-skill-import-row { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: start; }
+.scribe-skill-import-row small { display: block; overflow-wrap: anywhere; }
+.scribe-skill-diff { white-space: pre-wrap; overflow-wrap: anywhere; }
+.scribe-skill-diff del { color: var(--text-error); }
+.scribe-skill-diff ins { color: var(--text-success); }
+.scribe-skill-detail { padding-block: 16px; }
+.scribe-skill-detail-head { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: start; gap: .6rem; }
+.scribe-skill-detail-head h3 { margin: 0; line-height: 1.55; font-weight: 600; font-size: var(--font-ui-larger); overflow-wrap: anywhere; }
+.scribe-skill-detail-head p { font-size: var(--font-ui-small); color: var(--text-muted); }
+.scribe-skill-detail-head .clickable-icon { box-sizing: border-box; width: 28px; height: 28px; padding: 4px; border: 0; box-shadow: none; color: var(--text-muted); }
+.scribe-skill-detail-head .scribe-skill-detail-description { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.625; }
+.scribe-skill-detail-head > .scribe-skill-inline button.mod-cta { color: var(--text-normal); background: transparent; border: 0; box-shadow: none; white-space: nowrap; }
+.scribe-skill-detail-head > .scribe-skill-inline, .scribe-skill-detail-head .scribe-skill-inline { gap: 6px; flex-wrap: nowrap; }
+.scribe-skill-detail-head > .scribe-skill-inline button.mod-cta:hover { background: var(--background-modifier-hover); }
+.scribe-skill-detail-head .scribe-skill-icon { width: 20px; height: 20px; }
+.scribe-skill-dependency-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.scribe-skill-metadata > summary, .scribe-skill-workspace summary { cursor: pointer; }
+.scribe-skill-metadata > summary { display: flex; gap: 6px; align-items: center; padding: 6px 0; font-size: var(--font-ui-small); font-weight: 500; }
+.scribe-skill-metadata > summary::-webkit-details-marker { display: none; }
+.scribe-skill-metadata:not([open]) > summary .scribe-chat-icon { transform: rotate(-90deg); }
+.scribe-skill-metadata form input { width: min(260px,100%); }
+.scribe-skill-metadata form { font-size: var(--font-ui-small); padding-block: .5rem; }
+.scribe-skill-workspace { display: grid; grid-template-columns: min(224px, 55%) minmax(0,1fr); align-items: stretch; gap: .75rem; min-height: 24rem; }
+.scribe-skill-workspace aside, .scribe-skill-document { min-width: 0; background: var(--background-secondary); border-radius: var(--radius-l); overflow: auto; }
+.scribe-skill-workspace aside { padding: 8px 4px; }
+.scribe-skill-workspace aside > strong { display: block; padding: 0 8px 8px; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.scribe-skill-workspace ul { list-style: none; padding-inline-start: 12px; margin: 0; }
+.scribe-skill-workspace li + li { margin-top: 2px; }
+.scribe-skill-workspace [role=tree] { padding-inline-start: 0; }
+.scribe-skill-workspace aside button, .scribe-skill-workspace aside summary { display: flex; justify-content: flex-start; align-items: center; gap: 8px; width: 100%; height: auto; padding: 6px 8px; border: 0; border-radius: 4px; color: var(--text-normal); background: transparent; box-shadow: none; text-align: start; overflow-wrap: anywhere; white-space: normal; font-size: var(--font-ui-small); }
+.scribe-skill-workspace aside summary { color: var(--text-muted); }
+.scribe-skill-workspace aside summary::-webkit-details-marker { display: none; }
+.scribe-skill-workspace aside .scribe-chat-icon, .scribe-skill-workspace aside .scribe-chat-icon svg { width: 14px; height: 14px; flex-shrink: 0; }
+.scribe-skill-workspace aside :is(button,summary):hover { background: var(--background-modifier-hover); }
+.scribe-skill-workspace aside button[aria-selected=true] { background: var(--background-modifier-hover); }
+.scribe-skill-doc-head { min-height: 44px; box-sizing: border-box; border-bottom: 1px solid var(--background-modifier-border); padding: .55rem .7rem; font-size: var(--font-ui-small); }
+.scribe-skill-doc-head strong { flex: 1 1 auto; overflow-wrap: anywhere; }
+.scribe-skill-segments { display: inline-flex; border: 1px solid var(--background-modifier-border); border-radius: 8px; overflow: hidden; }
+.scribe-skill-segments button { border: 0; border-radius: 0; padding: 6px 12px; height: auto; color: var(--text-muted); background: transparent; box-shadow: none; font-size: var(--font-ui-smaller); }
+.scribe-skill-segments button + button { border-inline-start: 1px solid var(--background-modifier-border); }
+.scribe-skill-segments button[aria-checked=true] { color: var(--text-on-accent); background: var(--interactive-accent); }
+.scribe-skill-segments button:focus-visible { outline-offset: -2px; }
+.scribe-skill-draft { border-radius: 8px; background: var(--background-secondary); overflow: hidden; }
+.scribe-skill-draft-name { border-bottom: 1px solid var(--background-modifier-border); padding: 8px 12px; font-size: var(--font-ui-small); font-weight: 500; }
+.scribe-skill-modal .scribe-skill-draft .scribe-skill-draft-editor { padding: 12px; resize: vertical; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.scribe-skill-document .scribe-skill-file-editor, .scribe-skill-modal .scribe-skill-draft-editor { display: block; width: 100%; min-height: 20rem; font-family: var(--font-monospace); font-size: var(--font-ui-small); }
+.scribe-skill-document .scribe-skill-file-editor { resize: vertical; border: 0; background: transparent; padding: .8rem; }
+.scribe-skill-preview .markdown-rendered h1 { display: block !important; }
+.scribe-skill-preview .markdown-rendered { min-width: 0; overflow-wrap: anywhere; }
+.scribe-skill-preview { margin: 0; min-height: 20rem; padding: 16px; overflow-wrap: anywhere; }
+pre.scribe-skill-preview { white-space: pre-wrap; }
+.scribe-skill-dependency span { display: inline-block; margin-inline-end: .4rem; width: .55em; height: .55em; border-radius: 50%; }
+.scribe-skill-dependency .is-ready { background: var(--text-success); }
+.scribe-skill-dependency .is-missing, .scribe-settings-tab.has-skill-warning::after { background: var(--text-warning); }
+.scribe-settings-tab.has-skill-warning::after { content: ''; display: inline-block; width: .42em; height: .42em; border-radius: 100%; margin-inline-start: .4em; vertical-align: middle; }
+.scribe-settings-panel:has(.scribe-skill-page) { container-type: inline-size; box-sizing: border-box; padding: 4px 16px 16px; }
+@container (max-width: 639px) {
+	.scribe-skill-search { width: 100%; }
+}
+@media (max-width: 767px) {
+	.scribe-skill-workspace { grid-template-columns: minmax(0,1fr); }
+	.scribe-skill-workspace aside { max-height: 160px; }
+}
+@media (max-width: 639px) {
+	.scribe-skill-detail-head { grid-template-columns: auto minmax(0,1fr); }
+	.scribe-skill-detail-head > :last-child { grid-column: 2; }
+}
+
+.scribe-slash-suggestions.scribe-context-popover {
+	z-index: 6;
+	inset-block-end: calc(100% + 10px);
+	width: 100%;
+	max-width: 100%;
+	max-height: min(30rem, 55dvh, var(--scribe-slash-height, 30rem));
+	padding: 6px;
+	border-radius: 12px;
+	box-shadow: var(--shadow-l);
+	overscroll-behavior: contain;
+}
+
+.scribe-slash-suggestions.scribe-context-popover[data-placement="below"] {
+	inset-block-end: auto;
+	inset-block-start: calc(100% + 10px);
+}
+
+.scribe-app .scribe-slash-suggestions button {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	height: auto;
+	min-height: 30px;
+	padding: 5px 8px;
+	border-radius: 8px;
+}
+
+.scribe-app .scribe-slash-suggestions button > .scribe-chat-icon:first-child {
+	flex: 0 0 auto;
+	width: 16px;
+	height: 16px;
+	color: var(--text-muted);
+}
+
+.scribe-app .scribe-slash-suggestions button > .scribe-chat-icon:last-child:not(:first-child) {
+	flex: 0 0 auto;
+	width: 14px;
+	height: 14px;
+	margin-inline-start: auto;
+	color: var(--text-faint);
+}
+
+.scribe-app .scribe-slash-suggestions button[aria-selected="true"] {
+	background: var(--background-modifier-hover);
+}
+
+.scribe-app .scribe-slash-suggestions button[aria-disabled="true"],
+.scribe-app .scribe-slash-suggestions button[aria-disabled="true"]:hover {
+	color: var(--text-muted);
+	cursor: default;
+}
+
+.scribe-slash-name {
+	flex: 0 0 auto;
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	font-weight: 500;
+	white-space: nowrap;
+}
+
+.scribe-slash-suggestions small {
+	min-width: 0;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-slash-panel {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	outline: none;
+}
+
+.scribe-slash-panel-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 2px 2px 6px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.scribe-app .scribe-slash-panel-head > button {
+	flex: 0 0 auto;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border-radius: 6px;
+}
+
+.scribe-slash-panel-title {
+	flex: 1;
+	min-width: 0;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	text-align: center;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-slash-panel-list {
+	display: grid;
+	gap: 1px;
+	padding-top: 4px;
+}
+
+.scribe-slash-panel-list .scribe-slash-name {
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+
+.scribe-slash-panel-field {
+	width: 100%;
+	margin-top: 8px;
+}
+
+.scribe-slash-panel-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	padding: 8px 2px 2px;
+}
+
+.scribe-app .scribe-slash-panel-actions button {
+	padding-inline: 10px;
+}
+
+.scribe-app .scribe-slash-panel-actions button.mod-cta {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.scribe-slash-panel-message {
+	margin: 8px 4px;
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.scribe-slash-panel-info {
+	padding: 2px 4px;
+}
+
+.scribe-slash-panel-info p {
+	margin: 6px 0;
+	font-size: var(--font-ui-small);
+	overflow-wrap: anywhere;
+}
+
+.scribe-slash-panel-custom {
+	min-width: 0;
+	padding-top: 4px;
+	overflow: hidden;
+}
+
+.scribe-skill-command-list {
+	display: grid;
+	gap: 2px;
+	min-width: 0;
+	padding-top: 4px;
+}
+
+.scribe-skill-command-row {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	width: 100%;
+}
+
+.scribe-app .scribe-slash-suggestions .scribe-skill-menu-row > button:first-child {
+	flex: 1 1 0;
+	width: auto;
+	height: auto;
+	min-width: 0;
+	padding: 5px 8px;
+	text-align: start;
+	overflow: hidden;
+}
+
+.scribe-app .scribe-slash-suggestions .scribe-skill-menu-row > button[role="switch"] {
+	flex: 0 0 auto;
+	width: 28px;
+	height: 28px;
+	min-height: 0;
+	padding: 0;
 }

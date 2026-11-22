@@ -5,14 +5,22 @@ import { mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { SAVED_SHELL_JOB_LIMIT } from '../../tools/external/shellJobs';
+import type { SavedShellJob } from '../../tools/external/shellJobs';
 import { MissingConversationError } from '../../types';
-import type { ConversationEntry, ConversationStore, ConversationSummary, QueuedMessage } from '../../types';
-import { ConversationRecordError, isQueueEntry, parseConversationEntry, replayConversation, replayQueueEntry } from './taskStore';
+import type { ConversationEntry, ConversationStore, ConversationSummary, HistorySummary, QueuedMessage } from '../../types';
+import {
+	ConversationRecordError, isMainEntry, isQueueEntry, isSavedShellJob, isSubagentEntry, isSubagentReportEntry,
+	parseConversationEntry, parseSavedShellJobs,
+	replayConversation, replayQueueEntry, SAVED_SHELL_JOBS_FILE_LIMIT,
+} from './taskStore';
+import { createSubagentRecordIndex } from './subagentRecords';
 
 const idPattern = /^(?!(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$)[A-Z0-9][A-Z0-9-]{0,95}$/i;
 const titleLimit = 120;
 const writeQueue = new Map<string, Promise<unknown>>();
 const deletedLogs = new Set<string>();
+const subagentIndexes = new Map<string, ReturnType<typeof createSubagentRecordIndex>>();
 const noFollow = constants.O_NOFOLLOW ?? 0;
 
 function checkId(id: string): void {
@@ -175,6 +183,18 @@ async function readQueued(path: string, id: string): Promise<Map<string, QueuedM
 	}
 }
 
+async function readSubagentIndex(path: string, id: string) {
+	const index = createSubagentRecordIndex(id);
+	const opened = await openIfExists(path);
+	if (!opened) return index;
+	try {
+		for await (const entry of readRecords(opened.file, opened.stat.size)) index.observe(entry);
+		return index;
+	} finally {
+		await opened.file.close();
+	}
+}
+
 function findQueued(queue: Map<string, QueuedMessage>, messageId: string): QueuedMessage {
 	const message = queue.get(messageId);
 	if (!message) throw new Error('找不到排队消息。');
@@ -237,32 +257,143 @@ export function createConversationStore(directory: string): ConversationStore {
 		return join(root, `${id}.jsonl`);
 	};
 	const titlePath = (id: string) => join(root, `${id}.title`);
+	const archiveName = (id: string) => `${id}.archived`;
+	const archivePath = (id: string) => join(root, archiveName(id));
+	const compactionPath = (id: string) => join(root, `${id}.compaction.json`);
+	async function readCompaction(id: string): Promise<HistorySummary | undefined> {
+		try {
+			const raw = await readSmallText(compactionPath(id), 30_000);
+			if (!raw) return;
+			const value = JSON.parse(raw) as Partial<HistorySummary> | null;
+			if (value && typeof value.throughTaskId === 'string' && typeof value.text === 'string'
+				&& value.throughTaskId && value.text.trim() && Buffer.byteLength(value.text) <= 4_096) {
+				return { throughTaskId: value.throughTaskId, text: value.text };
+			}
+		} catch (error) {
+			if (!(error instanceof SyntaxError)) throw error;
+		}
+		return undefined;
+	}
+	const shellJobsName = (id: string) => `${id}.shell-jobs.json`;
+	const shellJobsPath = (id: string) => join(root, shellJobsName(id));
+	async function readShellJobs(id: string) {
+		const opened = await openIfExists(shellJobsPath(id));
+		if (!opened) return [];
+		try {
+			if (opened.stat.size > SAVED_SHELL_JOBS_FILE_LIMIT) throw new Error('后台任务记录过大。');
+			return parseSavedShellJobs(await opened.file.readFile('utf8'), id);
+		} finally {
+			await opened.file.close();
+		}
+	}
+	function writeShellJobs(id: string, jobs: SavedShellJob[]) {
+		return writeAtomically(shellJobsPath(id), JSON.stringify({ conversationId: id, jobs }));
+	}
 	function write(id: string, update: (path: string) => Promise<ConversationEntry[]>) {
 		const path = logPath(id);
+		const key = path.toLowerCase();
 		return enqueue(path, async () => {
-			if (deletedLogs.has(path.toLowerCase())) throw new MissingConversationError('对话已删除。');
+			if (deletedLogs.has(key)) throw new MissingConversationError('对话已删除。');
 			const entries = await update(path);
 			if (!entries.length) return;
-			await mkdir(root, { recursive: true, mode: 0o700 });
-			await appendRecords(path, serialize(entries));
+			let index = subagentIndexes.get(path);
+			try {
+				if (!index && entries.some((entry) => entry.type === 'subagent' || entry.type === 'subagent-report'
+					|| (entry.type === 'messages' && entry.messages.some(({ deliveryAgents, subagentActivity }) => deliveryAgents || subagentActivity)))) {
+					index = await readSubagentIndex(path, id);
+				}
+				if (index) {
+					for (const entry of entries) {
+						if (entry.type === 'subagent' && !isSubagentEntry(entry)) throw new Error('子 Agent 记录格式无效。');
+						if (entry.type === 'subagent-report' && !isSubagentReportEntry(entry)) throw new Error('后台结果回传的格式无效。');
+						if (entry.type === 'messages') {
+							const receipt = entry.messages.some(({ deliveryAgents }) => deliveryAgents);
+							if ((receipt || entry.messages.some(({ subagentActivity }) => subagentActivity)) && !isMainEntry(entry)) {
+								throw new Error(receipt ? '收件确认的格式无效。' : '协作记录的格式无效。');
+							}
+						}
+						index.observe(entry);
+					}
+				}
+				await mkdir(root, { recursive: true, mode: 0o700 });
+				await appendRecords(path, serialize(entries));
+				if (index) subagentIndexes.set(path, index);
+			} catch (error) {
+				// 批次校验或写入失败后，下次以实际落盘的内容重建索引。
+				subagentIndexes.delete(path);
+				throw error;
+			}
 		});
 	}
 
 	return {
+		shellJobHistory: {
+			async list(id) {
+				const path = logPath(id);
+				await writeQueue.get(path.toLowerCase())?.catch(() => {});
+				if (deletedLogs.has(path.toLowerCase())) return [];
+				return readShellJobs(id);
+			},
+			async save(id, job) {
+				const path = logPath(id);
+				if (!isSavedShellJob(job)) throw new Error('后台任务结果格式无效。');
+				await enqueue(path, async () => {
+					if (deletedLogs.has(path.toLowerCase())) throw new MissingConversationError('对话已删除。');
+					const opened = await openIfExists(path);
+					if (!opened) throw new MissingConversationError('对话不存在。');
+					let owner: string | undefined;
+					try {
+						for await (const entry of readRecords(opened.file, opened.stat.size)) {
+							if (entry.type !== 'start') continue;
+							owner = entry.task.request.conversationId;
+							break;
+						}
+					} finally {
+						await opened.file.close();
+					}
+					if (owner !== id) throw new Error('任务不属于此对话。');
+					const jobs = (await readShellJobs(id)).filter((saved) => saved.id !== job.id);
+					jobs.push(job);
+					await writeShellJobs(id, jobs.slice(-SAVED_SHELL_JOB_LIMIT));
+				});
+			},
+			async markRead(id, jobId) {
+				const path = logPath(id);
+				const key = jobId.toLowerCase();
+				await enqueue(path, async () => {
+					if (deletedLogs.has(path.toLowerCase())) return;
+					const opened = await openIfExists(path);
+					if (!opened) return;
+					await opened.file.close();
+					const jobs = await readShellJobs(id);
+					const job = jobs.find((item) => item.id === key);
+					if (!job?.unread) return;
+					delete job.unread;
+					await writeShellJobs(id, jobs);
+				});
+			},
+		},
 		async list() {
 			const files = await readdir(root, { withFileTypes: true }).catch((error: unknown) => {
 				if (isMissing(error)) return [];
 				throw error;
 			});
 			const chats: ConversationSummary[] = [];
-			for (const file of files) {
-				if (!file.isFile() || !file.name.endsWith('.jsonl')) continue;
-				const id = file.name.slice(0, -6);
+			const names = new Set(files.filter((file) => file.isFile()).map(({ name }) => name));
+			for (const name of names) {
+				if (!name.endsWith('.jsonl')) continue;
+				const id = name.slice(0, -6);
 				if (!idPattern.test(id)) continue;
-				const summary = await conversationSummary(join(root, file.name), id);
+				const summary = await conversationSummary(join(root, name), id);
 				if (!summary) continue;
-				const title = await readSmallText(titlePath(id), titleLimit * 4).catch(() => undefined);
-				chats.push(title && title.length <= titleLimit ? { ...summary, title } : summary);
+				const [title, unreadResult] = await Promise.all([
+					readSmallText(titlePath(id), titleLimit * 4).catch(() => undefined),
+					names.has(shellJobsName(id)) && readShellJobs(id).then((jobs) => jobs.some((job) => job.unread)).catch(() => false),
+				]);
+				if (title && title.length <= titleLimit) summary.title = title;
+				if (unreadResult) summary.unreadResult = true;
+				if (names.has(archiveName(id))) summary.archived = true;
+				chats.push(summary);
 			}
 			return chats.sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
 		},
@@ -272,7 +403,10 @@ export function createConversationStore(directory: string): ConversationStore {
 			const opened = await openIfExists(path);
 			if (!opened) return { id, runs: [] };
 			try {
-				return await replayConversation(id, readRecords(opened.file, opened.stat.size));
+				const snapshot = await replayConversation(id, readRecords(opened.file, opened.stat.size));
+				const compact = await readCompaction(id);
+				if (compact && snapshot.runs.some(({ state }) => state.taskId === compact.throughTaskId)) snapshot.manualCompaction = compact;
+				return snapshot;
 			} finally {
 				await opened.file.close();
 			}
@@ -283,6 +417,7 @@ export function createConversationStore(directory: string): ConversationStore {
 			return [...(await readQueued(path, id)).values()];
 		},
 		async enqueue(id, message) {
+			if (message.request.selection) throw new Error('选区问答已停用，请新建普通提问。');
 			return write(id, async (path) => {
 				const entry = parseConversationEntry(JSON.stringify({ type: 'queue-add', message }), 1);
 				const queue = await readQueued(path, id);
@@ -292,12 +427,12 @@ export function createConversationStore(directory: string): ConversationStore {
 				return [entry];
 			});
 		},
-		async editQueued(id, messageId, instruction) {
+		async editQueued(id, messageId, instruction, skillMentions) {
 			return write(id, async (path) => {
 				const { request } = findQueued(await readQueued(path, id), messageId);
 				if (request.refs.length || request.selection) throw new Error('包含非文本内容，暂不支持编辑。');
 				if (!instruction.trim()) throw new Error('请输入任务。');
-				return [{ type: 'queue-edit', messageId, instruction }];
+				return [{ type: 'queue-edit', messageId, instruction, ...(skillMentions && { skillMentions }) }];
 			});
 		},
 		async deleteQueued(id, messageId) {
@@ -312,10 +447,21 @@ export function createConversationStore(directory: string): ConversationStore {
 			return enqueue(path, async () => {
 				const entries = await readThroughTask(path, id, taskId, true);
 				for (const entry of entries) {
-					if (entry.type === 'start') entry.task.request.conversationId = branchId;
+					const run = entry.type === 'subagent' && entry.record.kind === 'run' ? entry.record.entry : entry;
+					if (run.type === 'start') run.task.request.conversationId = branchId;
 				}
 				const branch = await replayConversation(branchId, entries);
-				await writeAtomically(logPath(branchId), serialize(entries));
+				const compact = await readCompaction(id);
+				if (compact && branch.runs.some(({ state }) => state.taskId === compact.throughTaskId)) {
+					await writeAtomically(compactionPath(branchId), JSON.stringify(compact));
+					branch.manualCompaction = compact;
+				}
+				try {
+					await writeAtomically(logPath(branchId), serialize(entries));
+				} catch (error) {
+					if (branch.manualCompaction) await unlinkIfExists(compactionPath(branchId)).catch(() => {});
+					throw error;
+				}
 				return branch;
 			});
 		},
@@ -328,6 +474,7 @@ export function createConversationStore(directory: string): ConversationStore {
 				const replacement = [...kept, ...entries, ...pending];
 				await replayConversation(id, replacement);
 				await writeAtomically(path, serialize(replacement));
+				subagentIndexes.delete(path);
 			});
 		},
 		async rename(id, title) {
@@ -341,14 +488,40 @@ export function createConversationStore(directory: string): ConversationStore {
 				await writeAtomically(titlePath(id), value);
 			});
 		},
+		async setArchived(id, archived) {
+			const path = logPath(id);
+			await enqueue(path, async () => {
+				const opened = await openIfExists(path);
+				if (!opened) throw new MissingConversationError('对话不存在。');
+				await opened.file.close();
+				if (archived) await writeAtomically(archivePath(id), '1\n');
+				else await unlinkIfExists(archivePath(id));
+			});
+		},
+		async saveManualCompaction(id, summary) {
+			const path = logPath(id);
+			if (!summary.text.trim() || Buffer.byteLength(summary.text) > 4_096) throw new Error('整理后的摘要格式无效。');
+			await enqueue(path, async () => {
+				const entries = await readThroughTask(path, id, summary.throughTaskId, true);
+				const snapshot = await replayConversation(id, entries);
+				if (!snapshot.runs.some(({ state }) => state.taskId === summary.throughTaskId)) {
+					throw new Error('对话已变化，请重新整理。');
+				}
+				await writeAtomically(compactionPath(id), JSON.stringify(summary));
+			});
+		},
 		async delete(id) {
 			const path = logPath(id);
 			await enqueue(path, () => enqueue(pointer, async () => {
 				const selected = await readPointer(pointer);
+				await unlinkIfExists(shellJobsPath(id));
 				await unlinkIfExists(titlePath(id));
+				await unlinkIfExists(archivePath(id));
+				await unlinkIfExists(compactionPath(id));
 				await unlinkIfExists(path);
 				// 阻止已经排队的旧写入在删除后重新建立记录。
 				deletedLogs.add(path.toLowerCase());
+				subagentIndexes.delete(path);
 				if (selected?.toLowerCase() === id.toLowerCase()) await unlinkIfExists(pointer);
 			}));
 		},

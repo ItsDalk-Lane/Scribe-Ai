@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import type { RefObject } from 'react';
 import { composerShortcut } from '../composerKeyboard';
 import { paintProviderIcon } from '../paintProviderIcon';
 import { thinkingLabel, uiText } from '../uiText';
@@ -14,6 +15,7 @@ interface Props {
 	disabled: boolean;
 	saving: boolean;
 	selecting: boolean;
+	triggerRef?: RefObject<HTMLButtonElement | null>;
 	onSelect: (value: string) => Promise<boolean>;
 	onThinkingChange: (level: string) => void;
 }
@@ -27,11 +29,12 @@ function ProviderIcon({ id, label }: Pick<ChatModelGroup, 'id' | 'label'>) {
 	return <span ref={attach} className="scribe-chat-provider-icon" aria-hidden="true" />;
 }
 
-export default function ChatModelPicker({ groups, value, thinking, disabled, saving, selecting, onSelect, onThinkingChange }: Props) {
+export default function ChatModelPicker({ groups, value, thinking, disabled, saving, selecting, triggerRef, onSelect, onThinkingChange }: Props) {
 	const text = uiText();
 	const id = useId();
 	const popup = useRef<HTMLDivElement>(null);
-	const trigger = useRef<HTMLButtonElement>(null);
+	const localTrigger = useRef<HTMLButtonElement>(null);
+	const trigger = triggerRef ?? localTrigger;
 	const providerTrigger = useRef<HTMLButtonElement>(null);
 	const searchInput = useRef<HTMLInputElement>(null);
 	const [open, setOpen] = useState(false);
@@ -107,7 +110,7 @@ export default function ChatModelPicker({ groups, value, thinking, disabled, sav
 			doc.removeEventListener('pointerdown', dismiss);
 			win.removeEventListener('resize', measure);
 		};
-	}, [expanded]);
+	}, [expanded, trigger]);
 
 	async function choose(model: string) {
 		if (!saving && await onSelect(model) && popup.current) close(true);

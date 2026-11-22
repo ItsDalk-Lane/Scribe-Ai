@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { useRef, useState } from 'react';
 import type { ConversationStore, QueuedMessage, TaskRequest } from '../types';
 import { uiText } from './uiText';
+import type { SkillDraft } from './components/skillMentionText';
 
 type QueueRow = QueuedMessage & { pending?: boolean; failed?: boolean };
 type QueueView = { rows: QueueRow[]; saving: Promise<void> };
@@ -72,13 +73,13 @@ export function useMessageQueue(store: ConversationStore, onSaveError: () => voi
 			const owner = view.current;
 			update(owner, owner.rows.filter(({ id }) => id !== messageId));
 		},
-		async edit(message: QueuedMessage, instruction: string) {
+		async edit(message: QueuedMessage, { instruction, skillMentions = [] }: SkillDraft) {
 			const owner = view.current;
 			beginUpdate();
 			try {
-				await store.editQueued(message.request.conversationId, message.id, instruction);
+				await store.editQueued(message.request.conversationId, message.id, instruction, skillMentions);
 				update(owner, owner.rows.map((row) => row.id === message.id
-					? { ...row, request: { ...row.request, instruction } } : row));
+					? { ...row, request: { ...row.request, instruction, skillMentions } } : row));
 			} finally {
 				endUpdate();
 			}

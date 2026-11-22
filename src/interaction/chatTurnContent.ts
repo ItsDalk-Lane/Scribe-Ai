@@ -91,7 +91,11 @@ export function recordedTimeline(state: RunState, step?: RunStep, retries?: Save
 				|| (step.phase !== 'tool' && step.phase !== 'approval'))) return;
 			const item: ToolRow = { kind: 'tool', id: toolRowId(id, call.id), call };
 			if (result) {
-				item.result = { callId: call.id, content: result.content, isError: result.isError ?? false };
+				item.result = {
+					callId: call.id, content: result.content, isError: result.isError ?? false,
+					...(result.shellStatus && { shellStatus: result.shellStatus }),
+					...(result.approvalReview && { approvalReview: result.approvalReview }),
+				};
 				if (result.skipped) item.skipped = true;
 			}
 			items.push(item);
@@ -139,7 +143,13 @@ export function recordedTimeline(state: RunState, step?: RunStep, retries?: Save
 			flush();
 			putRetries(index);
 		}
-		if (message.role === 'assistant') {
+		if (message.subagentActivity) {
+			flush();
+			items.push({ kind: 'subagent', id: `subagent:${message.subagentActivity.id}`, activity: message.subagentActivity, content: message.content });
+		} else if (message.role === 'user' && message.id?.startsWith('steer:') && message.skillMentions?.length) {
+			flush();
+			items.push({ kind: 'skill-steering', id: message.id, content: message.content.slice(0, message.skillInputLength), mentions: message.skillMentions });
+		} else if (message.role === 'assistant') {
 			flush();
 			assistant = message;
 			assistantIndex = index;
@@ -172,7 +182,7 @@ function finalReply(items: readonly TimelineItem[]): string {
 
 export function chatTurnContent(execution: ChatExecution) {
 	const messages = execution.state?.messages ?? [];
-	const user = messages.filter(({ role }) => role === 'user').map(({ content }) => content).join('\n\n');
+	const user = messages.filter(({ role, subagentActivity }) => role === 'user' && !subagentActivity).map(({ content }) => content).join('\n\n');
 	const rows = timelineRows(execution.items.filter((item) => item.kind !== 'text' || !item.final))
 		.filter((row) => row.kind !== 'text' || row.content.trim());
 	const answer = finalReply(execution.items);
@@ -181,14 +191,14 @@ export function chatTurnContent(execution: ChatExecution) {
 	return { user, rows, answer, copyText, hasProcess: rows.length > 0, answerMessage: execution.answerMessage };
 }
 
-export function chatTurnPreview(execution: ChatExecution, instruction?: string) {
+export function chatTurnPreview(execution: ChatExecution, instruction?: string, report?: SavedRun['subagentReport']) {
 	const snippet = (value = '') => {
 		const text = value.trimStart().slice(0, 321);
 		const end = (text.codePointAt(319) ?? 0) > 0xffff ? 319 : 320;
 		return text.slice(0, end).replace(/\s+/gu, ' ').trimEnd() + (end < text.length ? '…' : '');
 	};
-	const prompt = instruction || execution.state?.messages.find(({ role }) => role === 'user')?.content;
+	const prompt = instruction || execution.state?.messages.find(({ role, subagentActivity }) => role === 'user' && !subagentActivity)?.content;
 	const reply = execution.items.filter((item): item is TextRow =>
 		item.kind === 'text' && !item.abandoned && Boolean(item.content.trim())).at(-1);
-	return { prompt: snippet(prompt), reply: snippet(finalReply(execution.items) || reply?.content) };
+	return { prompt: snippet(prompt), reply: snippet(report?.content || finalReply(execution.items) || reply?.content) };
 }

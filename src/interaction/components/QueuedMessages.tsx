@@ -5,16 +5,19 @@ import type { App } from 'obsidian';
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { MouseEventHandler, RefObject } from 'react';
 import { SIDE_CHAT_ICON } from '../../constants';
-import type { NoteRef, TaskRequest } from '../../types';
+import type { NoteRef, SkillRegistry, TaskRequest } from '../../types';
 import { composerShortcut } from '../composerKeyboard';
 import { uiText } from '../uiText';
 import ChatIcon from './ChatIcon';
+import SkillTextArea from './SkillTextArea';
+import type { SkillDraft } from './skillMentionText';
 
 interface QueuedMessagesProps {
 	app: App;
+	skills: SkillRegistry;
 	rows: readonly { id: string; request: TaskRequest; pending?: boolean; failed?: boolean }[];
 	canSteer: boolean;
-	onEdit: (id: string, instruction: string) => Promise<void>;
+	onEdit: (id: string, draft: SkillDraft) => Promise<void>;
 	onDelete: (id: string) => Promise<void>;
 	onSteer: (id: string) => Promise<void>;
 	onSideChat: (id: string, beforeRemove: () => void) => Promise<void>;
@@ -96,14 +99,14 @@ function Action({ icon, label, reason, disabled, onClick, edit, sideChat }: {
 }
 
 export default function QueuedMessages({
-	app, rows, canSteer, onEdit, onDelete, onSteer, onSideChat, inputRef,
+	app, skills, rows, canSteer, onEdit, onDelete, onSteer, onSideChat, inputRef,
 }: QueuedMessagesProps) {
 	const text = uiText();
 	const listId = useId();
 	const [expanded, setExpanded] = useState(false);
 	const [work, setWork] = useState<ReadonlySet<string>>(new Set());
 	const working = useRef(new Set<string>());
-	const [editing, setEditing] = useState<{ id: string; draft: string }>();
+	const [editing, setEditing] = useState<{ id: string; draft: SkillDraft }>();
 	const editor = useRef<HTMLTextAreaElement>(null);
 	const editRow = useRef<HTMLElement | null>(null);
 	const single = rows.length === 1;
@@ -174,6 +177,7 @@ export default function QueuedMessages({
 					const edit = currentEdit?.id === id ? currentEdit : undefined;
 					const locked = work.has(id);
 					const status = failed ? text.queueSendFailed : pending ? text.queueSending : undefined;
+					const selectionUnavailable = request.selection ? text.queueSelectionUnavailable : undefined;
 					const preview = request.instruction.replace(/\s+/gu, ' ').trim();
 					const attachments = request.selection ? [{ path: request.selection.path }] : request.refs;
 					return <li className="scribe-queue-row" key={id} onKeyDown={(event) => {
@@ -189,14 +193,15 @@ export default function QueuedMessages({
 						{attachments.length > 0 && <div className="scribe-queue-files">
 							{attachments.map((ref) => <QueueAttachment key={ref.path} app={app} attachment={ref} visible={showing} />)}
 						</div>}
-						{edit ? <textarea ref={editor} className="scribe-queue-editor" rows={2} aria-label={text.queueEdit}
-							value={edit.draft} readOnly={locked} onChange={(event) => setEditing({ id, draft: event.currentTarget.value })} />
+						{edit ? <SkillTextArea inputRef={editor} className="scribe-queue-editor" rows={2} aria-label={text.queueEdit}
+							registry={skills} refs={request.refs} scope={request.skillScope}
+							draft={edit.draft} readOnly={locked} onDraftChange={(draft) => setEditing({ id, draft })} />
 							: <span className="scribe-queue-preview">{preview}</span>}
-						{status && <span className="scribe-queue-status" role="status">{status}</span>}
+						{(status || selectionUnavailable) && <span className="scribe-queue-status" role="status">{status ?? selectionUnavailable}</span>}
 						<div className="scribe-queue-actions">
 							{edit ? <>
-								<Action icon="check" label={text.queueSave} disabled={locked || !edit.draft.trim()}
-									onClick={() => void perform(id, text.queueEditFailed, async () => {
+								<Action icon="check" label={text.queueSave} disabled={locked || !edit.draft.instruction.trim()}
+									onClick={() => void perform(id, (cause) => cause instanceof Error ? cause.message : text.queueEditFailed, async () => {
 										const row = editor.current?.closest('li');
 										await onEdit(id, edit.draft);
 										if (row?.isConnected) editRow.current = row;
@@ -208,16 +213,16 @@ export default function QueuedMessages({
 								}} />
 							</> : <>
 								<Action icon="pencil" label={text.queueEdit} edit disabled={locked || Boolean(currentEdit)}
-									reason={status ?? (attachments.length ? text.queueEditAttachment : undefined)}
-									onClick={() => setEditing({ id, draft: request.instruction })} />
+									reason={status ?? selectionUnavailable ?? (attachments.length ? text.queueEditAttachment : undefined)}
+								onClick={() => setEditing({ id, draft: { instruction: request.instruction, skillMentions: request.skillMentions } })} />
 								<Action icon="trash-2" label={text.queueDelete} disabled={locked} reason={status}
 									onClick={() => void perform(id, text.queueDeleteFailed, () => onDelete(id))} />
 								<Action icon="send" label={text.queueSteer} disabled={locked}
-									reason={status ?? (!canSteer ? text.queueSteerUnavailable : undefined)}
+									reason={status ?? selectionUnavailable ?? (!canSteer ? text.queueSteerUnavailable : undefined)}
 									onClick={() => void perform(id, text.queueSteerFailed, () => onSteer(id))} />
 							</>}
 							{(!edit || locked) && <Action icon={SIDE_CHAT_ICON} label={text.queueSideChat} sideChat
-								reason={status ?? (locked ? text.queueActionPending : undefined)}
+								reason={status ?? selectionUnavailable ?? (locked ? text.queueActionPending : undefined)}
 								onClick={(event) => {
 									const trigger = event.currentTarget;
 									void perform(id, (error) => error instanceof Error ? error.message : text.sideChatOpenFailed,

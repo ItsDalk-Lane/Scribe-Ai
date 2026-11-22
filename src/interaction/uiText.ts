@@ -1,12 +1,21 @@
 import { getLanguage } from 'obsidian';
 import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 import { isBuiltInThinkingLevel } from '../orchestration/settings/thinking';
+import type { ContextCompaction, ShellStatus, ToolReviewStatus } from '../types';
 
 export interface UiText {
 	openChatCommand: string;
 	generalTab: string;
 	chatLocation: string;
 	chatLocationDescription: string;
+	writingRules: string;
+	writingRulesDescription: string;
+	vaultWritingRules: string;
+	folderWritingRules: string;
+	chooseRuleFolder: string;
+	writingRuleSaved: string;
+	writingRuleReadFailed: string;
+	writingRuleChanged: string;
 	rightSidebar: string;
 	leftSidebar: string;
 	editorTab: string;
@@ -14,6 +23,8 @@ export interface UiText {
 	advancedTab: string;
 	diagnostics: string;
 	diagnosticsDescription: string;
+	spillCleanupDays: string;
+	spillCleanupDaysDescription: string;
 	refresh: string;
 	noDiagnostics: string;
 	phaseConnecting: string;
@@ -150,10 +161,9 @@ export interface UiText {
 	chatModeFullAccessConfirm: string;
 	chatModeFullAccessDisclosure: string;
 	chatModeLocked: string;
-	chatModeSelection: string;
 	chatPickVaultItem: string;
 	chatSelectionPreview: string;
-	chatRemoveSelection: string;
+	chatRemoveQuotes: string;
 	chatAddSelection: string;
 	chatQuotedText: string;
 	chatAddExternalPath: string;
@@ -194,7 +204,6 @@ export interface UiText {
 	chatStepResult: string;
 	chatModelMissing: string;
 	chatSubmitDisclosure: string;
-	chatSelectionDisclosure: string;
 	chatModelChanged: string;
 	chatStop: string;
 	chatResume: string;
@@ -214,6 +223,7 @@ export interface UiText {
 	chatTurn: string;
 	chatYou: string;
 	chatAssistant: string;
+	chatSubagentReport: string;
 	chatTranscript: string;
 	chatEmptyHeading: string;
 	chatExpandMessage: string;
@@ -248,7 +258,40 @@ export interface UiText {
 	chatCopyFailed: string;
 	chatToolArguments: string;
 	chatToolOutput: string;
+	chatShellRecentOutput: string;
+	chatShellRecentErrors: string;
+	chatBackgroundJobs: string;
+	chatBackgroundRunning: string;
+	chatBackgroundStopping: string;
+	chatBackgroundCountOne: string;
+	chatBackgroundCountOther: string;
+	chatBackgroundSectionLive: string;
+	chatBackgroundSettledCount: string;
+	chatBackgroundClear: string;
+	chatBackgroundExpand: string;
+	chatBackgroundCollapse: string;
+	chatBackgroundStop: string;
+	chatBackgroundConfirm: string;
+	chatBackgroundConfirmAction: string;
+	chatBackgroundStopFailed: string;
+	chatBackgroundStopFailedLabel: string;
+	chatBackgroundExitCode: string;
+	chatBackgroundDurationSeconds: string;
+	chatBackgroundDurationMinutes: string;
+	chatBackgroundDurationHours: string;
+	chatBackgroundDurationLive: string;
+	chatBackgroundDurationDone: string;
+	chatBackgroundNoOutput: string;
+	chatBackgroundOutput: string;
+	chatBackgroundLoadFailed: string;
+	chatBackgroundSaveFailed: string;
+	chatBackgroundReadSaveFailed: string;
+	chatBackgroundApproval: string;
 	chatToolSkipped: string;
+	chatShellNotApproved: string;
+	chatShellNotRun: string;
+	chatShellReview: Record<ToolReviewStatus, string>;
+	chatShellStatus: Record<ShellStatus, string>;
 	chatToolNoChanges: string;
 	chatToolMoreText: string;
 	chatToolLessText: string;
@@ -295,6 +338,7 @@ export interface UiText {
 	queueDelete: string;
 	queueSteer: string;
 	queueSteerUnavailable: string;
+	queueSelectionUnavailable: string;
 	queueSideChat: string;
 	queueActionPending: string;
 	queueMessageChanged: string;
@@ -327,9 +371,21 @@ export interface UiText {
 	chatOutputTokens: string;
 	chatTotalTokens: string;
 	chatReportedCost: string;
-	chatIncompleteUsage: string;
+	chatUsageRequests: string;
+	chatUsageUnknown: string;
 	chatContextUsed: string;
 	chatContextStats: string;
+	chatContextCompaction: string;
+	chatContextCompacted: string;
+	chatCompactionReason: string;
+	chatCompactionReasons: Record<ContextCompaction['reason'], string>;
+	chatCompactionDroppedHistory: string;
+	chatCompactionDroppedCurrent: string;
+	chatCompactionShortenedTools: string;
+	chatCompactionSummary: string;
+	chatCompactionSummaries: Record<ContextCompaction['summary'], string>;
+	chatCompactionThrough: string;
+	chatCompactionMessage: string;
 	chatPromptTokens: string;
 	chatWindowCapacity: string;
 	chatRemainingCapacity: string;
@@ -343,6 +399,14 @@ const EN: UiText = {
 	generalTab: 'General',
 	chatLocation: 'Chat location',
 	chatLocationDescription: 'Where a new chat view opens. Changes apply after closing the current chat view.',
+	writingRules: 'Writing rules',
+	writingRulesDescription: 'Save whole-vault rules to AGENTS.md at the vault root, and folder rules to AGENTS.md in each chosen folder. You can also edit these notes directly. Attach a note or folder to apply its rules. In main chat without attachments, rules follow the open note. More specific folder rules take precedence. Clearing and saving removes the rules. Changes apply from the next question and are sent to the selected model.',
+	vaultWritingRules: 'Whole vault',
+	folderWritingRules: 'Folder rules',
+	chooseRuleFolder: 'Choose folder',
+	writingRuleSaved: 'Writing rule saved. It applies from the next question.',
+	writingRuleReadFailed: 'Could not read the rule file. Reopen settings to retry.',
+	writingRuleChanged: 'The rule file changed. Keep a copy of your edits and reopen settings to see the latest file.',
 	rightSidebar: 'Right sidebar',
 	leftSidebar: 'Left sidebar',
 	editorTab: 'Editor tab',
@@ -350,6 +414,8 @@ const EN: UiText = {
 	advancedTab: 'Advanced',
 	diagnostics: 'Diagnostic log',
 	diagnosticsDescription: 'Recent model connections. Secrets and request data are excluded.',
+	spillCleanupDays: 'Spill cleanup period (days)',
+	spillCleanupDaysDescription: 'At the next plugin start, remove private spill files older than this many days. Set 0 to disable cleanup.',
 	refresh: 'Refresh',
 	noDiagnostics: 'No connection records yet.',
 	phaseConnecting: 'Connecting',
@@ -486,10 +552,9 @@ const EN: UiText = {
 	chatModeFullAccessConfirm: 'Enable full access',
 	chatModeFullAccessDisclosure: 'Scribe Ai can read and change files your computer account can access, including files outside this vault. It can also run commands and use the internet without individual approvals. This chat saves the mode, and new chats and tabs inherit it from the current chat.',
 	chatModeLocked: 'You can change modes when the current task and queue finish.',
-	chatModeSelection: 'Tasks using a text selection use only the selected text.',
 	chatPickVaultItem: 'Select a vault file or folder',
 	chatSelectionPreview: 'Selected text preview',
-	chatRemoveSelection: 'Remove selection',
+	chatRemoveQuotes: 'Remove quotes',
 	chatAddSelection: 'Add to chat',
 	chatQuotedText: 'Selected text ({n})',
 	chatAddExternalPath: 'Path outside the vault',
@@ -530,7 +595,6 @@ const EN: UiText = {
 	chatStepResult: 'Tool result received',
 	chatModelMissing: 'Select a model in settings to start a task.',
 	chatSubmitDisclosure: 'Submitting sends your instructions to {provider}. It may also send chat history and material read by tools.',
-	chatSelectionDisclosure: 'Submitting sends your instructions and the attached selection to {provider}.',
 	chatModelChanged: 'The model changed. Check the destination and submit again.',
 	chatStop: 'Stop task',
 	chatResume: 'Resume task',
@@ -550,6 +614,7 @@ const EN: UiText = {
 	chatTurn: 'Round',
 	chatYou: 'You',
 	chatAssistant: 'Assistant',
+	chatSubagentReport: 'Returned results',
 	chatTranscript: 'Conversation messages',
 	chatEmptyHeading: 'What can I help with?',
 	chatExpandMessage: 'Show more',
@@ -584,7 +649,40 @@ const EN: UiText = {
 	chatCopyFailed: 'Could not copy the reply',
 	chatToolArguments: 'Call arguments',
 	chatToolOutput: 'Tool output',
+	chatShellRecentOutput: 'Recent output',
+	chatShellRecentErrors: 'Recent error output',
+	chatBackgroundJobs: 'Background tasks',
+	chatBackgroundRunning: 'Running',
+	chatBackgroundStopping: 'Stopping',
+	chatBackgroundCountOne: '{count} background task',
+	chatBackgroundCountOther: '{count} background tasks',
+	chatBackgroundSectionLive: 'Running',
+	chatBackgroundSettledCount: 'Finished {count}',
+	chatBackgroundClear: 'Clear',
+	chatBackgroundExpand: 'Show live output of {label}',
+	chatBackgroundCollapse: 'Hide live output of {label}',
+	chatBackgroundStop: 'Stop task {label}',
+	chatBackgroundConfirm: 'Click again to confirm',
+	chatBackgroundConfirmAction: 'Confirm stop',
+	chatBackgroundStopFailed: 'Could not stop the background task.',
+	chatBackgroundStopFailedLabel: 'Stop failed',
+	chatBackgroundExitCode: 'exit code {code}',
+	chatBackgroundDurationSeconds: '{seconds}s',
+	chatBackgroundDurationMinutes: '{minutes}m {seconds}s',
+	chatBackgroundDurationHours: '{hours}h {minutes}m',
+	chatBackgroundDurationLive: 'Running for {duration}',
+	chatBackgroundDurationDone: 'Took {duration}',
+	chatBackgroundNoOutput: '(no output)',
+	chatBackgroundOutput: 'Output',
+	chatBackgroundLoadFailed: 'Could not load saved background tasks.',
+	chatBackgroundSaveFailed: 'The task result could not be saved.',
+	chatBackgroundReadSaveFailed: 'Could not save the read state.',
+	chatBackgroundApproval: 'This command will run in the background. Use its task ID to check output or stop it.',
 	chatToolSkipped: 'Skipped',
+	chatShellNotApproved: 'Not run (not approved)',
+	chatShellNotRun: 'Not run',
+	chatShellReview: { approved: 'AI review approved', denied: 'AI review did not approve', incomplete: 'AI review incomplete' },
+	chatShellStatus: { success: 'Succeeded', failed: 'Failed', 'timed-out': 'Timed out', stopped: 'Stopped by user', 'start-failed': 'Failed to start' },
 	chatToolNoChanges: 'No differences in the proposed text',
 	chatToolMoreText: 'Show full recorded text',
 	chatToolLessText: 'Show preview only',
@@ -594,7 +692,7 @@ const EN: UiText = {
 	chatApprovalAccess: 'Access files outside the vault',
 	chatApprovalPathDisclosure: 'Access is granted for this operation only.',
 	chatWorkingFolder: 'Working folder',
-	chatShellDisclosure: 'An approved command runs with your computer account’s permissions and can access files outside this folder.',
+	chatShellDisclosure: 'After approval, the command can read and write files outside the vault within your computer account’s permissions. It can also access the network. The working folder only determines where the command starts.',
 	chatBefore: 'Before',
 	chatAfter: 'After',
 	chatDiffChanges: 'Changes',
@@ -631,6 +729,7 @@ const EN: UiText = {
 	queueDelete: 'Delete queued message',
 	queueSteer: 'Send into current task',
 	queueSteerUnavailable: 'You can only send into a running task',
+	queueSelectionUnavailable: 'Selection questions were retired. Remove this item from the queue.',
 	queueSideChat: 'Ask in side chat',
 	queueActionPending: 'An action on this message is in progress…',
 	queueMessageChanged: 'This queued message has changed.',
@@ -653,8 +752,8 @@ const EN: UiText = {
 	chatSpeed: 'Average speed',
 	chatMetricSeconds: '{s}s',
 	chatMetricMinutes: '{m}m {s}s',
-	chatSessionUsage: 'Token usage',
-	chatRunUsage: 'Turn usage',
+	chatSessionUsage: 'Conversation usage',
+	chatRunUsage: 'Task usage',
 	chatProviderModel: 'Provider / model',
 	chatCacheHit: 'Cache hit',
 	chatUncachedInput: 'Uncached input',
@@ -663,9 +762,21 @@ const EN: UiText = {
 	chatOutputTokens: 'Output',
 	chatTotalTokens: 'Total',
 	chatReportedCost: 'Reported cost',
-	chatIncompleteUsage: 'Partial usage',
+	chatUsageRequests: 'Model requests',
+	chatUsageUnknown: 'Unknown',
 	chatContextUsed: '{n}%',
 	chatContextStats: 'Context {n}% used',
+	chatContextCompaction: 'Context compression',
+	chatContextCompacted: 'Compressed',
+	chatCompactionReason: 'Latest compression reason',
+	chatCompactionReasons: { budget: 'Input nearing the limit', overflow: 'Model reported too much input' },
+	chatCompactionDroppedHistory: 'Earlier messages omitted',
+	chatCompactionDroppedCurrent: 'Task messages omitted',
+	chatCompactionShortenedTools: 'Tool results shortened',
+	chatCompactionSummary: 'Summary status',
+	chatCompactionSummaries: { none: 'None generated', saved: 'Generated and saved', reused: 'Reused', failed: 'Generation failed' },
+	chatCompactionThrough: 'Task summary through',
+	chatCompactionMessage: 'Message {n}',
 	chatPromptTokens: 'Prompt tokens',
 	chatWindowCapacity: 'Model context window',
 	chatRemainingCapacity: 'Remaining capacity',
@@ -679,6 +790,14 @@ const ZH_CN: UiText = {
 	generalTab: '通用',
 	chatLocation: '聊天界面位置',
 	chatLocationDescription: '新建聊天界面时的打开位置。关闭当前聊天视图后，改动在下次打开时生效。',
+	writingRules: '写作规则',
+	writingRulesDescription: '全库规则保存到库根目录的 AGENTS.md，文件夹规则保存到所选文件夹的 AGENTS.md。也可以直接编辑这些笔记。添加笔记或文件夹时使用相应的规则，主聊未附资料时按当前打开的笔记匹配。发生冲突时以更具体的文件夹规则为准。清空并保存即可撤销，改动从下次提问生效，规则会随提问发给所选模型。',
+	vaultWritingRules: '全库规则',
+	folderWritingRules: '文件夹规则',
+	chooseRuleFolder: '选择文件夹',
+	writingRuleSaved: '写作规则已保存，下次提问生效。',
+	writingRuleReadFailed: '无法读取规则文件。重新打开设置后再试。',
+	writingRuleChanged: '规则文件已变动。请先复制你刚才的编辑，再重新打开设置查看新版。',
 	rightSidebar: '右侧边栏',
 	leftSidebar: '左侧边栏',
 	editorTab: '编辑器标签页',
@@ -686,6 +805,8 @@ const ZH_CN: UiText = {
 	advancedTab: '高级',
 	diagnostics: '诊断日志',
 	diagnosticsDescription: '最近的模型连接记录，不包含密钥和请求内容。',
+	spillCleanupDays: '临时结果清理周期（天）',
+	spillCleanupDaysDescription: '插件下次启动时删除早于该天数的私有临时结果文件；设为 0 可禁用清理。',
 	refresh: '刷新',
 	noDiagnostics: '暂无连接记录。',
 	phaseConnecting: '连接中',
@@ -822,10 +943,9 @@ const ZH_CN: UiText = {
 	chatModeFullAccessConfirm: '启用完全访问',
 	chatModeFullAccessDisclosure: 'Scribe Ai 可以读写你的电脑账户有权访问的文件，包括库外文件，也可以直接运行命令和联网。当前聊天会保存此模式，新开的聊天和标签页会沿用它。',
 	chatModeLocked: '当前任务和队列结束后可切换模式。',
-	chatModeSelection: '选区任务只使用选中的文字。',
 	chatPickVaultItem: '选择库内文件或文件夹',
 	chatSelectionPreview: '选区预览',
-	chatRemoveSelection: '移除选区',
+	chatRemoveQuotes: '移除引文',
 	chatAddSelection: '添加到对话',
 	chatQuotedText: '{n} 个已选文本片段',
 	chatAddExternalPath: '库外路径',
@@ -851,7 +971,7 @@ const ZH_CN: UiText = {
 	chatCloseTab: '关闭标签页',
 	chatMoreTabs: '更多标签页',
 	chatTabRunning: '正在运行',
-	chatTabAttention: '有新进度或需要处理',
+	chatTabAttention: '需要处理',
 	chatTabError: '任务失败',
 	chatUntitled: '未命名对话',
 	chatLoadingHistory: '正在加载对话…',
@@ -866,7 +986,6 @@ const ZH_CN: UiText = {
 	chatStepResult: '已收到工具结果',
 	chatModelMissing: '请先在设置里选择模型。',
 	chatSubmitDisclosure: '提交会向 {provider} 发送当前指令，也可能附带对话历史和工具读取的资料。',
-	chatSelectionDisclosure: '提交会向 {provider} 发送当前指令和附上的选区。',
 	chatModelChanged: '模型已更换。请确认发送对象，再提交任务。',
 	chatStop: '停止任务',
 	chatResume: '继续任务',
@@ -886,6 +1005,7 @@ const ZH_CN: UiText = {
 	chatTurn: '轮次',
 	chatYou: '你',
 	chatAssistant: '助手',
+	chatSubagentReport: '任务结果',
 	chatTranscript: '对话消息',
 	chatEmptyHeading: '有什么可以帮你？',
 	chatExpandMessage: '展开消息',
@@ -920,7 +1040,40 @@ const ZH_CN: UiText = {
 	chatCopyFailed: '无法复制回复',
 	chatToolArguments: '调用参数',
 	chatToolOutput: '工具输出',
+	chatShellRecentOutput: '最近输出',
+	chatShellRecentErrors: '最近错误输出',
+	chatBackgroundJobs: '后台任务',
+	chatBackgroundRunning: '运行中',
+	chatBackgroundStopping: '正在停止',
+	chatBackgroundCountOne: '{count} 个后台任务',
+	chatBackgroundCountOther: '{count} 个后台任务',
+	chatBackgroundSectionLive: '进行中',
+	chatBackgroundSettledCount: '已结束 {count}',
+	chatBackgroundClear: '清空',
+	chatBackgroundExpand: '展开 {label} 的实时输出',
+	chatBackgroundCollapse: '收起 {label} 的实时输出',
+	chatBackgroundStop: '停止任务 {label}',
+	chatBackgroundConfirm: '再次点击确认停止',
+	chatBackgroundConfirmAction: '确认停止',
+	chatBackgroundStopFailed: '无法停止后台任务。',
+	chatBackgroundStopFailedLabel: '停止失败',
+	chatBackgroundExitCode: '退出码 {code}',
+	chatBackgroundDurationSeconds: '{seconds}秒',
+	chatBackgroundDurationMinutes: '{minutes}分{seconds}秒',
+	chatBackgroundDurationHours: '{hours}小时{minutes}分',
+	chatBackgroundDurationLive: '已运行 {duration}',
+	chatBackgroundDurationDone: '耗时 {duration}',
+	chatBackgroundNoOutput: '（无输出）',
+	chatBackgroundOutput: '输出',
+	chatBackgroundLoadFailed: '无法读取已保存的后台任务。',
+	chatBackgroundSaveFailed: '这项后台任务的结果未能保存。',
+	chatBackgroundReadSaveFailed: '未能记下已读状态。',
+	chatBackgroundApproval: '此命令将在后台运行。你可以按任务编号查看输出或停止任务。',
 	chatToolSkipped: '已跳过',
+	chatShellNotApproved: '未执行（未批准）',
+	chatShellNotRun: '未执行',
+	chatShellReview: { approved: 'AI 审核通过', denied: 'AI 审核未批准', incomplete: 'AI 审核未完成' },
+	chatShellStatus: { success: '成功', failed: '失败', 'timed-out': '超时', stopped: '手动停止', 'start-failed': '启动失败' },
 	chatToolNoChanges: '请求替换的内容没有差别',
 	chatToolMoreText: '查看已记录的全文',
 	chatToolLessText: '收起全文',
@@ -930,7 +1083,7 @@ const ZH_CN: UiText = {
 	chatApprovalAccess: '访问库外资料',
 	chatApprovalPathDisclosure: '允许后，只能在本次操作中访问这个位置。',
 	chatWorkingFolder: '工作目录',
-	chatShellDisclosure: '确认后，命令会以你的电脑账户权限运行，可以访问此文件夹之外的资料。',
+	chatShellDisclosure: '确认后，命令可按你的电脑账户权限读取和写入库外文件，也可联网。工作目录只决定命令从哪里开始运行。',
 	chatBefore: '修改前',
 	chatAfter: '修改后',
 	chatDiffChanges: '改动内容',
@@ -967,6 +1120,7 @@ const ZH_CN: UiText = {
 	queueDelete: '删除排队消息',
 	queueSteer: '插话发送',
 	queueSteerUnavailable: '仅运行中可插话发送',
+	queueSelectionUnavailable: '选区问答已停用，请移出队列。',
 	queueSideChat: '在侧聊提问',
 	queueActionPending: '这条消息的操作正在处理…',
 	queueMessageChanged: '这条排队消息已变更。',
@@ -990,7 +1144,7 @@ const ZH_CN: UiText = {
 	chatMetricSeconds: '{s} 秒',
 	chatMetricMinutes: '{m} 分 {s} 秒',
 	chatSessionUsage: '会话用量',
-	chatRunUsage: '本轮用量',
+	chatRunUsage: '本次任务用量',
 	chatProviderModel: '提供方 / 模型',
 	chatCacheHit: '缓存命中',
 	chatUncachedInput: '未命中输入',
@@ -999,9 +1153,21 @@ const ZH_CN: UiText = {
 	chatOutputTokens: '输出',
 	chatTotalTokens: '合计',
 	chatReportedCost: '实报成本',
-	chatIncompleteUsage: '部分用量',
+	chatUsageRequests: '模型请求次数',
+	chatUsageUnknown: '未知',
 	chatContextUsed: '{n}%',
 	chatContextStats: '上下文已用 {n}%',
+	chatContextCompaction: '上下文压缩',
+	chatContextCompacted: '已压缩',
+	chatCompactionReason: '最近一次压缩的原因',
+	chatCompactionReasons: { budget: '发送内容接近上限', overflow: '模型报告发送内容超出上限' },
+	chatCompactionDroppedHistory: '省略的历史消息',
+	chatCompactionDroppedCurrent: '省略的任务内消息',
+	chatCompactionShortenedTools: '缩短的工具结果',
+	chatCompactionSummary: '摘要状态',
+	chatCompactionSummaries: { none: '未生成', saved: '已生成并保存', reused: '已复用', failed: '生成失败' },
+	chatCompactionThrough: '任务摘要覆盖到',
+	chatCompactionMessage: '第 {n} 条记录',
 	chatPromptTokens: '提示词 token 总数',
 	chatWindowCapacity: '模型窗口容量',
 	chatRemainingCapacity: '剩余容量',
@@ -1015,6 +1181,14 @@ const ZH_TW: UiText = {
 	generalTab: '一般',
 	chatLocation: '聊天介面位置',
 	chatLocationDescription: '新建聊天介面時的開啟位置。關閉目前聊天檢視後，變更在下次開啟時生效。',
+	writingRules: '寫作規則',
+	writingRulesDescription: '全庫規則儲存到庫根目錄的 AGENTS.md，資料夾規則儲存到所選資料夾的 AGENTS.md。也可以直接編輯這些筆記。加入筆記或資料夾時使用相應的規則，主聊天未附資料時依目前開啟的筆記配對。發生衝突時以更明確的資料夾規則為準。清空後儲存即可撤銷，變更從下次提問生效，規則會隨提問傳送給所選模型。',
+	vaultWritingRules: '全庫規則',
+	folderWritingRules: '資料夾規則',
+	chooseRuleFolder: '選擇資料夾',
+	writingRuleSaved: '寫作規則已儲存，下次提問生效。',
+	writingRuleReadFailed: '無法讀取規則檔案。重新開啟設定後再試。',
+	writingRuleChanged: '規則檔案已變動。請先複製剛才的編輯，再重新開啟設定查看新版。',
 	rightSidebar: '右側邊欄',
 	leftSidebar: '左側邊欄',
 	editorTab: '編輯器分頁',
@@ -1022,6 +1196,8 @@ const ZH_TW: UiText = {
 	advancedTab: '進階',
 	diagnostics: '診斷日誌',
 	diagnosticsDescription: '最近的模型連線記錄，不包含金鑰和請求內容。',
+	spillCleanupDays: '暫存結果清理週期（天）',
+	spillCleanupDaysDescription: '此外掛下次啟動時刪除早於該天數的私有暫存結果檔案；設為 0 可停用清理。',
 	refresh: '重新整理',
 	noDiagnostics: '尚無連線記錄。',
 	phaseConnecting: '連線中',
@@ -1158,10 +1334,9 @@ const ZH_TW: UiText = {
 	chatModeFullAccessConfirm: '啟用完全存取',
 	chatModeFullAccessDisclosure: 'Scribe Ai 可以讀寫你的電腦帳戶有權存取的檔案，包括庫外檔案，也可以直接執行指令及連網。目前對話會儲存此模式，新開的對話和分頁會沿用它。',
 	chatModeLocked: '目前任務及佇列結束後可切換模式。',
-	chatModeSelection: '選取範圍的任務只使用選取的文字。',
 	chatPickVaultItem: '選擇庫內檔案或資料夾',
 	chatSelectionPreview: '選取文字預覽',
-	chatRemoveSelection: '移除選取的文字',
+	chatRemoveQuotes: '移除引文',
 	chatAddSelection: '新增至對話',
 	chatQuotedText: '{n} 個已選文字片段',
 	chatAddExternalPath: '庫外路徑',
@@ -1187,7 +1362,7 @@ const ZH_TW: UiText = {
 	chatCloseTab: '關閉分頁',
 	chatMoreTabs: '更多分頁',
 	chatTabRunning: '執行中',
-	chatTabAttention: '有新進度或需要處理',
+	chatTabAttention: '需要處理',
 	chatTabError: '工作失敗',
 	chatUntitled: '未命名對話',
 	chatLoadingHistory: '正在載入對話…',
@@ -1202,7 +1377,6 @@ const ZH_TW: UiText = {
 	chatStepResult: '已收到工具結果',
 	chatModelMissing: '請先在設定裡選擇模型。',
 	chatSubmitDisclosure: '提交會向 {provider} 傳送目前的指令，也可能附上對話紀錄和工具讀取的資料。',
-	chatSelectionDisclosure: '提交會向 {provider} 傳送目前的指令和附上的選取內容。',
 	chatModelChanged: '模型已更換。請確認傳送對象，再提交任務。',
 	chatStop: '停止任務',
 	chatResume: '繼續任務',
@@ -1222,6 +1396,7 @@ const ZH_TW: UiText = {
 	chatTurn: '輪次',
 	chatYou: '你',
 	chatAssistant: '助理',
+	chatSubagentReport: '任務結果',
 	chatTranscript: '對話訊息',
 	chatEmptyHeading: '有什麼可以幫你？',
 	chatExpandMessage: '展開訊息',
@@ -1256,7 +1431,40 @@ const ZH_TW: UiText = {
 	chatCopyFailed: '無法複製回覆',
 	chatToolArguments: '呼叫參數',
 	chatToolOutput: '工具輸出',
+	chatShellRecentOutput: '最近輸出',
+	chatShellRecentErrors: '最近錯誤輸出',
+	chatBackgroundJobs: '背景任務',
+	chatBackgroundRunning: '執行中',
+	chatBackgroundStopping: '正在停止',
+	chatBackgroundCountOne: '{count} 個背景任務',
+	chatBackgroundCountOther: '{count} 個背景任務',
+	chatBackgroundSectionLive: '進行中',
+	chatBackgroundSettledCount: '已結束 {count}',
+	chatBackgroundClear: '清空',
+	chatBackgroundExpand: '展開 {label} 的即時輸出',
+	chatBackgroundCollapse: '收起 {label} 的即時輸出',
+	chatBackgroundStop: '停止任務 {label}',
+	chatBackgroundConfirm: '再次點擊確認停止',
+	chatBackgroundConfirmAction: '確認停止',
+	chatBackgroundStopFailed: '無法停止背景任務。',
+	chatBackgroundStopFailedLabel: '停止失敗',
+	chatBackgroundExitCode: '退出碼 {code}',
+	chatBackgroundDurationSeconds: '{seconds}秒',
+	chatBackgroundDurationMinutes: '{minutes}分{seconds}秒',
+	chatBackgroundDurationHours: '{hours}小時{minutes}分',
+	chatBackgroundDurationLive: '已執行 {duration}',
+	chatBackgroundDurationDone: '耗時 {duration}',
+	chatBackgroundNoOutput: '（無輸出）',
+	chatBackgroundOutput: '輸出',
+	chatBackgroundLoadFailed: '無法讀取已儲存的背景任務。',
+	chatBackgroundSaveFailed: '這項背景任務的結果未能儲存。',
+	chatBackgroundReadSaveFailed: '未能記下已讀狀態。',
+	chatBackgroundApproval: '此命令將在背景執行。你可以按任務編號查看輸出或停止任務。',
 	chatToolSkipped: '已跳過',
+	chatShellNotApproved: '未執行（未批准）',
+	chatShellNotRun: '未執行',
+	chatShellReview: { approved: 'AI 審核通過', denied: 'AI 審核未批准', incomplete: 'AI 審核未完成' },
+	chatShellStatus: { success: '成功', failed: '失敗', 'timed-out': '逾時', stopped: '手動停止', 'start-failed': '啟動失敗' },
 	chatToolNoChanges: '請求取代的內容沒有差別',
 	chatToolMoreText: '查看已記錄的全文',
 	chatToolLessText: '收起全文',
@@ -1266,7 +1474,7 @@ const ZH_TW: UiText = {
 	chatApprovalAccess: '存取庫外資料',
 	chatApprovalPathDisclosure: '允許後，只能在這次操作中存取這個位置。',
 	chatWorkingFolder: '工作目錄',
-	chatShellDisclosure: '確認後，命令會以你的電腦帳戶權限執行，可以存取此資料夾以外的資料。',
+	chatShellDisclosure: '確認後，命令可依你的電腦帳戶權限讀取和寫入庫外檔案，也可連網。工作目錄只決定命令從哪裡開始執行。',
 	chatBefore: '修改前',
 	chatAfter: '修改後',
 	chatDiffChanges: '變更內容',
@@ -1303,6 +1511,7 @@ const ZH_TW: UiText = {
 	queueDelete: '刪除排隊訊息',
 	queueSteer: '插話傳送',
 	queueSteerUnavailable: '僅執行中可插話傳送',
+	queueSelectionUnavailable: '選取文字問答已停用，請移出佇列。',
 	queueSideChat: '在側聊提問',
 	queueActionPending: '這則訊息的操作正在處理…',
 	queueMessageChanged: '這則排隊訊息已變更。',
@@ -1326,7 +1535,7 @@ const ZH_TW: UiText = {
 	chatMetricSeconds: '{s} 秒',
 	chatMetricMinutes: '{m} 分 {s} 秒',
 	chatSessionUsage: '對話用量',
-	chatRunUsage: '本輪用量',
+	chatRunUsage: '本次任務用量',
 	chatProviderModel: '服務商／模型',
 	chatCacheHit: '快取命中',
 	chatUncachedInput: '未命中輸入',
@@ -1335,9 +1544,21 @@ const ZH_TW: UiText = {
 	chatOutputTokens: '輸出',
 	chatTotalTokens: '合計',
 	chatReportedCost: '實報成本',
-	chatIncompleteUsage: '部分用量',
+	chatUsageRequests: '模型請求次數',
+	chatUsageUnknown: '未知',
 	chatContextUsed: '{n}%',
 	chatContextStats: '上下文已用 {n}%',
+	chatContextCompaction: '上下文壓縮',
+	chatContextCompacted: '已壓縮',
+	chatCompactionReason: '最近一次壓縮的原因',
+	chatCompactionReasons: { budget: '傳送內容接近上限', overflow: '模型回報傳送內容超出上限' },
+	chatCompactionDroppedHistory: '省略的歷史訊息',
+	chatCompactionDroppedCurrent: '省略的任務內訊息',
+	chatCompactionShortenedTools: '縮短的工具結果',
+	chatCompactionSummary: '摘要狀態',
+	chatCompactionSummaries: { none: '未產生', saved: '已產生並儲存', reused: '已重複使用', failed: '產生失敗' },
+	chatCompactionThrough: '任務摘要涵蓋到',
+	chatCompactionMessage: '第 {n} 則紀錄',
 	chatPromptTokens: '提示詞 token 總數',
 	chatWindowCapacity: '模型視窗容量',
 	chatRemainingCapacity: '剩餘容量',
