@@ -1,29 +1,41 @@
 #!/usr/bin/env node
-// Copies build artifacts into the Obsidian test vault. data.json stays untouched.
+// Copies build artifacts into the Obsidian test vaults. data.json stays untouched.
 import { access, copyFile, mkdir, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '..');
-const target =
-	process.env.SCRIBE_VAULT_PLUGIN_DIR ??
-	join(homedir(), 'Desktop/Scribe/.obsidian/plugins/scribe-ai');
+const targets = process.env.SCRIBE_VAULT_PLUGIN_DIR
+	? [process.env.SCRIBE_VAULT_PLUGIN_DIR]
+	: [
+			join(homedir(), 'Desktop/Scribe/.obsidian/plugins/scribe-ai'),
+			join(homedir(), 'Desktop/Project/houde/.obsidian/plugins/scribe-ai'),
+		];
 const artifacts = ['main.js', 'manifest.json', 'styles.css'];
 
-await mkdir(target, { recursive: true });
-const synced = [];
-for (const name of artifacts) {
-	const source = join(root, name);
+const failed = [];
+for (const target of targets) {
 	try {
-		await access(source, constants.F_OK);
-	} catch {
-		continue;
+		await mkdir(target, { recursive: true });
+		const synced = [];
+		for (const name of artifacts) {
+			const source = join(root, name);
+			try {
+				await access(source, constants.F_OK);
+			} catch {
+				continue;
+			}
+			// remove first: the vault previously held symlinks pointing at the old build dir
+			await rm(join(target, name), { force: true });
+			await copyFile(source, join(target, name));
+			synced.push(name);
+		}
+		if (synced.length === 0) throw new Error(`No build artifacts found in ${root}; run the build first.`);
+		console.log(`Synced ${synced.join(', ')} -> ${target}`);
+	} catch (error) {
+		// one vault failing (locked, sandboxed, missing) must not stop the others
+		failed.push(`${target}: ${error instanceof Error ? error.message : String(error)}`);
 	}
-	// remove first: the vault previously held symlinks pointing at the old build dir
-	await rm(join(target, name), { force: true });
-	await copyFile(source, join(target, name));
-	synced.push(name);
 }
-if (synced.length === 0) throw new Error(`No build artifacts found in ${root}; run the build first.`);
-console.log(`Synced ${synced.join(', ')} -> ${target}`);
+if (failed.length) throw new Error(`Sync failed for ${failed.length}/${targets.length} vault(s).\n${failed.join('\n')}`);
