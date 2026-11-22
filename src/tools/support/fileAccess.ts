@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import type { PreparedTool, ToolContext } from '../../types';
 import { authorizedLineRange, isWithinPath, recheckToolPath, resolveToolPath } from './pathUtils';
 import type { ResolvedToolPath } from './pathUtils';
+import { captureNoteChange } from './noteChange';
 
 export const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const committingExternalFiles = new Set<string>();
@@ -117,7 +118,13 @@ export async function prepareFileChange(
 				await replaceExternalFile(ctx, current, before, after);
 			}
 			ctx.readFiles.set(current.absolutePath, fileFingerprint(after));
-			return `${before === undefined ? '已创建' : '已更新'} ${path.displayPath}。`;
+			const content = `${before === undefined ? '已创建' : '已更新'} ${path.displayPath}。`;
+			const notePath = current.vaultPath;
+			const configDir = ctx.app.vault.configDir;
+			const noteChange = notePath && configDir
+				&& !notePath.toLowerCase().startsWith(`${configDir.toLowerCase()}/`)
+				? captureNoteChange(notePath, before, after) : undefined;
+			return noteChange ? { content, noteChange } : content;
 		},
 	};
 }

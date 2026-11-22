@@ -1,24 +1,28 @@
 import { Buffer } from 'node:buffer';
 import { spawn } from 'node:child_process';
-import type { ChildProcess } from 'node:child_process';
+import type { ChildProcess, ChildProcessByStdio } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
-import { delimiter, isAbsolute, join } from 'node:path';
+import { basename, delimiter, isAbsolute, join } from 'node:path';
+import type { Readable } from 'node:stream';
 import { clearTimeout, setTimeout } from 'node:timers';
-import type { PreparedTool, ToolContext, ToolDefinition, ToolModule } from '../../types';
+import type { PreparedTool, ShellStatus, ToolDefinition } from '../../types';
 import { fileToolInput, requiredText } from '../support/fileAccess';
 import { resolveToolPath } from '../support/pathUtils';
 import { hasMacShellSandbox, macSandboxExecutable, macShellSandboxArgs } from './macosShellSandbox';
+import { captureShellOutput } from './shellOutput';
+import { FOREGROUND_WAIT_MS } from './shellJobs';
+import type { ShellExecution, ShellJobs } from './shellJobs';
+import type { ShellOutputCapture } from './shellOutput';
 
 type ShellName = 'Bash' | 'PowerShell';
 
 const DEFAULT_TIMEOUT = 120_000;
 const MAX_TIMEOUT = 600_000;
-const STREAM_LIMIT = 14_000;
 const windows = process.platform === 'win32';
 
 function executable(name: ShellName): string | undefined {
 	let candidates: string[];
-	if (windows) {
+	if (process.platform === 'win32') {
 		const programFiles = [process.env.ProgramW6432, process.env.ProgramFiles, process.env['ProgramFiles(x86)']]
 			.filter((directory): directory is string => directory !== undefined && isAbsolute(directory));
 		const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
@@ -84,63 +88,75 @@ function stopProcessTree(child: ChildProcess): void {
 	}
 }
 
-function outputCapture() {
-	const prefix: Buffer[] = [];
-	let size = 0;
-	return {
-		add: (chunk: Buffer) => {
-			if (size < STREAM_LIMIT) prefix.push(chunk.subarray(0, STREAM_LIMIT - size));
-			size += chunk.length;
-		},
-		text() {
-			const content = Buffer.concat(prefix).toString('utf8');
-			return size > STREAM_LIMIT ? `${content}\n…（命令输出已截断）` : content;
-		},
-	};
+function startFailure(error: unknown) {
+	return { shellStatus: 'start-failed' as const, content: `命令启动失败。\n${error instanceof Error ? error.message : String(error)}` };
 }
 
-async function runShell(
+function runShell(
 	name: ShellName,
 	binary: string,
 	command: string,
-	ctx: ToolContext,
+	signal: AbortSignal,
 	cwd: string,
-	timeout: number,
+	timeout: number | undefined,
+	output: ShellOutputCapture,
 	sandboxArgs?: string[],
-): Promise<string> {
-	ctx.signal.throwIfAborted();
-	return new Promise((resolve, reject) => {
-		const stdout = outputCapture();
-		const stderr = outputCapture();
-		const commandArgs = shellArgs(name, command);
-		const env = shellEnvironment();
-		if (sandboxArgs) env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
-		const child = spawn(sandboxArgs ? macSandboxExecutable : binary, sandboxArgs ? [...sandboxArgs, binary, ...commandArgs] : commandArgs, {
+): ShellExecution {
+	signal.throwIfAborted();
+	const commandArgs = shellArgs(name, command);
+	const env = shellEnvironment();
+	if (sandboxArgs) env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
+	let child: ChildProcessByStdio<null, Readable, Readable>;
+	try {
+		child = spawn(sandboxArgs ? macSandboxExecutable : binary, sandboxArgs ? [...sandboxArgs, binary, ...commandArgs] : commandArgs, {
 			cwd,
 			detached: !windows,
 			env,
 			stdio: ['ignore', 'pipe', 'pipe'],
 			windowsHide: true,
 		});
-		let timedOut = false;
+	} catch (error) {
+		return { result: Promise.resolve(startFailure(error)), isRunning: () => false };
+	}
+	let termination: 'timed-out' | 'stopped' | undefined;
+	let settled = false;
+	const result = new Promise<{ content: string; shellStatus: ShellStatus; exitCode?: number | null }>((resolve) => {
 		let drain: ReturnType<typeof setTimeout> | undefined;
-		const onAbort = () => stopProcessTree(child);
-		const deadline = setTimeout(() => {
-			timedOut = true;
+		const onAbort = () => {
+			if (child.exitCode !== null || child.signalCode !== null) return;
+			termination ??= signal.reason === 'timed-out' ? 'timed-out' : 'stopped';
+			stopProcessTree(child);
+		};
+		const deadline = timeout === undefined ? undefined : setTimeout(() => {
+			termination ??= 'timed-out';
 			stopProcessTree(child);
 		}, timeout);
-		ctx.signal.addEventListener('abort', onAbort, { once: true });
+		signal.addEventListener('abort', onAbort, { once: true });
 
 		const cleanup = () => {
+			settled = true;
 			clearTimeout(deadline);
 			clearTimeout(drain);
-			ctx.signal.removeEventListener('abort', onAbort);
+			output.stopReporting();
+			signal.removeEventListener('abort', onAbort);
 		};
-		child.stdout.on('data', stdout.add);
-		child.stderr.on('data', stderr.add);
-		child.once('error', (error) => {
+		const finish = (shellStatus: ShellStatus, summary: string, exitCode?: number | null) => {
 			cleanup();
-			reject(error);
+			const { stdout, stderr } = output.text();
+			const retry = shellStatus === 'failed' && sandboxArgs
+				? '命令在受限环境中运行。确需访问库外或联网时，先核对已执行的步骤，再用 elevated 申请所需权限。'
+				: '';
+			const content = [summary, retry, stdout, stderr && `错误输出\n${stderr}`].filter(Boolean).join('\n');
+			resolve({ content, shellStatus, exitCode });
+		};
+		child.stdout.on('data', output.addStdout);
+		child.stderr.on('data', output.addStderr);
+		child.once('error', (error) => {
+			if (child.pid !== undefined) finish(termination ?? 'failed', error.message);
+			else {
+				cleanup();
+				resolve(startFailure(error));
+			}
 		});
 		child.once('exit', () => {
 			clearTimeout(deadline);
@@ -150,23 +166,17 @@ async function runShell(
 				child.stderr.destroy();
 			}, 1_000);
 		});
-		child.once('close', (code, signal) => {
-			cleanup();
-			const errors = stderr.text();
-			const errorOutput = errors ? `错误输出\n${errors}` : '';
-			const failed = timedOut || code !== 0;
-			const output = [
-				timedOut ? '命令已超时。' : `命令退出状态 ${code ?? signal ?? '未知'}。`,
-				...(failed ? [errorOutput, stdout.text()] : [stdout.text(), errorOutput]),
-				failed && sandboxArgs && !timedOut
-					? '命令在受限环境中运行。确需访问库外或联网时，先核对已执行的步骤，再用 elevated 申请所需权限。'
-					: '',
-			].filter(Boolean).join('\n');
-			if (ctx.signal.aborted) reject(new Error('任务已停止。'));
-			else if (failed) reject(new Error(output));
-			else resolve(output);
+		child.once('close', (code, exitSignal) => {
+			const shellStatus = termination ?? (code === 0 ? 'success' : 'failed');
+			const summary = shellStatus === 'timed-out' ? '命令已超时。'
+				: shellStatus === 'stopped' ? '命令已停止。' : `命令退出状态 ${code ?? exitSignal ?? '未知'}。`;
+			finish(shellStatus, summary, code);
 		});
 	});
+	return {
+		result,
+		isRunning: () => !settled && !termination && child.pid !== undefined && child.exitCode === null && child.signalCode === null,
+	};
 }
 
 function hidesCommandText(command: string): boolean {
@@ -179,10 +189,15 @@ function hidesCommandText(command: string): boolean {
 	});
 }
 
-function shellTool(name: ShellName): ToolDefinition {
+function shellTool(name: ShellName, jobs?: ShellJobs): ToolDefinition {
 	return {
 		name,
-		description: `使用真实的 ${name} 执行无需交互输入的本地命令。普通命令优先在笔记库内离线运行，访问库外或联网需要额外权限。文件操作优先使用专用文件工具。`,
+		get description() {
+			const binary = process.platform === 'win32' && name === 'PowerShell' ? executable(name) : undefined;
+			// Windows 只在 PowerShell 7 安装目录和系统自带的 5.1 目录中查找。
+			const interpreter = binary ? (basename(binary) === 'pwsh.exe' ? 'PowerShell 7' : 'Windows PowerShell 5.1') : name;
+			return `使用真实的 ${interpreter} 执行无需交互输入的本地命令。普通命令优先在笔记库内离线运行，访问库外或联网需要额外权限。文件操作优先使用专用文件工具。`;
+		},
 		isReadOnly: false,
 		isAvailable: () => executable(name) !== undefined,
 		maxResultSizeChars: 30_000,
@@ -192,21 +207,32 @@ function shellTool(name: ShellName): ToolDefinition {
 				command: { type: 'string', description: '要执行的完整命令。' },
 				cwd: { type: 'string', description: '工作目录。省略或留空时使用当前笔记库。' },
 				elevated: { type: 'boolean', description: '仅在命令需要访问库外文件或联网时设为 true，以申请本次命令的额外权限。' },
-				timeout: { type: 'integer', minimum: 1, maximum: MAX_TIMEOUT, description: '超时毫秒数，默认 120000。' },
+				timeout: {
+					type: 'integer', minimum: 1, maximum: MAX_TIMEOUT,
+					description: `前台等待上限毫秒数，默认 ${DEFAULT_TIMEOUT}，最长 ${MAX_TIMEOUT}。显式后台运行不使用这个时限。`,
+				},
 				description: { type: 'string', description: '命令用途的简短说明。' },
+				...(jobs && { run_in_background: {
+					type: 'boolean', description: `仅在用户明确要求立即后台运行时设为 true；后台任务没有运行时限。否则前台最多等待 ${FOREGROUND_WAIT_MS / 1000} 秒，仍在运行且有后台名额时移交原命令并返回编号；timeout 只约束这次前台等待。`,
+				} }),
 			},
 			required: ['command'],
 			additionalProperties: false,
 		},
 		async prepare(input, ctx) {
-			const args = fileToolInput(input, ['command', 'cwd', 'elevated', 'timeout', 'description']);
+			const args = fileToolInput(input, ['command', 'cwd', 'elevated', 'timeout', 'description', 'run_in_background']);
 			const command = requiredText(args, 'command');
 			if (hidesCommandText(command)) throw new Error('命令包含会妨碍确认的不可见控制符。');
 			if (args.description !== undefined) requiredText(args, 'description');
 			if (args.elevated !== undefined && typeof args.elevated !== 'boolean') throw new Error('elevated 必须是布尔值。');
+			if (args.run_in_background !== undefined && typeof args.run_in_background !== 'boolean') {
+				throw new Error('run_in_background 必须是布尔值。');
+			}
+			const background = args.run_in_background === true ? jobs : undefined;
+			if (args.run_in_background && !background) throw new Error('后台运行不可用。');
 			const timeout = args.timeout === undefined ? DEFAULT_TIMEOUT : args.timeout;
 			if (typeof timeout !== 'number' || !Number.isInteger(timeout) || timeout < 1 || timeout > MAX_TIMEOUT) {
-				throw new Error('timeout 必须是 1 至 600000 之间的毫秒整数。');
+				throw new Error(`timeout 必须是 1 至 ${MAX_TIMEOUT} 之间的毫秒整数。`);
 			}
 			const binary = executable(name);
 			if (!binary) throw new Error(`找不到 ${name} 解释器。`);
@@ -231,9 +257,12 @@ function shellTool(name: ShellName): ToolDefinition {
 				: '此系统或命令环境无法限制在笔记库内，运行前需要确认。');
 			const permission: Pick<PreparedTool, 'approval' | 'independent'> = restricted || mode === 'full-access'
 				? { independent: true }
-				: { approval: { title: name, target: cwd.absolutePath, after: command, kind: 'shell', ...(reason ? { reason } : {}) } };
+				: { approval: { title: name, target: cwd.absolutePath, after: command, kind: 'shell',
+					...(background && { background: true }), ...(reason ? { reason } : {}),
+				} };
 			return {
 				...permission,
+				...(permission.approval && { approvalIdentity: JSON.stringify([binary, cwd.stat.dev, cwd.stat.ino, timeout, Boolean(background)]) }),
 				async run() {
 					const current = await resolveToolPath(cwdContext, requestedCwd, 'read');
 					if (!current.stat?.isDirectory() || current.absolutePath !== cwd.absolutePath
@@ -241,11 +270,23 @@ function shellTool(name: ShellName): ToolDefinition {
 						throw new Error('工作目录已变化，请重新确认命令。');
 					}
 					const sandboxArgs = restricted ? await macShellSandboxArgs(ctx) : undefined;
-					return runShell(name, binary, command, ctx, current.absolutePath, timeout, sandboxArgs);
+					ctx.signal.throwIfAborted();
+					const output = captureShellOutput(background ? undefined : ctx.onShellOutput);
+					const run = (signal: AbortSignal, deadline?: number) =>
+						runShell(name, binary, command, signal, current.absolutePath, deadline, output, sandboxArgs);
+					const owner = ctx.task.request.conversationId;
+					const result = background ? background.start(owner, name, output, (signal) => run(signal).result, command, ctx.subagentId)
+						: jobs && timeout > FOREGROUND_WAIT_MS
+							? await jobs.waitInForeground(owner, name, output, ctx.signal, run, command, timeout, ctx.subagentId)
+							: await run(ctx.signal, timeout).result;
+					if (typeof result !== 'string') return result;
+					return `后台任务编号：${result}。后台任务没有运行时限。用 ShellJobOutput 查看已有及新增输出或最终结果，用 ShellJobStop 停止。`;
 				},
 			};
 		},
 	};
 }
 
-export const shellTools: ToolModule = () => [shellTool('Bash'), shellTool('PowerShell')];
+export function shellTools(jobs?: ShellJobs): ToolDefinition[] {
+	return [shellTool('Bash', jobs), shellTool('PowerShell', jobs)];
+}

@@ -1,3 +1,4 @@
+import { skillWriteLocations } from '../../skills/library/writeProtection';
 import { accessSync, constants } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -32,6 +33,9 @@ export async function macShellSandboxArgs(ctx: ToolContext): Promise<string[]> {
 		}
 	}));
 	for (const path of canonicalPaths) protectedPaths.add(path);
+	const skills = skillWriteLocations(vault);
+	const restrictedWrites = [...skills.exact.map((path) => ({ scope: 'literal', path })), ...skills.trees.map((path) => ({ scope: 'subpath', path }))]
+		.map((entry, index) => ({ ...entry, key: 'SKILL_RO_' + index }));
 	const parameters = [...protectedPaths].map((path, index) => ({ key: `PROTECTED_${index}`, path }));
 	// 系统命令及其依赖只开放读取，笔记库外的其他资料与网络默认拒绝。
 	const profile = `
@@ -48,7 +52,8 @@ export async function macShellSandboxArgs(ctx: ToolContext): Promise<string[]> {
 			(subpath (param "VAULT")))
 		(allow file-read* file-write-data (literal "/dev/null"))
 		(allow file-write* (subpath (param "VAULT")))
+		(deny file-write* ${restrictedWrites.map(({ scope, key }) => `(${scope} (param "${key}"))`).join(' ')})
 		(deny file-read* file-write* ${parameters.map(({ key }) => `(subpath (param "${key}"))`).join(' ')})
 	`;
-	return ['-D', `VAULT=${vault}`, ...parameters.flatMap(({ key, path }) => ['-D', `${key}=${path}`]), '-p', profile];
+	return ['-D', `VAULT=${vault}`, ...[...parameters,...restrictedWrites].flatMap(({ key, path }) => ['-D', `${key}=${path}`]), '-p', profile];
 }

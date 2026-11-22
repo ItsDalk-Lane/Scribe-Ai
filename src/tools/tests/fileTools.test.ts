@@ -59,9 +59,11 @@ async function fileToolsFixture(testContext: TestContext) {
 	const run = async (name: string, input: unknown) => {
 		const output = await (await prepare(name, input)).run();
 		if (typeof output === 'string') return output;
-		const message: Message = { role: 'tool', content: output.content };
-		context.readDelivery.remember(message, output.fileRead);
-		context.readDelivery.accept([message]);
+		if ('fileRead' in output) {
+			const message: Message = { role: 'tool', content: output.content };
+			context.readDelivery.remember(message, output.fileRead);
+			context.readDelivery.accept([message]);
+		}
 		return output.content;
 	};
 	return { directory, cwd, outside, usedVaultApi, context, prepare, run };
@@ -151,7 +153,9 @@ void test('File tools read and write vault files and authorized external files',
 	await run('Read', { file_path: 'note.md', offset: 2, limit: 2 });
 	const replacement = await prepare('Edit', { file_path: 'note.md', old_string: 'Unicode 😀\nafter', new_string: 'music $&' });
 	assert.equal(replacement.approval?.after, 'before\r\nmusic $&\r\n');
-	await replacement.run();
+	const result = await replacement.run();
+	assert.ok(typeof result !== 'string' && 'noteChange' in result);
+	assert.deepEqual(result.noteChange, { path: 'note.md', before: 'before\r\nUnicode 😀\r\nafter\r\n', after: 'before\r\nmusic $&\r\n' });
 	assert.equal(await readFile(note, 'utf8'), 'before\r\nmusic $&\r\n');
 	await run('Write', { file_path: 'new.md', content: '' });
 	assert.equal(await readFile(join(cwd, 'new.md'), 'utf8'), '');

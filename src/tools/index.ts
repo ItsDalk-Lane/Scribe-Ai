@@ -2,8 +2,11 @@ import { createToolExecutor } from './executor';
 import { readTools } from './readTools';
 import { skillTools } from './skillTools';
 import { searchTools } from './searchTools';
+import { subagentTools } from './subagentTools';
 import { taskTools } from './taskTools';
 import { mcpTools } from './external/mcp';
+import { ShellJobs } from './external/shellJobs';
+import type { ShellJobHistory } from './external/shellJobs';
 import { shellTools } from './external/shellTool';
 import { webTools } from './external/webTools';
 import { workspaceTools } from './workspaceTools';
@@ -19,18 +22,20 @@ export function createToolRegistry(modules: ToolModule[]): ToolRegistry {
 }
 
 /** 工具层的统一出口：能力清单 + 统一执行入口 */
-export function createToolLayer(): ToolLayer {
-	const external = { web: webTools, shell: shellTools, mcp: mcpTools };
+export function createToolLayer(history?: ShellJobHistory): ToolLayer {
+	const shellJobs = new ShellJobs(history);
+	const external = { web: webTools, shell: () => shellTools(shellJobs), mcp: mcpTools };
 	const registry = createToolRegistry([
 		readTools,
 		writeTools,
 		searchTools,
 		workspaceTools,
-		taskTools,
+		() => taskTools(shellJobs),
+		subagentTools,
 		skillTools,
 		external.web,
 		external.shell,
 		external.mcp,
 	]);
-	return { registry, executor: createToolExecutor(registry), external };
+	return { registry, executor: createToolExecutor(registry), external, shellJobs };
 }
