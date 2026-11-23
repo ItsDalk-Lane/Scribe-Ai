@@ -1,29 +1,70 @@
+import type { TaskTarget } from '../types';
 import { slashCommandLabels } from './slashCommandMeta';
 
 const commandNames = [
-	'presets', 'approve', 'skills', 'review', 'rename', 'new', 'archive', 'delete', 'resume',
-	'fork', 'init', 'compact', 'config', 'recap', 'plan', 'goal', 'agents', 'side', 'copy', 'export', 'diff', 'mention',
-	'status', 'warnings', 'usage', 'quit', 'ps', 'stop', 'clear', 'multi-agents',
+	'clear', 'side', 'plan', 'goal', 'config', 'compact', 'skills', 'mcp', 'agents', 'presets',
+	'recap', 'export', 'review', 'diff', 'approve', 'warnings',
 ] as const;
 
 export type SlashCommandName = typeof commandNames[number];
 export type SlashCommandSurface = 'main' | 'side';
 
 const aliases: Readonly<Record<string, SlashCommandName>> = {
-	btw: 'side', clean: 'stop', exit: 'quit', subagents: 'multi-agents',
+	btw: 'side',
+	subagents: 'agents',
 };
 
 const localizedNames = Object.fromEntries(commandNames.flatMap((name) =>
 	slashCommandLabels[name].map((label) => [label.toLowerCase(), name]))) as Readonly<Record<string, SlashCommandName>>;
-const sideCommands = new Set<SlashCommandName>(['skills', 'copy', 'export', 'mention', 'status', 'warnings']);
+const sideCommands = new Set<SlashCommandName>(['skills', 'mcp', 'export', 'warnings']);
 const acceptsArgs = new Set<SlashCommandName>([
-	'review', 'rename', 'new', 'resume', 'fork', 'plan', 'goal', 'side', 'export', 'clear',
+	'review', 'plan', 'goal', 'side', 'export', 'clear',
 ]);
+export const slashGoalActions = ['clear', 'edit', 'pause', 'resume'] as const;
 
 export interface SlashCommand {
 	name: SlashCommandName;
 	args: string;
 	argsStart: number;
+	subcommand?: string;
+	presetIndex?: number;
+}
+
+export interface SlashSubcommand {
+	name: SlashCommandName;
+	subcommand: string;
+	label: string;
+	keywords?: readonly string[];
+}
+
+export interface SlashTargetChoice {
+	target: TaskTarget;
+	description?: string;
+	reason?: string;
+}
+
+export function slashTargetCommand(target: TaskTarget): 'mcp' | 'agents' {
+	return target.kind === 'mcp' ? 'mcp' : 'agents';
+}
+
+export function slashTargetMatches(instruction: string, caret: number, targets: readonly SlashTargetChoice[]) {
+	if (!/^\/[^\s/]/u.test(instruction) || caret <= 1) return [];
+	const typed = instruction.slice(1, caret).toLowerCase();
+	const matches = targets.flatMap((choice) => {
+		const { label } = choice.target;
+		if (label.includes('/')) return [];
+		const name = label.toLowerCase();
+		const end = label.length + 1;
+		const rest = instruction.slice(end);
+		if (instruction.slice(1, end).toLowerCase() === name && (!rest || /^\s/u.test(rest))) {
+			return [{ choice, tokenEnd: end, exact: caret >= end }];
+		}
+		if (!name.startsWith(typed)) return [];
+		const tail = /^[^\s/]*/u.exec(instruction.slice(caret))?.[0] ?? '';
+		return [{ choice, tokenEnd: caret + tail.length, exact: false }];
+	});
+	const exactEnd = Math.max(0, ...matches.filter(({ exact }) => exact).map(({ tokenEnd }) => tokenEnd));
+	return matches.filter(({ exact, tokenEnd }) => !exact || tokenEnd === exactEnd);
 }
 
 export interface SlashCommandChoice {
@@ -79,6 +120,14 @@ export function slashCommandMatches(prefix: string, surface: SlashCommandSurface
 	const exact = items.findIndex(({ name, token }) => token === query || labels(name).includes(query));
 	if (exact > 0) items.unshift(...items.splice(exact, 1));
 	return items;
+}
+
+export function slashSearchMatch(query: string, ...names: (string | undefined)[]): number {
+	const prefix = query.toLowerCase();
+	if (!prefix) return 0;
+	const labels = names.map((name) => name?.toLowerCase());
+	if (labels.includes(prefix)) return 2;
+	return labels.some((label) => label?.startsWith(prefix)) ? 1 : 0;
 }
 
 export function slashCommandQuery(input: string, caret: number) {

@@ -1,18 +1,19 @@
 import type { App } from 'obsidian';
 import { parseSlashCommand, readSlashDraft, slashCommandAcceptsArgs } from './slashCommands';
 import type { SlashUi } from './slashUi';
-import { tr } from './skills/dialog';
 
-interface Preset {
+export interface Preset {
 	label: string;
 	content: string;
 }
 
 const storageKey = 'scribe-ai:slash-presets';
+const presetLimit = 10;
+type PresetStorage = Pick<App, 'loadLocalStorage' | 'saveLocalStorage'>;
 
-function readPresets(app: App): (Preset | undefined)[] {
+export function readPresets(app: PresetStorage): (Preset | undefined)[] {
 	const stored: unknown = app.loadLocalStorage(storageKey);
-	return Array.from({ length: 10 }, (_, index) => {
+	return Array.from({ length: presetLimit }, (_, index) => {
 		const value: unknown = Array.isArray(stored) ? stored[index] : undefined;
 		if (!value || typeof value !== 'object') return;
 		const { label, content } = value as Partial<Preset>;
@@ -21,11 +22,23 @@ function readPresets(app: App): (Preset | undefined)[] {
 	});
 }
 
-export async function showSlashPresets(app: App, ui: SlashUi): Promise<string | boolean> {
+export function presetLabel(preset: Preset): string {
+	return preset.label || preset.content.slice(0, 60);
+}
+
+export async function showSlashPresets(app: PresetStorage, ui: Pick<SlashUi, 'choose' | 'prompt' | 'confirm'>,
+	tr: (zh: string, en: string) => string, createDirectly = false): Promise<string | boolean> {
 	const presets = readPresets(app);
-	const index = await ui.choose(tr('命令预设', 'Presets'), presets.map((_, index) => index),
-		(index) => `${(index + 1) % 10} · ${presets[index]?.label || presets[index]?.content.slice(0, 60) || tr('空白', 'Empty')}`);
+	const choices = presets.flatMap((preset, index) => preset ? [index] : []);
+	const empty = presets.indexOf(undefined);
+	const fullMessage = tr('预设已满，请先删除一条再新建。', 'Preset slots are full. Delete one before creating another.');
+	if (empty !== -1) choices.unshift(empty);
+	const index = createDirectly ? empty : await ui.choose(tr('命令预设', 'Presets'), choices, (index) => {
+		const preset = presets[index];
+		return preset ? `${(index + 1) % presetLimit} · ${presetLabel(preset)}` : tr('新建预设', 'New preset');
+	});
 	if (index === undefined) return false;
+	if (index === -1) throw new Error(fullMessage);
 	const existing = presets[index];
 	if (existing) {
 		const action = await ui.choose(existing.label || existing.content, ['run', 'edit', 'delete'], (action) =>
@@ -51,7 +64,9 @@ export async function showSlashPresets(app: App, ui: SlashUi): Promise<string | 
 	const label = await ui.prompt(tr('命名预设（可留空）', 'Name the preset (optional)'), existing?.label);
 	if (label === undefined) return false;
 	const current = readPresets(app);
-	current[index] = { label: label.slice(0, 80), content };
+	const target = existing ? index : current.indexOf(undefined);
+	if (target === -1) throw new Error(fullMessage);
+	current[target] = { label: label.slice(0, 80), content };
 	app.saveLocalStorage(storageKey, current);
 	return true;
 }

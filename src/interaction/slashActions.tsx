@@ -1,22 +1,22 @@
 import { realpath } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { createTwoFilesPatch } from 'diff';
-import { Notice } from 'obsidian';
 import type { App, FileSystemAdapter } from 'obsidian';
 import { createRoot } from 'react-dom/client';
 import type ScribeAiPlugin from '../main';
-import { writingRulePath } from '../orchestration/context/writingRules';
-import { isWithinPath } from '../tools/support/pathUtils';
-import type { ConversationMetrics } from './chatMetrics';
+import { BUILTIN_SUBAGENT_ROLES, normalizeSubagentSettings } from '../orchestration/settings/subagentSettings';
+import { isWithinPath, normalizeVaultRelativePath } from '../tools/support/pathUtils';
+import { stripGoalReport } from './chatGoal';
+import { stripPlanMarkers } from './chatPlan';
 import ChatMarkdown from './components/ChatMarkdown';
 import FileChanges from './components/FileChanges';
-import { ScribeAiSettingTab } from './SettingsTab';
-import { copyableMarkdownParts } from './slashCopy';
+import { mcpStatus, mcpTypeLabels, type McpServerView, type McpSettingsManager } from './mcpSettingsControls';
+import type { SlashTargetChoice } from './slashCommands';
+import { slashCommandText } from './slashCommandText';
 import type { SlashUi } from './slashUi';
 import { tr } from './skills/dialog';
 import { uiText } from './uiText';
-import { renderWritingRulesSettings } from './WritingRulesSettings';
-import type { NoteChange, RunState, SavedRun } from '../types';
+import type { NoteChange, RunState, SavedRun, TaskTarget } from '../types';
 
 export async function showSlashSummary(app: App, ui: SlashUi, title: string, summary: string): Promise<boolean> {
 	return ui.panel(title, (host) => {
@@ -26,16 +26,105 @@ export async function showSlashSummary(app: App, ui: SlashUi, title: string, sum
 	});
 }
 
-export async function openSlashSettings(plugin: ScribeAiPlugin, ui: SlashUi, writingRules = false): Promise<boolean> {
-	const text = uiText();
-	return ui.panel(writingRules ? text.writingRules : plugin.manifest.name, (host) => {
-		if (writingRules) {
-			renderWritingRulesSettings(plugin.app, host, text, true);
+export async function openSlashSettings(plugin: ScribeAiPlugin): Promise<boolean> {
+	// Obsidian 的插件设置页使用宿主的设置管理器打开。
+	const { setting } = plugin.app as App & {
+		setting?: { open?: () => unknown; openTabById?: (id: string) => unknown };
+	};
+	if (typeof setting?.open !== 'function' || typeof setting.openTabById !== 'function') {
+		throw new Error(tr('无法打开设置，请从 Obsidian 设置中打开 Scribe Ai。', 'Open Scribe Ai from Obsidian settings.'));
+	}
+	await setting.open();
+	await setting.openTabById(plugin.manifest.id);
+	return true;
+}
+
+export function showSlashMcp(plugin: ScribeAiPlugin, ui: SlashUi): Promise<boolean> {
+	return ui.panel(slashCommandText().commandLabel('mcp'), (host) => drawSlashMcp(host, plugin.services.tools.mcp));
+}
+
+export function chooseSlashMcp(plugin: ScribeAiPlugin, ui: SlashUi): Promise<TaskTarget | undefined> {
+	return ui.custom<TaskTarget>(slashCommandText().commandLabel('mcp'), (host, select) => drawSlashMcp(host, plugin.services.tools.mcp, select));
+}
+
+function mcpSlashTarget(view: McpServerView): SlashTargetChoice {
+	const { server, state } = view;
+	const status = mcpStatus(view, false);
+	return {
+		target: { kind: 'mcp', id: server.id, label: server.name },
+		description: mcpTypeLabels[server.type],
+		reason: state === 'ready' ? undefined : status,
+	};
+}
+
+function agentSlashTargets(plugin: ScribeAiPlugin): SlashTargetChoice[] {
+	const { settings } = plugin.services;
+	const { mode, roles: custom } = normalizeSubagentSettings(settings.subagents);
+	const roles = new Map([...BUILTIN_SUBAGENT_ROLES, ...custom].map((role) => [role.name, role]));
+	return [...roles.values()].map(({ name, description, model }) => ({
+		target: { kind: 'agent', id: name, label: name },
+		description,
+		reason: mode === 'off' ? tr('子 Agent 已关闭。', 'Subagents are off.')
+			: model && !settings.providerModels[model.providerId]?.includes(model.model)
+				? tr('所选模型已不可用。', 'Configured model unavailable.') : undefined,
+	}));
+}
+
+export function getSlashTargets(plugin: ScribeAiPlugin): SlashTargetChoice[] {
+	return [...(plugin.services.tools.mcp?.snapshot().map(mcpSlashTarget) ?? []), ...agentSlashTargets(plugin)];
+}
+
+function drawSlashMcp(host: HTMLElement, manager?: McpSettingsManager, select?: (value: TaskTarget) => void) {
+	const draw = () => {
+		const focused = host.ownerDocument.activeElement as HTMLElement | null;
+		const activeId = host.contains(focused) ? focused?.dataset.targetId : undefined;
+		host.empty();
+		const servers = manager?.snapshot() ?? [];
+		if (!servers.length) {
+			host.createEl('p', { cls: 'scribe-slash-panel-message', text: tr('还没有配置 MCP 服务。', 'No MCP services configured yet.') });
 			return;
 		}
-		const tab = new ScribeAiSettingTab(plugin.app, plugin);
-		tab.renderInto(host);
-		return () => tab.hide();
+		const list = host.createDiv({ cls: 'scribe-slash-panel-list', attr: { role: 'list' } });
+		for (const view of servers) {
+			const { server, state } = view;
+			const choice = mcpSlashTarget(view);
+			const item = list.createDiv({ attr: { role: 'listitem' } });
+			const button = select && item.createEl('button', { cls: 'scribe-slash-mcp-row', attr: { type: 'button' } });
+			const row = button ?? item.createDiv({ cls: 'scribe-slash-mcp-row' });
+			if (select && button) {
+				button.disabled = Boolean(choice.reason);
+				button.dataset.targetId = server.id;
+				button.addEventListener('click', () => select(choice.target));
+				if (activeId === server.id) button.focus({ preventScroll: true });
+			}
+			row.createSpan({ cls: 'scribe-mcp-status-dot', attr: { 'data-state': state, 'aria-hidden': 'true' } });
+			row.createEl('strong', { text: server.name });
+			row.createSpan({ cls: 'scribe-mcp-type', text: mcpTypeLabels[server.type] });
+			row.createSpan({ cls: 'scribe-slash-mcp-status', text: mcpStatus(view, false) });
+		}
+	};
+	draw();
+	return manager?.subscribe(draw);
+}
+
+export function chooseSlashAgent(plugin: ScribeAiPlugin, ui: SlashUi): Promise<TaskTarget | undefined> {
+	return ui.custom<TaskTarget>(slashCommandText().commandLabel('agents'), (host, select) => {
+		const draw = () => {
+			host.empty();
+			const off = plugin.services.settings.subagents?.mode === 'off';
+			if (off) host.createEl('p', { cls: 'scribe-slash-panel-message', text: tr('子 Agent 已关闭，可以在 Scribe Ai 设置中启用。', 'Subagents are off. Enable them in Scribe Ai settings.') });
+			const list = host.createDiv({ cls: 'scribe-slash-panel-list', attr: { role: 'list' } });
+			for (const { target, description, reason } of agentSlashTargets(plugin)) {
+				const item = list.createDiv({ attr: { role: 'listitem' } });
+				const button = item.createEl('button', { cls: 'scribe-slash-agent-row', attr: { type: 'button' } });
+				button.disabled = Boolean(reason);
+				button.createEl('strong', { text: target.label });
+				button.createSpan({ cls: 'scribe-slash-agent-description', text: [description, off ? undefined : reason].filter(Boolean).join(' · ') });
+				button.addEventListener('click', () => select(target));
+			}
+		};
+		draw();
+		return plugin.subscribeSettings(draw);
 	});
 }
 
@@ -45,20 +134,8 @@ export async function showSlashWarnings(plugin: ScribeAiPlugin, ui: SlashUi): Pr
 		[new Date(at).toLocaleTimeString(), status, error].filter(Boolean).join(' · ')) : [uiText().noDiagnostics]);
 }
 
-export async function showSlashUsage(metrics: ConversationMetrics, ui: SlashUi): Promise<boolean> {
-	const usage = metrics.usage;
-	const lines = usage ? [
-		tr(`模型请求 ${usage.count} 次`, `${usage.count} model requests`),
-		...([
-			[tr('输入', 'Input'), usage.input], [tr('输出', 'Output'), usage.output], [tr('总计', 'Total'), usage.total],
-			[tr('缓存读取', 'Cache read'), usage.cacheRead], [tr('缓存写入', 'Cache write'), usage.cacheWrite],
-		] as const).flatMap(([label, value]) => value === undefined ? [] : [`${label} · ${value.toLocaleString()}`]),
-	] : [tr('暂无已记录的用量。', 'No usage has been recorded yet.')];
-	return ui.show(tr('聊天用量', 'Chat usage'), lines);
-}
-
 export function writableNotePath(path: string, configDir: string): string | undefined {
-	const normalized = writingRulePath(path);
+	const normalized = normalizeVaultRelativePath(path);
 	if (!normalized || path.includes('\\') || Array.from(path).some((value) => value.charCodeAt(0) < 32) || path.split('/').includes('..')
 		|| normalized === configDir || normalized.startsWith(`${configDir}/`)) return;
 	return normalized.endsWith('.md') ? normalized : `${normalized}.md`;
@@ -69,34 +146,10 @@ export function transcriptMarkdown(runs: readonly SavedRun[]): string {
 		`## ${tr('你', 'You')}\n\n${request.instruction}`,
 		...state.messages.flatMap(({ role, content, incomplete, subagentActivity }, index) => {
 			if (!content.trim() || incomplete || subagentActivity) return [];
-			if (role === 'assistant') return [`## ${tr('助手', 'Assistant')}\n\n${cleanGoalMarker(content)}`];
+			if (role === 'assistant') return [`## ${tr('助手', 'Assistant')}\n\n${stripPlanMarkers(stripGoalReport(content))}`];
 			return role === 'user' && index > 0 ? [`## ${tr('你', 'You')}\n\n${content}`] : [];
 		}),
 	]).join('\n\n');
-}
-
-function cleanGoalMarker(content: string) {
-	return content.replace(/<!-- scribe-goal-complete:[^\r\n]*? -->/gu, '').trimEnd();
-}
-
-export async function copySlash(runs: readonly SavedRun[], live: RunState | null | undefined, ui: SlashUi): Promise<boolean> {
-	const latest = [...runs.map(({ state }) => state), ...(live ? [live] : [])].reverse()
-		.flatMap(({ messages }) => [...messages].reverse())
-		.find(({ role, content, incomplete, subagentActivity, toolCalls }) =>
-			role === 'assistant' && content.trim() && !incomplete && !subagentActivity && !toolCalls?.length);
-	if (!latest) throw new Error(tr('暂无可复制的回答。', 'There is no response to copy.'));
-	const body = cleanGoalMarker(latest.content);
-	const { snippets, quotes } = copyableMarkdownParts(body);
-	const items = [
-		{ label: tr('完整回答', 'Full response'), body },
-		...snippets.map((body, index) => ({ label: tr(`代码块 ${index + 1}`, `Code block ${index + 1}`), body })),
-		...quotes.map((body, index) => ({ label: tr(`引用 ${index + 1}`, `Quote ${index + 1}`), body })),
-	];
-	const target = items.length === 1 ? items[0] : await ui.choose(tr('复制回答', 'Copy response'), items, ({ label }) => label);
-	if (!target) return false;
-	await navigator.clipboard.writeText(target.body);
-	new Notice(uiText().chatMessageCopied);
-	return true;
 }
 
 export async function exportSlash(app: App, runs: readonly SavedRun[], path: string, title: string, ui: SlashUi): Promise<boolean> {

@@ -1,22 +1,39 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
+import type { SkillInfo, TaskTarget } from '../../types';
 import { isImeComposing } from '../composerKeyboard';
+import { updateOverflowTitle } from '../overflowTitle';
 import { slashCommandIcons, slashCommandSubmenus } from '../slashCommandMeta';
 import { slashCommandText } from '../slashCommandText';
 import type { SlashCommandText } from '../slashCommandText';
 import {
-	completeSlashCommand, parseSlashCommand, slashCommandAllowed, slashCommandArguments, slashCommandMatches, slashCommandQuery,
+	completeSlashCommand, getSlashCommand, parseSlashCommand, readSlashDraft, slashCommandAllowed, slashCommandArguments,
+	slashCommandMatches, slashCommandQuery, slashGoalActions, slashSearchMatch, slashTargetCommand, slashTargetMatches,
 } from '../slashCommands';
-import type { SlashCommand, SlashCommandSurface } from '../slashCommands';
+import type { SlashCommand, SlashCommandSurface, SlashSubcommand, SlashTargetChoice } from '../slashCommands';
+import { presetLabel } from '../slashPresets';
+import type { Preset } from '../slashPresets';
 import type { SlashUi } from '../slashUi';
 import { uiText } from '../uiText';
 import ChatIcon from './ChatIcon';
+import { useComposerPopoverPosition } from './useComposerPopoverPosition';
 
 export interface SlashSuggestionOptions {
 	surface: SlashCommandSurface;
-	run: (command: SlashCommand, ui: SlashUi) => void;
+	run: (command: SlashCommand, ui: SlashUi, preserveDraft: boolean) => void;
 	unavailable: (command: SlashCommand) => string | undefined;
 	focusInput?: () => void;
+	getPresets?: () => readonly (Preset | undefined)[];
+	getSubcommands?: () => readonly SlashSubcommand[];
+	getTargets?: () => readonly SlashTargetChoice[];
+	selectTarget?: (target: TaskTarget, tokenEnd: number) => void;
+	goalActions?: boolean;
+}
+
+export interface SlashLauncher {
+	id: string;
+	open: boolean;
+	close: () => void;
 }
 
 interface Choice {
@@ -26,7 +43,8 @@ interface Choice {
 	icon?: string;
 	submenu?: boolean;
 	command?: SlashCommand;
-	complete: () => { instruction: string; caret: number };
+	complete?: () => { instruction: string; caret: number };
+	apply?: () => void;
 }
 
 interface PanelBase {
@@ -48,32 +66,84 @@ function argumentKey(command: SlashCommand, prefix: string) {
 	return `args:${command.name}:${prefix}:${command.args}`;
 }
 
-function suggestions(instruction: string, caret: number, options: SlashSuggestionOptions, text: SlashCommandText) {
+function suggestions(instruction: string, caret: number, options: SlashSuggestionOptions, text: SlashCommandText,
+	skills: readonly SkillInfo[], onChooseSkill: (item: SkillInfo, tokenEnd: number) => void) {
+	const namedTargets = options.surface === 'main' && caret > 1 && instruction.startsWith('/')
+		? slashTargetMatches(instruction, caret, options.getTargets?.() ?? []) : [];
+	const targets = namedTargets.map(({ choice: { target, description, reason }, tokenEnd, exact }): Choice & { rank: number } => {
+		const name = slashTargetCommand(target);
+		const unavailable = options.unavailable({ name, args: '', argsStart: tokenEnd }) ?? reason;
+		return {
+			label: target.label, rank: exact ? 3 : 1, icon: slashCommandIcons[name],
+			description: [text.commandLabel(name), description].filter(Boolean).join(' · '), reason: unavailable,
+			apply: () => options.selectTarget?.(target, tokenEnd),
+		};
+	});
 	const query = slashCommandQuery(instruction, caret);
 	if (query) {
 		const { prefix, tokenEnd } = query;
 		const args = slashCommandArguments(instruction, tokenEnd);
-		const choices: Choice[] = slashCommandMatches(prefix, options.surface).map(({ name, token }) => {
+		const exactCommand = getSlashCommand(prefix);
+		const choices: (Choice & { rank: number })[] = slashCommandMatches(prefix, options.surface).map(({ name, token }) => {
 			const command = { name, ...args };
 			const label = text.commandLabel(name);
 			return {
 				label,
+				rank: name === exactCommand ? 4 : 2,
 				description: text.describe(name),
 				icon: slashCommandIcons[name],
 				submenu: Boolean(slashCommandSubmenus[name]),
 				reason: options.unavailable(command),
 				command,
-				complete: () => completeSlashCommand(instruction, tokenEnd, label || token),
+				complete: () => completeSlashCommand(instruction, tokenEnd, /\s/u.test(label) ? token : label || token),
 			};
 		});
+		if (prefix && slashCommandAllowed('skills', options.surface)) {
+			const reason = options.unavailable({ name: 'skills', args: '', argsStart: tokenEnd });
+			for (const item of skills) {
+				if (!item.enabled || !item.manual) continue;
+				const match = slashSearchMatch(prefix, item.name, item.displayName);
+				if (!match) continue;
+				choices.push({
+					label: item.displayName || item.name, rank: match === 2 ? 3 : 1,
+					description: `${text.commandLabel('skills')} · ${item.sourceLabel}`,
+					icon: slashCommandIcons.skills, reason, apply: () => onChooseSkill(item, tokenEnd),
+				});
+			}
+		}
+		if (prefix && !args.args && options.surface === 'main') {
+			const add = (command: SlashCommand, label: string, keywords: readonly string[] = [], complete?: Choice['complete']) => {
+				const match = slashSearchMatch(prefix, label, ...keywords);
+				if (!match) return;
+				choices.push({ label, rank: match === 2 ? 3 : 1, icon: slashCommandIcons[command.name],
+					description: text.commandLabel(command.name), reason: options.unavailable(command), command, complete });
+			};
+			const presets = options.getPresets?.();
+			if (presets?.includes(undefined)) add({ name: 'presets', ...args, subcommand: 'new' }, text.newPreset, ['new-preset']);
+			presets?.forEach((preset, presetIndex) => {
+				if (!preset || (readSlashDraft(preset.content) && !parseSlashCommand(preset.content))) return;
+				const label = presetLabel(preset);
+				add({ name: 'presets', ...args, presetIndex }, label, [label.replace(/^\//u, '')]);
+			});
+			for (const value of options.goalActions ? slashGoalActions : []) {
+				add({ name: 'goal', ...args, args: value }, text.goalActionLabel(value), [value],
+					() => completeSlashCommand(instruction, tokenEnd, `${text.commandLabel('goal')} ${value}`));
+			}
+			for (const { name, subcommand, label, keywords } of options.getSubcommands?.() ?? []) {
+				add({ name, ...args, subcommand }, label, keywords);
+			}
+		}
+		choices.push(...targets);
+		choices.sort((left, right) => right.rank - left.rank);
 		return { key: `name:${prefix}`, choices };
 	}
 
 	const command = parseSlashCommand(instruction);
+	if (!command && targets.length) return { key: `target:${instruction.slice(0, caret)}`, choices: targets.sort((a, b) => b.rank - a.rank) };
 	if (!command || !slashCommandAllowed(command.name, options.surface) || caret < command.argsStart
 		|| /\s/u.test(instruction.slice(command.argsStart))) return;
 	const queryArg = instruction.slice(command.argsStart, caret).toLowerCase();
-	const available = command.name === 'goal' ? ['clear', 'edit', 'pause', 'resume'] : [];
+	const available = command.name === 'goal' ? slashGoalActions : [];
 	const matching: { value: string; description?: string }[] = available.filter((value) => value.startsWith(queryArg))
 		.map((value) => ({ value, description: undefined }));
 	const exact = matching.findIndex(({ value }) => value.toLowerCase() === queryArg);
@@ -186,15 +256,19 @@ function SlashPanelView({ panel, settle, text }: {
 }
 
 export function useSlashSuggestions({
-	instruction, caret, options, onComplete,
+	instruction, caret, options, launcher, skills, onChooseSkill, onComplete,
 }: {
 	instruction: string;
 	caret: number | null;
 	options?: SlashSuggestionOptions;
+	launcher?: SlashLauncher;
+	skills: readonly SkillInfo[];
+	onChooseSkill: (item: SkillInfo, tokenEnd: number) => void;
 	onComplete: (instruction: string, caret: number) => void;
 }) {
 	const text = slashCommandText();
-	const id = useId();
+	const generatedId = useId();
+	const id = launcher?.id ?? generatedId;
 	const list = useRef<HTMLDivElement>(null);
 	const optionsRef = useRef(options);
 	optionsRef.current = options;
@@ -202,8 +276,11 @@ export function useSlashSuggestions({
 	if (options?.focusInput) focusInputRef.current = options.focusInput;
 	const instructionRef = useRef(instruction);
 	instructionRef.current = instruction;
-	const current = options && caret !== null ? suggestions(instruction, caret, options, text) : undefined;
-	const key = current?.key;
+	const manual = launcher?.open === true;
+	const queryCaret = manual ? 1 : caret;
+	const current = options && queryCaret !== null
+		? suggestions(manual ? '/' : instruction, queryCaret, options, text, skills, onChooseSkill) : undefined;
+	const key = manual ? 'launcher' : current?.key;
 	const [selection, setSelection] = useState<{ key: string | undefined; index: number; dismissed: boolean }>({
 		key, index: -1, dismissed: false,
 	});
@@ -277,7 +354,7 @@ export function useSlashSuggestions({
 	};
 
 	const visible = Boolean(panel)
-		|| Boolean(current?.choices.length && (selection.key !== key || !selection.dismissed) && closedInput !== instruction);
+		|| Boolean(current?.choices.length && (manual || (selection.key !== key || !selection.dismissed) && closedInput !== instruction));
 	const choices = panel || !visible ? [] : current?.choices ?? [];
 	const enabled = choices.flatMap(({ reason }, index) => reason ? [] : [index]);
 	const index = selection.key === key && enabled.includes(selection.index) ? selection.index : enabled[0] ?? 0;
@@ -287,46 +364,29 @@ export function useSlashSuggestions({
 		if (panel) return;
 		list.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
 	}, [activeId, key, panel]);
-	useLayoutEffect(() => {
-		if (!visible) return;
-		const menu = list.current;
-		const field = menu?.parentElement;
-		const win = field?.ownerDocument.defaultView;
-		if (!menu || !field || !win) return;
-		const pane = field.closest('.scribe-app') ?? field.ownerDocument.documentElement;
-		const measure = () => {
-			const rect = field.getBoundingClientRect();
-			const bounds = pane.getBoundingClientRect();
-			const above = rect.top - Math.max(0, bounds.top) - 12;
-			const below = Math.min(win.innerHeight, bounds.bottom) - rect.bottom - 12;
-			const placement = above >= 200 || above >= below ? 'above' : 'below';
-			menu.dataset.placement = placement;
-			menu.style.setProperty('--scribe-slash-height', `${Math.max(120, Math.floor(placement === 'above' ? above : below))}px`);
-		};
-		measure();
-		const observer = new win.ResizeObserver(measure);
-		observer.observe(pane);
-		observer.observe(field);
-		win.addEventListener('resize', measure);
-		return () => {
-			observer.disconnect();
-			win.removeEventListener('resize', measure);
-		};
-	}, [visible, panel]);
+	useComposerPopoverPosition(list, visible);
 
 	function dismiss() {
+		launcher?.close();
 		if (panelRef.current) settlePanel(panelRef.current.closeValue, true);
 		setSelection({ key, index: -1, dismissed: true });
 		setClosedInput(instruction);
 	}
 
 	function choose(choice: Choice, complete: boolean) {
-		if (choice.command && (!complete || choice.command.name === 'skills')) {
-			if (choice.reason) return;
-			options?.run(choice.command, ui);
+		if (choice.reason) return;
+		if (choice.apply) {
+			choice.apply();
 			return;
 		}
-		const next = choice.complete();
+		if (choice.command && (!complete || choice.command.name === 'skills')) {
+			if (manual) dismiss();
+			options?.run(choice.command, ui, manual);
+			return;
+		}
+		const next = choice.complete?.();
+		if (!next) return;
+		if (manual) launcher?.close();
 		onComplete(next.instruction, next.caret);
 		const completed = !choice.command && parseSlashCommand(next.instruction);
 		if (completed) setSelection({ key: argumentKey(completed, completed.args.toLowerCase()), index: -1, dismissed: true });
@@ -355,8 +415,9 @@ export function useSlashSuggestions({
 				const next = enabled[(enabled.indexOf(index) + step + enabled.length) % enabled.length]!;
 				setSelection({ key, index: next, dismissed: false });
 			}
-		} else if (selected && (event.key === 'Tab' || (event.key === 'Enter' && selected.command))) {
-			if (selected.reason && event.key === 'Tab') return false;
+		} else if (selected && (event.key === 'Tab' || (event.key === 'Enter' && (selected.command || selected.apply)))) {
+			if (manual && instruction && event.key === 'Tab') return false;
+			if (event.key === 'Tab' && (selected.reason || !selected.complete && !selected.apply)) return false;
 			event.preventDefault();
 			if (!event.repeat) choose(selected, event.key === 'Tab');
 		} else return false;
@@ -365,11 +426,12 @@ export function useSlashSuggestions({
 
 	return {
 		activeId, id: visible ? id : undefined, dismiss, onKeyDown, ui,
-		menu: visible && <div ref={list} id={id} role={panel ? undefined : 'listbox'} aria-label={text.label}
+		menu: visible && <div ref={list} id={id} role={panel ? undefined : 'listbox'} aria-label={panel ? undefined : text.label}
 			className="scribe-context-popover scribe-slash-suggestions">
 			{panel ? <SlashPanelView panel={panel} settle={settlePanel} text={text} /> : choices.map((choice, row) =>
 				<button key={`${choice.command?.name ?? choice.label}:${row}`} type="button" tabIndex={-1} role="option"
-					id={`${id}-${row}`} aria-selected={row === index} aria-disabled={Boolean(choice.reason)} title={choice.reason}
+					id={`${id}-${row}`} aria-selected={row === index} aria-disabled={Boolean(choice.reason)}
+					onPointerEnter={({ currentTarget }) => updateOverflowTitle(currentTarget, currentTarget.querySelector('small'))}
 					onMouseDown={(event) => event.preventDefault()}
 					onClick={() => choose(choice, !choice.command)}>
 					{choice.icon && <ChatIcon name={choice.icon} />}
