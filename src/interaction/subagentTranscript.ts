@@ -77,11 +77,16 @@ export function subagentChatTurns(agent: SubagentView, prefix: string) {
 			if (message?.role === 'user' && (index > 0 || message.id?.startsWith('subagent:') || message.id?.startsWith('steer:'))) boundaries.push(index);
 		}
 		let startedAt = state.createdAt;
+		const skillFolders = new Set(run.request.skillScope);
 		return boundaries.map((start, index) => {
 			const next = boundaries[index + 1];
 			const input = index ? messages[start] : undefined;
-			const request = input ? { conversationId: run.request.conversationId, instruction: input.content, refs: [] } : run.request;
 			const slice = messages.slice(start, next).filter((item): item is Message => Boolean(item));
+			for (const message of slice) if (message.role === 'user') {
+				for (const folder of message.skillScope ?? []) skillFolders.add(folder);
+			}
+			const request = input ? { conversationId: run.request.conversationId, instruction: input.content,
+				refs: [], skillScope: [...skillFolders] } : run.request;
 			const last = slice.at(-1);
 			const outgoing = last && ended.has(last);
 			const finished = next !== undefined || (outgoing && state.status === 'running');

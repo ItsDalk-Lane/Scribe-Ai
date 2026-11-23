@@ -1,5 +1,6 @@
-import type { CustomProviderSettings, ModelOverride, ScribeSettings, SkillSettings, WritingRules } from '../../types';
-import { writingRulePath } from '../context/writingRules';
+import type { CustomProviderSettings, LegacyWritingRules, ModelOverride, ScribeSettings, SkillSettings } from '../../types';
+import { normalizeMcpSettings } from '../../tools/external/mcpConfig';
+import { normalizeVaultRelativePath } from '../../tools/support/pathUtils';
 import { DEFAULT_SUBAGENT_SETTINGS, normalizeSubagentSettings } from './subagentSettings';
 import { chatModelKey, isThinkingLevel } from './thinking';
 
@@ -26,6 +27,7 @@ export const DEFAULT_SETTINGS: ScribeSettings = {
 	spillCleanupDays: 30,
 	subagents: DEFAULT_SUBAGENT_SETTINGS,
 	skillSettings: normalizeSkillSettings(),
+	mcp: normalizeMcpSettings(undefined),
 	communication: { credentialIds: {}, proxyUrl: '', providerNames: {}, baseUrls: {}, protocols: {} },
 };
 
@@ -39,10 +41,10 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 				.filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
 		);
 	};
-	const legacyRules = (value: WritingRules | undefined): WritingRules | undefined => {
+	const legacyRules = (value: LegacyWritingRules | undefined): LegacyWritingRules | undefined => {
 		const vault = typeof value?.vault === 'string' ? value.vault.trim() : '';
 		const folders = Object.fromEntries(Object.entries(strings(value?.folders)).flatMap(([path, rule]) => {
-			const folder = writingRulePath(path);
+			const folder = normalizeVaultRelativePath(path);
 			return folder && rule.trim() ? [[folder, rule.trim()]] : [];
 		}));
 		return vault || Object.keys(folders).length ? { vault, folders } : undefined;
@@ -121,6 +123,7 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 			: DEFAULT_SETTINGS.spillCleanupDays,
 		subagents: normalizeSubagentSettings(stored.subagents),
 		skillSettings: normalizeSkillSettings(stored.skillSettings),
+		mcp: normalizeMcpSettings(stored.mcp),
 		...(writingRules ? { writingRules } : {}),
 		...(writingRulesBackup ? { writingRulesBackup } : {}),
 		communication: {

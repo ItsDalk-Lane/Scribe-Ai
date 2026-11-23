@@ -7,6 +7,9 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { App } from 'obsidian';
+import { finishGoalRound, goalRoundInstruction, restoreChatGoal } from '../../interaction/chatGoal';
+import type { ChatGoal } from '../../interaction/chatGoal';
+import { approvedPlanRequest, submittedPlan } from '../../interaction/chatPlan';
 import { conversationMetrics, runUsage } from '../../interaction/chatMetrics';
 import { restoreExecution } from '../../interaction/context';
 import { createAgentLoop } from '../../runtime/agentLoop';
@@ -195,18 +198,117 @@ void test('plan and review do not regain write permissions and review sends only
 	assert.ok(requests.at(-1)?.messages.every(({ content }) => !content.includes(reviewMaterial)));
 });
 
-void test('writing rules are read from AGENTS.md in the vault root and matching folders on every question', async (t) => {
+void test('a confirmed plan keeps its attachments and a saved goal resumes with checked evidence', async (t) => {
+	const { cwd, connect, directory } = await fixture(t);
+	const source = '会议.md';
+	const index = '索引.md';
+	const body = '# 整理会议纪要\n\n## 执行范围\n- 核对会议日期并生成索引。\n\n## 验收条件\n- 核对 [[会议.md]] 的会议日期\n- 生成 [[索引.md]]';
+	await writeFile(join(cwd, source), '# 会议\n\n日期是 11 月 23 日。');
+	const write = { id: 'index-write', name: 'Write', input: { file_path: index, content: '# 会议索引\n\n[[会议.md]]' } };
+	const read = { id: 'source-read', name: 'Read', input: { file_path: source } };
+	const sessions = connect((request) => {
+		if (request.system?.includes('本次为只读计划模式')) {
+			assert.ok(!request.tools.some(({ name }) => name === 'Write'));
+			return reply(`<!-- scribe-plan -->\n${body}\n<!-- /scribe-plan -->`);
+		}
+		const userIndex = request.messages.findLastIndex(({ role }) => role === 'user');
+		const currentUser = request.messages[userIndex]?.content ?? '';
+		const currentResults = request.messages.slice(userIndex);
+		if (!request.system?.includes('聊天目标的自动执行轮次')) {
+			assert.ok(currentUser.includes(body));
+			assert.ok(currentUser.includes('原始引文'));
+			return request.messages.some(({ toolCallId }) => toolCallId === write.id) ? reply('索引已生成。') : reply('', [write]);
+		}
+		assert.ok(currentUser.includes(body));
+		assert.ok(currentUser.includes('原始引文'));
+		if (!currentUser.includes('上轮已核对')) {
+			const readCurrent = currentResults.some(({ toolCallId }) => toolCallId === read.id);
+			return readCurrent ? reply('日期已核对。\n<!-- scribe-goal-report: {"checks":[{"criterion":1,"evidence":"日期是 11 月 23 日","notePaths":["会议.md"]}],"remaining":["生成 [[索引.md]]"]} -->')
+				: reply('', [read]);
+		}
+		assert.ok(currentUser.includes('日期是 11 月 23 日'));
+		const readIndex = { id: 'index-read', name: 'Read', input: { file_path: index } };
+		const readCurrent = currentResults.some(({ toolCallId }) => toolCallId === readIndex.id);
+		return readCurrent ? reply('索引已核对。\n<!-- scribe-goal-report: {"checks":[{"criterion":2,"evidence":"索引包含会议纪要链接","notePaths":["索引.md"]}],"remaining":[]} -->')
+			: reply('', [readIndex]);
+	});
+	t.after(() => sessions.dispose());
+	const conversationId = await sessions.createConversation();
+	const store = createConversationStore(directory);
+	const sourceRequest = { conversationId, instruction: '整理会议纪要', refs: [
+		{ path: source, kind: 'file' as const }, { path: join(cwd, '..', 'other.md'), kind: 'file' as const, addedExternal: true as const },
+	], chatQuotes: ['原始引文'] };
+	await sessions.submit({ ...sourceRequest, intent: 'plan' }, {}, undefined, { executionMode: 'full-access' }).result;
+	await assert.rejects(access(join(cwd, index)), { code: 'ENOENT' });
+	const savedPlan = (await store.load(conversationId)).runs.at(-1)!;
+	assert.equal(submittedPlan({ ...savedPlan, state: { ...savedPlan.state, status: 'partial' } }), undefined);
+	const plan = submittedPlan(savedPlan);
+	assert.ok(plan);
+	assert.deepEqual(plan.criteria, ['核对 [[会议.md]] 的会议日期', '生成 [[索引.md]]']);
+	const approved = approvedPlanRequest(plan);
+	assert.equal(approved.intent, undefined);
+	assert.deepEqual(approved.refs, [{ path: source, kind: 'file' }]);
+	await sessions.submit(approved, {}, undefined, { executionMode: 'ask' }).result;
+	assert.match(await readFile(join(cwd, index), 'utf8'), /\[\[会议\.md\]\]/u);
+
+	const goal: ChatGoal = { objective: plan.title, status: 'active', maxRounds: 5, usedRounds: 0, totalRounds: 0,
+		criteria: plan.criteria, plan: plan.markdown, refs: plan.request.refs, chatQuotes: plan.request.chatQuotes };
+	await store.saveGoal(conversationId, goal);
+	const runGoal = (value: ChatGoal) => sessions.submit({ conversationId, instruction: value.objective, refs: value.refs ?? [],
+		chatQuotes: value.chatQuotes, goalRound: true, goalContext: goalRoundInstruction(value) }, {}, undefined, { executionMode: 'ask' }).result;
+	const checkpoint = finishGoalRound({ ...goal, usedRounds: 1, totalRounds: 1 }, await runGoal(goal));
+	assert.equal(checkpoint.status, 'active');
+	assert.equal(checkpoint.progress?.checks.length, 1);
+	assert.deepEqual(checkpoint.progress?.remaining, ['生成 [[索引.md]]']);
+	await store.saveGoal(conversationId, checkpoint);
+	const restored = restoreChatGoal(await createConversationStore(directory).loadGoal(conversationId));
+	assert.ok(restored);
+	assert.equal(restored.status, 'paused');
+	assert.deepEqual(restored.progress, checkpoint.progress);
+	const resumed = { ...restored, status: 'active' as const, usedRounds: 1, totalRounds: 2 };
+	const completed = finishGoalRound(resumed, await runGoal(resumed));
+	assert.equal(completed.status, 'complete');
+	assert.equal(completed.progress?.checks.length, 2);
+});
+
+void test('goal work stops while a tool waits for the user and resumes for actual work', async (t) => {
+	const { cwd, connect } = await fixture(t);
+	const output = join(cwd, '..', 'goal-output.md');
+	const transitions: boolean[] = [];
+	let working = false;
+	let prompted = false;
+	const sessions = connect((request) => {
+		assert.equal(working, true);
+		return request.messages.some(({ toolCallId }) => toolCallId === 'goal-output') ? reply('已生成笔记。')
+			: reply('', [{ id: 'goal-output', name: 'Write', input: { file_path: output, content: '# 结果' } }]);
+	});
+	t.after(() => sessions.dispose());
+	const conversationId = await sessions.createConversation();
+	const run = sessions.submit({ conversationId, instruction: '生成笔记', refs: [], goalRound: true }, {
+		onWork: (_taskId, active) => {
+			working = active;
+			transitions.push(active);
+		},
+		approve: async () => {
+			prompted = true;
+			assert.equal(working, false);
+			return true;
+		},
+	}, undefined, { executionMode: 'ask' });
+	await run.result;
+	assert.equal(prompted, true);
+	assert.equal(await readFile(output, 'utf8'), '# 结果');
+	assert.deepEqual(transitions, [true, false, true, false, true, false, true, false]);
+});
+
+void test('each question reads only the vault root writing rules with or without attachments', async (t) => {
 	const { cwd, connect, ruleLookups, setActiveNote } = await fixture(t);
-	await Promise.all(['会议/项目', '读书', '会议存档'].map((folder) => mkdir(join(cwd, folder), { recursive: true })));
+	await mkdir(join(cwd, '会议/项目'), { recursive: true });
 	await Promise.all(Object.entries({
 		'AGENTS.md': '全库用短段落。',
 		'会议/AGENTS.md': '会议用项目符号。',
 		'会议/项目/AGENTS.md': '项目会议结尾列出负责人。',
 		'会议/项目/纪要.md': '会议记录。',
-		'读书/AGENTS.md': '读书笔记结尾写感想。',
-		'读书/摘录.md': '摘录。',
-		'会议存档/旧纪要.md': '旧会议记录。',
-		'普通笔记.md': '普通笔记。',
 	}).map(([path, content]) => writeFile(join(cwd, path), content)));
 	const requests: ModelRequest[] = [];
 	const sessions = connect((request) => {
@@ -221,31 +323,24 @@ void test('writing rules are read from AGENTS.md in the vault root and matching 
 		return requests.at(-1)!;
 	};
 
-	setActiveNote('读书/摘录.md');
+	setActiveNote('会议/项目/纪要.md');
 	const meeting = await ask({ refs: [{ path: '会议/项目/纪要.md' }] });
-	assert.match(meeting.system ?? '', /全库用短段落。[\s\S]*会议用项目符号。[\s\S]*项目会议结尾列出负责人。/u);
-	assert.match(meeting.system ?? '', /文件夹规则优先于全库规则，较深的文件夹规则优先于上级文件夹规则/u);
-	assert.doesNotMatch(meeting.system ?? '', /结尾写感想/u);
-	assert.doesNotMatch(JSON.stringify(meeting.messages), /全库用短段落|会议用项目符号/u);
-	assert.deepEqual([...new Set(ruleLookups)].sort(), ['AGENTS.md', '会议/AGENTS.md', '会议/项目/AGENTS.md']);
+	assert.match(meeting.system ?? '', /全库用短段落/u);
+	assert.doesNotMatch(meeting.system ?? '', /会议用项目符号|列出负责人/u);
+	assert.doesNotMatch(JSON.stringify(meeting.messages), /全库用短段落/u);
 
-	const books = await ask();
-	assert.match(books.system ?? '', /读书笔记结尾写感想/u);
-	assert.doesNotMatch(JSON.stringify(books), /会议用项目符号|列出负责人/u);
-	assert.doesNotMatch((await ask({ refs: [{ path: '会议存档/旧纪要.md' }] })).system ?? '', /会议用项目符号/u);
+	const noAttachment = await ask();
+	assert.match(noAttachment.system ?? '', /全库用短段落/u);
+	assert.doesNotMatch(noAttachment.system ?? '', /会议用项目符号|列出负责人/u);
 
-	await writeFile(join(cwd, '会议/AGENTS.md'), '会议改用表格。');
+	await writeFile(join(cwd, 'AGENTS.md'), '全库改用表格。');
 	const edited = await ask({ refs: [{ path: '会议', kind: 'folder' }] });
-	assert.match(edited.system ?? '', /会议改用表格/u);
-	assert.doesNotMatch(JSON.stringify(edited), /会议用项目符号|结尾列出负责人/u);
-
-	await rm(join(cwd, '会议/AGENTS.md'));
-	const removed = await ask({ refs: [{ path: '会议', kind: 'folder' }] });
-	assert.match(removed.system ?? '', /全库用短段落/u);
-	assert.doesNotMatch(JSON.stringify(removed), /会议改用表格/u);
+	assert.match(edited.system ?? '', /全库改用表格/u);
+	assert.doesNotMatch(edited.system ?? '', /全库用短段落|会议用项目符号/u);
 
 	await writeFile(join(cwd, 'AGENTS.md'), '');
-	assert.doesNotMatch(JSON.stringify(await ask({ refs: [{ path: '普通笔记.md' }] })), /全库用短段落/u);
+	assert.doesNotMatch((await ask()).system ?? '', /全库改用表格|会议用项目符号|列出负责人/u);
+	assert.deepEqual([...new Set(ruleLookups)], ['AGENTS.md']);
 });
 
 void test('writing rules cannot be loaded by following a symlink outside the vault', { skip: process.platform === 'win32' }, async (t) => {

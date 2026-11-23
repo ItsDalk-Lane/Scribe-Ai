@@ -146,7 +146,11 @@ function message(value: unknown): boolean {
 function request(value: unknown): value is TaskRequest {
 	return record(value) && text(value.conversationId) && text(value.instruction) && Array.isArray(value.refs)
 		&& (value.intent === undefined || value.intent === 'plan' || value.intent === 'review')
+		&& (value.target === undefined || (value.intent === undefined && record(value.target)
+			&& (value.target.kind === 'mcp' || value.target.kind === 'agent')
+			&& text(value.target.id) && Boolean(value.target.id.trim()) && text(value.target.label) && Boolean(value.target.label.trim())))
 		&& (value.goalRound === undefined || (value.goalRound === true && value.intent === undefined))
+		&& (value.goalContext === undefined || (value.goalRound === true && text(value.goalContext) && value.goalContext.length <= 128_000))
 		&& (value.reviewMaterial === undefined || (value.intent === 'review' && text(value.reviewMaterial)
 			&& Buffer.byteLength(value.reviewMaterial) <= MAX_REVIEW_MATERIAL_BYTES))
 		&& validSkillMentions(value.skillMentions) && validSkillScope(value.skillScope) && validSkillScope(value.skillNotePaths) && validSkillScope(value.inheritedSkillIds)

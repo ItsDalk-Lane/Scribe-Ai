@@ -1,26 +1,12 @@
 import { realpath, stat } from 'node:fs/promises';
-import { isAbsolute, posix, resolve, win32 } from 'node:path';
+import { resolve } from 'node:path';
 import type { FileSystemAdapter, Vault } from 'obsidian';
 import { hasFileErrorCode, isWithinPath } from '../../tools/support/pathUtils';
-import type { NoteRef, WritingRules } from '../../types';
+import type { LegacyWritingRules } from '../../types';
 
 export const WRITING_RULE_FILENAME = 'AGENTS.md';
 
 export class WritingRuleChangedError extends Error {}
-
-export function writingRulePath(path: string): string | undefined {
-	if (!path.trim() || path.includes('\0') || isAbsolute(path) || win32.isAbsolute(path)) return;
-	const normalized = posix.normalize(path).replace(/\/$/u, '');
-	if (normalized === '.' || normalized === '..' || normalized.startsWith('../')) return;
-	return normalized;
-}
-
-function ruleFilename(folder?: string): string {
-	if (folder === undefined) return WRITING_RULE_FILENAME;
-	const relative = writingRulePath(folder);
-	if (!relative) throw new Error('请选择笔记库中的文件夹。');
-	return posix.join(relative, WRITING_RULE_FILENAME);
-}
 
 async function safeLocation(vault: Vault, path: string): Promise<string | undefined> {
 	const root = await realpath((vault.adapter as FileSystemAdapter).getBasePath());
@@ -33,8 +19,8 @@ async function safeLocation(vault: Vault, path: string): Promise<string | undefi
 	return actual === expected ? actual : undefined;
 }
 
-export async function readWritingRule(vault: Vault, folder?: string): Promise<string | undefined> {
-	const path = ruleFilename(folder);
+export async function readWritingRule(vault: Vault): Promise<string | undefined> {
+	const path = WRITING_RULE_FILENAME;
 	const file = vault.getFileByPath(path);
 	if (!file) return;
 	try {
@@ -47,8 +33,8 @@ export async function readWritingRule(vault: Vault, folder?: string): Promise<st
 	}
 }
 
-export async function saveWritingRule(vault: Vault, folder: string | undefined, value: string, expected: string | undefined): Promise<string> {
-	const path = ruleFilename(folder);
+export async function saveWritingRule(vault: Vault, value: string, expected: string | undefined): Promise<string> {
+	const path = WRITING_RULE_FILENAME;
 	const file = vault.getFileByPath(path);
 	const rule = value.trim() ? value : '';
 	if (file) {
@@ -61,10 +47,7 @@ export async function saveWritingRule(vault: Vault, folder: string | undefined, 
 	}
 	if (expected !== undefined) throw new WritingRuleChangedError();
 	if (!rule) return '';
-	const parent = posix.dirname(path);
-	if ((parent !== '.' && !vault.getFolderByPath(parent)) || !await safeLocation(vault, parent)) {
-		throw new Error('请选择笔记库中的文件夹。');
-	}
+	if (!await safeLocation(vault, '.')) throw new Error('无法安全编辑这份写作规则。');
 	try {
 		await vault.create(path, rule);
 	} catch (error) {
@@ -74,46 +57,25 @@ export async function saveWritingRule(vault: Vault, folder: string | undefined, 
 	return rule;
 }
 
-export async function migrateWritingRules(vault: Vault, rules: WritingRules): Promise<WritingRules | undefined> {
-	const scopes: [string | undefined, string][] = [[undefined, rules.vault], ...Object.entries(rules.folders)];
-	const preserved: [string | undefined, string][] = [];
-	for (const [folder, rule] of scopes) {
-		if (!rule) continue;
+export async function migrateWritingRules(vault: Vault, rules: LegacyWritingRules): Promise<LegacyWritingRules | undefined> {
+	let { vault: backup, folders } = rules;
+	if (backup) {
 		try {
-			const current = await readWritingRule(vault, folder);
-			if (current === undefined) await saveWritingRule(vault, folder, rule, undefined);
-			else if (current.trim() !== rule.trim()) preserved.push([folder, rule]);
+			const current = await readWritingRule(vault);
+			if (current === undefined) await saveWritingRule(vault, backup, undefined);
+			if (current === undefined || current.trim() === backup.trim()) backup = '';
 		} catch {
-			preserved.push([folder, rule]);
+			// 保留无法写入笔记的旧内容，方便用户恢复。
 		}
 	}
-	return preserved.length ? {
-		vault: preserved.find(([folder]) => folder === undefined)?.[1] ?? '',
-		folders: Object.fromEntries<string>(preserved.flatMap(([folder, rule]) => folder === undefined ? [] : [[folder, rule]])),
-	} : undefined;
+	return backup || Object.keys(folders).length ? { vault: backup, folders } : undefined;
 }
 
-export async function buildWritingRulesPrompt(vault: Vault, refs: NoteRef[], activeNote?: string): Promise<string | undefined> {
-	const targets: NoteRef[] = refs.length || !activeNote ? refs : [{ path: activeNote }];
-	const directories = new Set<string>();
-	for (const { path, kind } of targets) {
-		const local = writingRulePath(path);
-		if (!local) continue;
-		for (let folder = kind === 'folder' ? local : posix.dirname(local); folder !== '.'; folder = posix.dirname(folder)) {
-			directories.add(folder);
-		}
-	}
-	const scopes = [undefined, ...Array.from(directories).sort()];
-	const rules = await Promise.all(scopes.map((folder) => readWritingRule(vault, folder)));
-	const sections = rules.flatMap((rule, index) => {
-		if (!rule?.trim()) return [];
-		const folder = scopes[index];
-		return [`${folder === undefined ? '全库规则' : `文件夹 ${JSON.stringify(folder)}`}\n${rule.trim()}`];
-	});
-	if (!sections.length) return;
+export async function buildWritingRulesPrompt(vault: Vault): Promise<string | undefined> {
+	const rule = (await readWritingRule(vault))?.trim();
+	if (!rule) return;
 	return [
-		'本次适用的写作规则来自笔记库中的 AGENTS.md，只用于写作风格、结构和格式。本次用户明确提出的要求优先，操作范围、资料授权和工具权限仍由原有规则决定。',
-		'文件夹规则适用于该文件夹及其子文件夹。在各自的范围内合并无冲突的规则。有冲突时，文件夹规则优先于全库规则，较深的文件夹规则优先于上级文件夹规则。',
-		...sections,
+		'全库自定义指令来自笔记库根目录的 AGENTS.md，只用于写作风格、结构和格式。本次用户明确提出的要求优先，操作范围、资料授权和工具权限仍由原有规则决定。',
+		rule,
 	].join('\n\n');
 }

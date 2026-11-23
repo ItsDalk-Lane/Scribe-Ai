@@ -93,6 +93,7 @@ export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, t
 	}
 
 	const observed: RunObserver = {
+		onWork: observer.onWork,
 		onAutoReviewDenied: observer.onAutoReviewDenied,
 		retryConnection: observer.retryConnection,
 		onEvent(event) {

@@ -5,10 +5,11 @@ import { mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { parseChatGoal } from '../../interaction/chatGoal';
 import { SAVED_SHELL_JOB_LIMIT } from '../../tools/external/shellJobs';
 import type { SavedShellJob } from '../../tools/external/shellJobs';
 import { MissingConversationError } from '../../types';
-import type { ConversationEntry, ConversationStore, ConversationSummary, HistorySummary, QueuedMessage } from '../../types';
+import type { ConversationEntry, ConversationSnapshot, ConversationStore, ConversationSummary, HistorySummary, QueuedMessage } from '../../types';
 import {
 	ConversationRecordError, isMainEntry, isQueueEntry, isSavedShellJob, isSubagentEntry, isSubagentReportEntry,
 	parseConversationEntry, parseSavedShellJobs,
@@ -18,6 +19,8 @@ import { createSubagentRecordIndex } from './subagentRecords';
 
 const idPattern = /^(?!(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$)[A-Z0-9][A-Z0-9-]{0,95}$/i;
 const titleLimit = 120;
+const goalSuffix = '.goal.json';
+const goalSizeLimit = 1024 * 1024;
 const writeQueue = new Map<string, Promise<unknown>>();
 const deletedLogs = new Set<string>();
 const subagentIndexes = new Map<string, ReturnType<typeof createSubagentRecordIndex>>();
@@ -208,9 +211,13 @@ function consumeQueued(entries: ConversationEntry[], queue: Map<string, QueuedMe
 	if (first?.type !== 'start' && first?.type !== 'messages') throw new Error('排队消息缺少已发送的记录。');
 	const ids = messages.map(({ id }) => id);
 	if (new Set(ids).size !== ids.length) throw new Error('排队消息重复。');
+	const queuedTarget = messages[0]?.request.target;
+	const startedTarget = first.type === 'start' ? first.task.request.target : undefined;
 	const matches = first.type === 'start'
 		? ids.length === 1 && first.task.request.instruction === messages[0]?.request.instruction
-		: ids.every((id) => first.messages.some((message) => message.role === 'user' && message.id === `steer:${id}`));
+			&& startedTarget?.kind === queuedTarget?.kind && startedTarget?.id === queuedTarget?.id && startedTarget?.label === queuedTarget?.label
+		: messages.every(({ id, request }) => !request.target
+			&& first.messages.some((message) => message.role === 'user' && message.id === `steer:${id}`));
 	if (!matches) throw new Error('记录与排队消息不匹配。');
 	if (fifo && Array.from(queue.keys()).slice(0, ids.length).some((id, index) => id !== ids[index])) {
 		throw new Error('排队消息的顺序已经变更。');
@@ -257,9 +264,29 @@ export function createConversationStore(directory: string): ConversationStore {
 		return join(root, `${id}.jsonl`);
 	};
 	const titlePath = (id: string) => join(root, `${id}.title`);
+	const goalPath = (id: string) => join(root, `${id}${goalSuffix}`);
 	const archiveName = (id: string) => `${id}.archived`;
 	const archivePath = (id: string) => join(root, archiveName(id));
 	const compactionPath = (id: string) => join(root, `${id}.compaction.json`);
+	async function readGoal(id: string) {
+		const opened = await openIfExists(goalPath(id));
+		if (!opened) return undefined;
+		const { file, stat } = opened;
+		try {
+			if (stat.size > goalSizeLimit) throw new Error('目标记录过大。');
+			const saved = JSON.parse(await file.readFile('utf8')) as { conversationId?: unknown; goal?: unknown } | null;
+			const goal = saved?.goal === null ? null : parseChatGoal(saved?.goal);
+			if (saved?.conversationId !== id || goal === undefined) throw new Error('目标记录格式无效。');
+			return { goal, updatedAt: stat.mtimeMs };
+		} finally {
+			await file.close();
+		}
+	}
+	async function requireConversation(id: string, path: string) {
+		const opened = await openIfExists(path);
+		if (opened) await opened.file.close();
+		else if (!(await readGoal(id))?.goal) throw new MissingConversationError('对话不存在。');
+	}
 	async function readCompaction(id: string): Promise<HistorySummary | undefined> {
 		try {
 			const raw = await readSmallText(compactionPath(id), 30_000);
@@ -380,11 +407,15 @@ export function createConversationStore(directory: string): ConversationStore {
 			});
 			const chats: ConversationSummary[] = [];
 			const names = new Set(files.filter((file) => file.isFile()).map(({ name }) => name));
-			for (const name of names) {
-				if (!name.endsWith('.jsonl')) continue;
-				const id = name.slice(0, -6);
+			const ids = new Set([...names].flatMap((name) => name.endsWith('.jsonl') ? [name.slice(0, -6)]
+				: name.endsWith(goalSuffix) ? [name.slice(0, -goalSuffix.length)] : []));
+			for (const id of ids) {
 				if (!idPattern.test(id)) continue;
-				const summary = await conversationSummary(join(root, name), id);
+				let summary = names.has(`${id}.jsonl`) ? await conversationSummary(logPath(id), id) : undefined;
+				if (!summary && names.has(`${id}${goalSuffix}`)) {
+					const saved = await readGoal(id).catch(() => undefined);
+					if (saved?.goal) summary = { id, title: saved.goal.objective.trim().replace(/\s+/g, ' ').slice(0, 80), updatedAt: saved.updatedAt };
+				}
 				if (!summary) continue;
 				const [title, unreadResult] = await Promise.all([
 					readSmallText(titlePath(id), titleLimit * 4).catch(() => undefined),
@@ -401,15 +432,34 @@ export function createConversationStore(directory: string): ConversationStore {
 			const path = logPath(id);
 			await writeQueue.get(path.toLowerCase())?.catch(() => {});
 			const opened = await openIfExists(path);
-			if (!opened) return { id, runs: [] };
-			try {
-				const snapshot = await replayConversation(id, readRecords(opened.file, opened.stat.size));
-				const compact = await readCompaction(id);
-				if (compact && snapshot.runs.some(({ state }) => state.taskId === compact.throughTaskId)) snapshot.manualCompaction = compact;
-				return snapshot;
-			} finally {
-				await opened.file.close();
+			let snapshot: ConversationSnapshot = { id, runs: [] };
+			if (opened) {
+				try {
+					snapshot = await replayConversation(id, readRecords(opened.file, opened.stat.size));
+					const compact = await readCompaction(id);
+					if (compact && snapshot.runs.some(({ state }) => state.taskId === compact.throughTaskId)) snapshot.manualCompaction = compact;
+				} finally {
+					await opened.file.close();
+				}
 			}
+			if (!snapshot.runs.length && !snapshot.queue?.length && (await readGoal(id).catch(() => undefined))?.goal) snapshot.hasGoal = true;
+			return snapshot;
+		},
+		async loadGoal(id) {
+			const path = logPath(id);
+			return enqueue(path, async () => deletedLogs.has(path.toLowerCase()) ? null : (await readGoal(id))?.goal);
+		},
+		async saveGoal(id, goal) {
+			const path = logPath(id);
+			const valid = goal === null ? null : parseChatGoal(goal);
+			if (valid === undefined) throw new Error('目标记录格式无效。');
+			const data = JSON.stringify({ conversationId: id, goal: valid });
+			if (Buffer.byteLength(data) > goalSizeLimit) throw new Error('目标记录过大。');
+			await enqueue(path, async () => {
+				if (deletedLogs.has(path.toLowerCase())) throw new MissingConversationError('对话已删除。');
+				await mkdir(root, { recursive: true, mode: 0o700 });
+				await writeAtomically(goalPath(id), data);
+			});
 		},
 		async getQueued(id) {
 			const path = logPath(id);
@@ -482,18 +532,14 @@ export function createConversationStore(directory: string): ConversationStore {
 			const value = title.trim();
 			if (!value || value.length > titleLimit) throw new Error('请输入 1 到 120 个字符的对话名称。');
 			await enqueue(path, async () => {
-				const opened = await openIfExists(path);
-				if (!opened) throw new Error('对话不存在。');
-				await opened.file.close();
+				await requireConversation(id, path);
 				await writeAtomically(titlePath(id), value);
 			});
 		},
 		async setArchived(id, archived) {
 			const path = logPath(id);
 			await enqueue(path, async () => {
-				const opened = await openIfExists(path);
-				if (!opened) throw new MissingConversationError('对话不存在。');
-				await opened.file.close();
+				await requireConversation(id, path);
 				if (archived) await writeAtomically(archivePath(id), '1\n');
 				else await unlinkIfExists(archivePath(id));
 			});
@@ -515,6 +561,7 @@ export function createConversationStore(directory: string): ConversationStore {
 			await enqueue(path, () => enqueue(pointer, async () => {
 				const selected = await readPointer(pointer);
 				await unlinkIfExists(shellJobsPath(id));
+				await unlinkIfExists(goalPath(id));
 				await unlinkIfExists(titlePath(id));
 				await unlinkIfExists(archivePath(id));
 				await unlinkIfExists(compactionPath(id));

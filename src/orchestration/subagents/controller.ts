@@ -9,12 +9,12 @@ import { createTask } from '../taskManager';
 import { isSteeringMessage, latestIncompleteReply } from '../../runtime/continuationText';
 import type {
 	ConversationSnapshot, ConversationStore, ExecutionMode, Message, ModelRequest, ModelService, RunContext, RunEvent, RunObserver,
-	RunState, SavedRun, SavedSubagentEntry, ScribeSettings, SubagentController, SubagentIdentity, SubagentNote,
+	RunState, SavedRun, SavedSubagentEntry, ScribeSettings, SkillMention, SubagentController, SubagentIdentity, SubagentNote,
 	SubagentRecord, SubagentReport, SubagentRequest, SubagentSnapshot, SubagentView, Task,
 } from '../../types';
 
 type Model = RunContext['model'];
-type OriginatingRun = Pick<RunContext, 'task' | 'model' | 'history' | 'signal' | 'permissions' | 'skillRun'>;
+type OriginatingRun = Pick<RunContext, 'task' | 'model' | 'history' | 'signal' | 'permissions' | 'skillRun' | 'observer'>;
 type StartRecord = Extract<SubagentRecord, { kind: 'create' }>;
 type RunEntry = Extract<SubagentRecord, { kind: 'run' }>['entry'];
 type ReviewRecord = Extract<SubagentRecord, { kind: 'review' }>;
@@ -383,8 +383,9 @@ export function createSubagentController(
 
 	function launch(group: Group, agent: Agent, task: Task, mode: ExecutionMode | undefined, options: {
 		creating?: boolean; restored?: SavedRun; parentSignal?: AbortSignal; beforeRun?: () => Promise<void>;
+		onWork?: RunObserver['onWork'];
 	} = {}) {
-		const { creating, restored, parentSignal, beforeRun } = options;
+		const { creating, restored, parentSignal, beforeRun, onWork } = options;
 		parentSignal?.throwIfAborted();
 		const { mode: delegation, maxConcurrent } = normalizeSubagentSettings(settings.subagents);
 		if (disposed || delegation === 'off') throw new Error('子 Agent 已关闭。');
@@ -431,6 +432,7 @@ export function createSubagentController(
 		const done = ready.then(async ({ selected, options }) => {
 			const state = await runChild(task, selected, signal, {
 				onEvent: update,
+				onWork,
 				approve: (approval, pending) => ask(group, agentId, { kind: 'approval', approval }, pending),
 				confirmResume: restored ? (preview, pending) => ask(group, agentId, { kind: 'send', preview }, pending) : undefined,
 				retryConnection: async (pending) => {
@@ -455,6 +457,7 @@ export function createSubagentController(
 			else viewOf(agent, { status: restored ? 'interrupted' : 'failed' });
 			publish(group, reason(error));
 		}).finally(() => {
+			onWork?.(task.id, false);
 			if (agent.active?.controller === controller) delete agent.active;
 			publish(group);
 		});
@@ -497,13 +500,15 @@ export function createSubagentController(
 		const reasoning = input.reasoning_effort ?? (model === base.model && providerId === base.providerId ? base.reasoning : undefined);
 		return selectModel({ providerId, model, reasoning });
 	}
-	function taskFor(group: Group, instruction: string, source?: Task['request'], quotes = false, caller?: OriginatingRun) {
+	function taskFor(group: Group, instruction: string, source?: Task['request'], quotes = false, caller?: OriginatingRun, allowMcp = false) {
+		const target = caller?.task.request.target ?? source?.target;
 		return createTask({ conversationId: group.id, instruction, refs: source?.refs ?? [],
 			...(source?.skillScope && { skillScope: source.skillScope }),
 				...(source?.skillNotePaths && { skillNotePaths: source.skillNotePaths }),
 			...(source && { approvalSource: source.approvalSource ?? source.instruction,
 				...caller?.skillRun?.delegation() }),
 			...(quotes && source?.chatQuotes?.length ? { chatQuotes: source.chatQuotes } : {}),
+			...(allowMcp && target?.kind === 'mcp' && { target: { ...target } }),
 			...(caller && { subagentCallerTaskId: caller.task.id }) });
 	}
 	function summarize({ id, parentId, name, status, closed, role, model }: SubagentView) {
@@ -583,20 +588,25 @@ export function createSubagentController(
 				await writeReview(group, item.agentId, { ...record, disposition: 'blocked', reason: `${input.reason}\n${stopReason}` });
 				return `${stopReason} 请先判断能否用现有资料修正并核对，可以就自己修。否则先完成其余工作，在最终答复标出本项未通过、具体卡点，并只问一个关键问题。`;
 			}
-			await launch(group, agent, taskFor(group, input.message!, latest.request, false, caller),
-				caller.permissions.executionMode, { parentSignal: caller.signal, beforeRun: () => writeReview(group, item.agentId, record) });
+			await launch(group, agent, taskFor(group, input.message!, latest.request, false, caller, !agent.create.readOnly),
+				caller.permissions.executionMode, { parentSignal: caller.signal, onWork: caller.observer.onWork,
+					beforeRun: () => writeReview(group, item.agentId, record) });
 			return JSON.stringify({ result_id: note.id, status: 'returned', agent: summarize(agent.view), attempt: attempts + 1 });
 		}
 		await writeReview(group, item.agentId, record);
 		return JSON.stringify({ result_id: note.id, status: disposition === 'blocked' ? 'blocked' : 'passed',
 			path: note.path, ...(disposition === 'blocked' && { guidance: '先用现有资料自行修正并核对。若仍无法完成，交付其他可做部分，在正式答复标明本项未通过并只问一个关键问题。' }) });
 	}
-	function connect(ctx: RunContext, current: () => RunState | undefined, agentId?: string, readOnly = false) {
+	async function connect(ctx: RunContext, current: () => RunState | undefined, agentId?: string, readOnly = false,
+		direct?: { role: string; skills: readonly SkillMention[] }) {
 		const caller: OriginatingRun = ctx;
 		const group = groupFor(caller.task.request.conversationId);
 		const actor = agentId ?? root;
 		const options = normalizeSubagentSettings(settings.subagents);
-		if (options.mode === 'off') return;
+		if (options.mode === 'off') {
+			if (direct) throw new Error('子 Agent 已关闭。');
+			return;
+		}
 		const ancestry = () => {
 			let depth = 0;
 			for (let id = agentId; id; id = find(group, id).view.parentId) depth++;
@@ -623,6 +633,8 @@ export function createSubagentController(
 		};
 		ctx.acceptInbox = (ids) => markDelivered(group, ids);
 		const canSpawn = ancestry() < options.maxDepth;
+		const userSelectedAgent = !agentId && caller.task.request.target?.kind === 'agent';
+		const canModelSpawn = canSpawn && !userSelectedAgent;
 		const activeChildren = () => Array.from(group.agents.values()).some((agent) =>
 			Boolean(agent.active) && agent.view.parentId === agentId && callerOf(agent) === caller.task.id);
 		const pending = () => {
@@ -644,14 +656,17 @@ export function createSubagentController(
 		const roles = new Map([...BUILTIN_SUBAGENT_ROLES, ...options.roles].map((role) => [role.name, role.description]));
 		const interrupted = Array.from(group.agents.values()).filter((agent) => agent.view.parentId === agentId
 			&& callerOf(agent) === caller.task.id && agent.view.status === 'interrupted').map(({ view }) => summarize(view));
+		const selected = direct && await spawn({ agent_type: direct.role, message: caller.task.request.instruction }, direct.skills);
 		ctx.subagentPrompt = [
 			notesForPrompt,
 			agentId && `你是子 Agent ${agentId}，只处理当前分工。发现说明与资料不符或遇到不确定的关键事实，立即用 ask_parent 提出具体问题，收到答复再继续，不猜测。结果完成后交付正文，会自动送给派发方。`,
-			canSpawn && (options.mode === 'auto'
+			selected && `用户选定的子 Agent ${selected.name}（${selected.id}）已开始处理这次请求。你负责答疑、核对和汇总它的结果。依赖它完成的操作要等它交付再核对，避免重复执行。`,
+			userSelectedAgent && !selected && '继续核对现有分工及结果，保留此前已完成的操作。',
+			canModelSpawn && (options.mode === 'auto'
 				? '先分析本任务。多个独立部分明显适合并行、能提高效率或质量时，用 spawn_agent 主动分工。简单任务、强依赖任务或用户要求独立完成时自行处理。'
 				: '只有用户明确要求使用子 Agent 才创建。'),
-			canSpawn && `可用角色：${JSON.stringify(Object.fromEntries(roles))}`,
-			canSpawn && '已有角色与职责匹配时填写 agent_type，否则用 system_instructions 给这一项编写专用系统提示词。无论哪种角色，具体任务和交付要求单独写在 message。',
+			canModelSpawn && `可用角色：${JSON.stringify(Object.fromEntries(roles))}`,
+			canModelSpawn && '已有角色与职责匹配时填写 agent_type，否则用 system_instructions 给这一项编写专用系统提示词。无论哪种角色，具体任务和交付要求单独写在 message。',
 			'派工后立即做自己能独立完成的步骤，避免重复分派。只有下一步依赖子任务结果、且暂时没有可做的独立步骤时才用 wait_agent。',
 			'收到子 Agent 发来的 question 时，优先核对并用 answer_subagent 回答；回答后再继续原步骤。',
 			'每次收到待核对的 result，先对照任务和证据核对正文，再调用 review_subagent_result。下一步立即使用选 use，稍后使用选 defer，之后用 read_subagent_result 和所给路径重读。对于不达标的稿选 revise 指明错误、稳定的 error_key 和修改要求。相同关键错误沿用同一个 error_key。',
@@ -660,7 +675,7 @@ export function createSubagentController(
 			interrupted.length > 0 && `这些子任务在上次运行时中断。不要空等，可用 followup_task 交代剩余工作，也可以自行完成或明确说明卡点：${JSON.stringify(interrupted)}`,
 			'默认只分配必要上下文。仅在用户明确指定另一家服务商时请求切换服务商。',
 		].filter(Boolean).join('\n');
-		async function spawn(input: Input) {
+		async function spawn(input: Input, directSkills?: readonly SkillMention[]) {
 			const live = normalizeSubagentSettings(settings.subagents);
 			if (disposed || live.mode === 'off') throw new Error('子 Agent 已关闭。');
 			if (!canSpawn || ancestry() >= live.maxDepth) throw new Error('已达允许的分工层数。');
@@ -688,12 +703,15 @@ export function createSubagentController(
 				readOnly: readOnly || role.readOnly, allowProvider: Boolean(role.model) || sameProvider,
 				modelOrigin: role.model ? modelOrigin?.(model) : callerOrigin };
 			const child = { create, view: { ...identity, status: 'idle' as const, runs: [] } };
-			await launch(group, child, taskFor(group, input.message!, caller.task.request, input.fork_turns === 'all', caller),
-				caller.permissions.executionMode, { creating: true, parentSignal: caller.signal });
+			const task = taskFor(group, input.message!, caller.task.request, Boolean(directSkills) || input.fork_turns === 'all', caller, !create.readOnly);
+			// 直接分派的技能由用户选定，无需等待主模型先收到同一份说明。
+			if (directSkills?.length) task.request.inheritedSkills = directSkills.map(({ id, name }) => ({ id, name }));
+			await launch(group, child, task,
+				caller.permissions.executionMode, { creating: true, parentSignal: caller.signal, onWork: caller.observer.onWork });
 			return summarize(child.view);
 		}
 		ctx.subagents = {
-			canSpawn,
+			canSpawn: canModelSpawn,
 			canAskParent: Boolean(agentId),
 			async execute(name, raw, signal) {
 				signal.throwIfAborted();
@@ -701,7 +719,10 @@ export function createSubagentController(
 				const live = normalizeSubagentSettings(settings.subagents);
 				if (disposed || live.mode === 'off') throw new Error('子 Agent 已关闭。');
 				if (name === 'list_agents') return JSON.stringify(Array.from(group.agents.values(), ({ view }) => summarize(view)));
-				if (name === 'spawn_agent') return JSON.stringify(await spawn(input));
+				if (name === 'spawn_agent') {
+					if (!canModelSpawn) throw new Error('当前任务不能再启动子 Agent。');
+					return JSON.stringify(await spawn(input));
+				}
 				if (name === 'wait_agent') return wait(group, actor, input.targets, input.timeout_ms, signal);
 				if (name === 'ask_parent' && agentId) return askParent(group, actor, input.message!, signal);
 				if (name === 'answer_subagent') return answerQuestion(group, actor, input.question_id!, input.message!);
@@ -732,8 +753,8 @@ export function createSubagentController(
 						&& (review.status === 'pending' || review.status === 'returned' || review.status === 'blocked')) {
 						throw new Error('这项结果还未通过。请用验收操作处理待核对稿，自动返工停止后由主聊天自行核对修正。');
 					}
-					await launch(group, agent, taskFor(group, input.message!, caller.task.request, false, caller),
-						caller.permissions.executionMode, { parentSignal: caller.signal });
+					await launch(group, agent, taskFor(group, input.message!, caller.task.request, false, caller, !agent.create.readOnly),
+						caller.permissions.executionMode, { parentSignal: caller.signal, onWork: caller.observer.onWork });
 				} else if (name === 'interrupt_agent') await stop(group, target);
 				else if (name === 'close_agent') await close(group, agent);
 				else if (name === 'resume_agent') {

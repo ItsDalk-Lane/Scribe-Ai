@@ -13,6 +13,7 @@ import { normalizeSettings } from './orchestration/settings/defaults';
 import { updateChatThinking } from './orchestration/settings/thinking';
 import { createServices } from './services';
 import { sweepSpillFiles } from './tools/support/spillCleanup';
+import type { McpSettings } from './tools/external/mcpConfig';
 import type { ScribeServices, ScribeSettings } from './types';
 
 export default class ScribeAiPlugin extends Plugin {
@@ -40,7 +41,8 @@ export default class ScribeAiPlugin extends Plugin {
 		this.services = createServices(this.app, settings, this.manifest, () => this.saveSettings(), {
 			draft: (...args) => openSkillDraftReview(this.app, ...args),
 			install: (...args) => openGithubSkillReview(this.app, ...args),
-		});
+		}, (next) => this.saveMcpSettings(next));
+		this.app.workspace.onLayoutReady(() => this.services?.tools.mcp?.reconcile());
 		queueMicrotask(() => {
 			try { sweepSpillFiles({ cleanupPeriodDays: settings.spillCleanupDays }); } catch { /* Cleanup is best effort. */ }
 		});
@@ -66,6 +68,7 @@ export default class ScribeAiPlugin extends Plugin {
 
 	onunload() {
 		this.services?.orchestration.sessions.dispose();
+		this.services?.tools.mcp?.dispose();
 	}
 
 	openSubagent(conversationId: string, agentId: string) {
@@ -137,6 +140,14 @@ export default class ScribeAiPlugin extends Plugin {
 			} else if (settings.providerId === current.providerId && settings.model === current.model && (!selection || hasModel())) {
 				Object.assign(settings, selected);
 			}
+		});
+	}
+
+	private async saveMcpSettings(mcp: McpSettings): Promise<void> {
+		await this.enqueueSettingsSave(async () => {
+			const { settings } = this.services;
+			await this.saveData({ ...settings, mcp });
+			settings.mcp = mcp;
 		});
 	}
 

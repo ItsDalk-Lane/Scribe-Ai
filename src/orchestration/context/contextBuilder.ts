@@ -6,7 +6,7 @@ import { buildSystemPrompt } from './systemPrompt';
 import { shrinkToolResults, toolResultPreview } from './toolResultBudget';
 import type { ContextBuilder, ContextCompaction, Message, ModelRequest, RunContext, RunSummary, TaskRequest, ToolRegistry } from '../../types';
 
-export function taskMessage({ instruction, refs, chatQuotes, skillMentions, skillScope, skillNotePaths, intent }: TaskRequest): Message {
+export function taskMessage({ instruction, refs, chatQuotes, skillMentions, skillScope, skillNotePaths, intent, goalContext }: TaskRequest): Message {
 	if (intent === 'review') return { role: 'user', content: instruction };
 	const quotes = chatQuotes?.length ? `\n\n聊天中选中的引文（仅供参考）\n${JSON.stringify(chatQuotes)}` : '';
 	return {
@@ -15,7 +15,8 @@ export function taskMessage({ instruction, refs, chatQuotes, skillMentions, skil
 		...(skillScope && { skillScope }),
 		...(skillNotePaths && { skillNotePaths }),
 		...(instruction.includes('$') && { skillInputLength: instruction.length }),
-		content: (refs.length ? `${instruction}\n\n本次任务的资料引用：${JSON.stringify(refs)}` : instruction) + quotes,
+		content: (refs.length ? `${instruction}\n\n本次任务的资料引用：${JSON.stringify(refs)}` : instruction)
+			+ quotes + (goalContext ? `\n\n${goalContext}` : ''),
 	};
 }
 
@@ -209,10 +210,13 @@ export function createContextBuilder(registry: ToolRegistry): ContextBuilder {
 			const read = registry.find('read_skill');
 			const autoAllowed = Boolean(read && ctx.permissions.canCallTool(read));
 			const skills = await ctx.skillRun?.project(current, autoAllowed);
-			const tools = registry.all()
+			if (ctx.task.request.target?.kind === 'mcp' && !ctx.mcpRun) throw new Error('当前聊天无法调用 MCP 工具。');
+			await ctx.mcpRun?.ready((tool) => ctx.permissions.canCallTool(tool), ctx.signal);
+			const visibleTools = registry.all()
 				.filter((tool) => !skillToolNames.has(tool.name) || ctx.skillRun?.canUse(tool.name))
 				.filter((tool) => ctx.permissions.canCallTool(tool) && subagentToolVisible(tool.name, ctx.subagents))
-				.filter(({ name }) => !answering || canUseToolWhileAnswering(name))
+				.filter(({ name }) => !answering || canUseToolWhileAnswering(name));
+			const tools = visibleTools.filter((tool) => !tool.mcp)
 				.map(({ name, description, inputSchema }) => ({
 					name, description,
 					inputSchema: { ...inputSchema, properties: {
@@ -220,6 +224,8 @@ export function createContextBuilder(registry: ToolRegistry): ContextBuilder {
 						i: { type: 'string', description: '简体中文短句，说明当前操作要核对或完成的具体事项。' },
 					} },
 				}));
+			const mcpTools = ctx.mcpRun?.project(visibleTools, maxBytes / 4) ?? [];
+			const mcpTarget = ctx.mcpRun?.targetName();
 			const request: ModelRequest = {
 				...ctx.model,
 				...(skills?.beforeSend && { beforeSend: async () => {
@@ -228,6 +234,7 @@ export function createContextBuilder(registry: ToolRegistry): ContextBuilder {
 				} }),
 				system: [
 					buildSystemPrompt(ctx.sideChat, ctx.permissions.executionMode, ctx.writingRules, ctx.task.request.intent, ctx.task.request.goalRound),
+					mcpTarget && `用户本次点选的 MCP 服务器是 ${JSON.stringify(mcpTarget)}。请求中的外部操作优先使用这台服务器的工具，必要时先搜索它的工具。`,
 					skills?.guidance,
 					ctx.subagentPrompt,
 					answering && '先回答子 Agent 等待中的提问。可以读取回答所必需的资料。使用 answer_subagent 并带上该提问的 id；完成答疑后再继续原任务。',
@@ -235,7 +242,7 @@ export function createContextBuilder(registry: ToolRegistry): ContextBuilder {
 						JSON.stringify({ id, from, agentName, kind, status, text, questionId, path, inline, review })),
 				].filter(Boolean).join('\n'),
 				messages: [],
-				tools,
+				tools: [...tools, ...mcpTools],
 				signal: ctx.signal,
 				sessionId: ctx.task.request.intent === 'review' ? ctx.task.id : ctx.subagentId ?? ctx.task.request.conversationId,
 			};

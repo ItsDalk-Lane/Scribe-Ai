@@ -180,6 +180,37 @@ void test('saved conversations can be listed, reopened and appended independentl
 	assert.equal((await store.load('second')).runs.length, 1);
 });
 
+void test('a saved goal is discoverable before its first round and deletion fences off late writes', async (t) => {
+	const { directory, store } = await fixture(t);
+	const id = 'goal-chat';
+	const goal = { objective: '检查会议纪要', status: 'active' as const, maxRounds: 5, usedRounds: 0, totalRounds: 0 };
+	const reopened = createConversationStore(directory);
+	assert.equal(await reopened.loadGoal(id), undefined);
+	const saving = store.saveGoal(id, goal);
+	const loading = reopened.loadGoal(id);
+	await saving;
+	assert.equal((await loading)?.status, 'active');
+	assert.deepEqual((await reopened.list()).map(({ title }) => title), [goal.objective]);
+	assert.equal((await reopened.load(id)).hasGoal, true);
+	await reopened.rename(id, '会后整理');
+	await reopened.setArchived(id, true);
+	assert.equal((await reopened.list())[0]?.title, '会后整理');
+	assert.equal((await reopened.list())[0]?.archived, true);
+
+	await store.saveGoal(id, null);
+	assert.equal(await reopened.loadGoal(id), null);
+	assert.deepEqual(await reopened.list(), []);
+
+	await store.saveGoal(id, goal);
+	await store.append(id, [start(id, 'goal-round', goal.objective)]);
+	const fork = await reopened.fork(id, 'goal-round');
+	assert.equal(await reopened.loadGoal(fork.id), undefined);
+	const deleting = reopened.delete(id);
+	await Promise.all([deleting, assert.rejects(store.saveGoal(id, goal), /已删除/)]);
+	assert.equal(await reopened.loadGoal(id), null);
+	assert.deepEqual(await readdir(directory), [`${fork.id}.jsonl`]);
+});
+
 void test('renaming keeps the original transcript and ordering, and deletion removes only the selected chat', async (t) => {
 	const { directory, store } = await fixture(t);
 	await store.append('first', [start('first', 'one', '原始任务')]);
@@ -438,6 +469,7 @@ void test('a committed result advances a tool checkpoint even when the next reco
 void test('queued messages keep their original content and order until a durable start or insert consumes them', async (t) => {
 	const { directory, store } = await fixture(t);
 	const first = queued('primary', 'queued-a', '第一条\n  保留空白 🌱');
+	first.request.target = { kind: 'mcp', id: 'server', label: '服务' };
 	const second = queued('primary', 'queued-b', '带资料的第二条');
 	second.request.refs = [{ path: 'image.png' }, { path: 'note.md' }, { path: 'other.png' }];
 	const other = queued('other', 'queued-a', '其他对话');
@@ -453,19 +485,23 @@ void test('queued messages keep their original content and order until a durable
 		{ messages: [second], fifo: true }), /顺序/);
 
 	const edit = reopened.editQueued('primary', first.id, '修改后的消息\n下一行');
-	const staleStart = assert.rejects(reopened.append('primary', [start('primary', 'stale', first.request.instruction)],
-		{ messages: [first], fifo: true }), /已经变更/);
+	const stale = start('primary', 'stale', first.request.instruction);
+	stale.task.request.target = first.request.target;
+	const staleStart = assert.rejects(reopened.append('primary', [stale], { messages: [first], fifo: true }), /已经变更/);
 	await Promise.all([edit, staleStart]);
 	assert.deepEqual((await reopened.load('primary')).runs, []);
 	const edited = (await reopened.getQueued('primary'))[0]!;
 	assert.equal(edited.request.instruction, '修改后的消息\n下一行');
+	assert.deepEqual(edited.request.target, first.request.target);
 
 	const log = join(directory, 'primary.jsonl');
 	await appendFile(log, '{"type":"start","consumedQueueIds":["queued-a"]');
 	assert.deepEqual(await reopened.getQueued('primary'), [edited, second]);
 
-	await reopened.append('primary', [start('primary', 'task-a', edited.request.instruction)],
-		{ messages: [edited], fifo: true });
+	const selectedRun = start('primary', 'task-a', edited.request.instruction);
+	await assert.rejects(reopened.append('primary', [selectedRun], { messages: [edited], fifo: true }), /记录与排队消息不匹配/);
+	selectedRun.task.request.target = edited.request.target;
+	await reopened.append('primary', [selectedRun], { messages: [edited], fifo: true });
 	assert.deepEqual(await reopened.getQueued('primary'), [second]);
 	await assert.rejects(reopened.deleteQueued('primary', edited.id), /找不到/);
 	const previous: Message = { id: 'assistant:task-a:1', role: 'assistant', content: '前一轮留下的思考', incomplete: true };
@@ -484,6 +520,7 @@ void test('queued messages keep their original content and order until a durable
 	const snapshot = await createConversationStore(directory).load('primary');
 	assert.equal(snapshot.queue, undefined);
 	assert.deepEqual(snapshot.runs[0]?.state.messages, [previous, steering, reply]);
+	assert.deepEqual(snapshot.runs[0]?.request.target, first.request.target);
 	const branch = await reopened.fork('primary', 'task-a');
 	assert.deepEqual((await reopened.load(branch.id)).runs[0]?.state.messages, [previous, steering, reply]);
 	assert.deepEqual(await reopened.getQueued('other'), [other]);

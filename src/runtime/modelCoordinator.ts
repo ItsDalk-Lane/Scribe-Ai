@@ -37,6 +37,7 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 			let requested = 0;
 			let transmitted = false;
 			let accessRetries = 0;
+			const work = (active: boolean) => ctx.observer.onWork?.(ctx.task.id, active);
 			const query = async (input: ModelRequest, messageId: string) => {
 				ctx.signal.throwIfAborted();
 				ctx.checkModel?.();
@@ -51,6 +52,8 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 					...(attempts === 0 ? {} : { maxRetries: 0 }),
 					...((review || ctx.destinationCheck || input.beforeSend) ? { beforeSend: async (address: string) => {
 						const waitingAt = performance.now();
+						const mayWaitForUser = Boolean(review || ctx.destinationCheck);
+						if (mayWaitForUser) work(false);
 						try {
 							await review?.beforeSend(address);
 							await ctx.destinationCheck?.(input, address);
@@ -58,6 +61,7 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 							transmitted = true;
 						} finally {
 							reviewMs += performance.now() - waitingAt;
+							if (mayWaitForUser && !ctx.signal.aborted) work(true);
 						}
 					} } : {}),
 				});
@@ -166,7 +170,8 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 				visibleText = false;
 				visibleThinking = false;
 				try {
-					const response = await query(request, messageId);
+					work(true);
+					const response = await query(request, messageId).finally(() => work(false));
 					ctx.signal.throwIfAborted();
 					ctx.readDelivery.accept(request.messages);
 					await ctx.skillRun?.accept(request.messages);

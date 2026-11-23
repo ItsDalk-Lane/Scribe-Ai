@@ -23,27 +23,29 @@ export function createToolCoordinator(app: App, executor: ToolExecutor): ToolCoo
 				let waiting = 0;
 				let approvalReview: ToolReviewStatus | undefined;
 				let denied: ToolContext['retryApproval'];
+				const work = call.name === 'wait_agent' || call.name === 'ask_parent' ? undefined : observer.onWork;
+				work?.(task.id, true);
 				const result = await executor.execute(call, { app, task, signal, permissions, readFiles, readDelivery, cwd,
-					skillRun: ctx.skillRun, subagents: ctx.subagents, subagentId: ctx.subagentId,
+					skillRun: ctx.skillRun, mcpRun: ctx.mcpRun, subagents: ctx.subagents, subagentId: ctx.subagentId,
 					onShellOutput: observer.onEvent && ((output) => {
 						if (!signal.aborted) observer.onEvent?.({ type: 'tool-output', callId: call.id, output });
 					}),
 					approve: approve && (async (approval, identity) => {
 						const requested = performance.now();
-						const trackReview = approval.kind === 'shell' && permissions.executionMode === 'auto-review';
+						const trackReview = (approval.kind === 'shell' || approval.kind === 'mcp') && permissions.executionMode === 'auto-review';
 						try {
 							const allowed = await approve(approval);
 							if (trackReview) approvalReview = allowed ? 'approved' : 'incomplete';
 							return allowed;
 						} catch (error) {
 							if (trackReview) approvalReview = error instanceof ToolReviewDeniedError ? 'denied' : 'incomplete';
-							if (approvalReview === 'denied' && identity) denied = { approval: { ...approval }, identity };
+							if (approval.kind === 'shell' && approvalReview === 'denied' && identity) denied = { approval: { ...approval }, identity };
 							throw error;
 						} finally {
 							waiting += performance.now() - requested;
 						}
 					}),
-				});
+				}).finally(() => work?.(task.id, false));
 				if (denied && observer.onAutoReviewDenied && !ctx.subagentId && !signal.aborted) {
 					const retryApproval = denied;
 					const retryCall = structuredClone(call);

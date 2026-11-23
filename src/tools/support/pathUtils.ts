@@ -1,6 +1,6 @@
 import type { Stats } from 'node:fs';
 import { lstat, realpath, stat } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, posix, relative, resolve, sep, win32 } from 'node:path';
 import type { ToolContext } from '../../types';
 
 export interface ResolvedToolPath {
@@ -16,6 +16,13 @@ export interface ResolvedToolPath {
 export function isWithinPath(directory: string, target: string): boolean {
 	const suffix = relative(directory, target);
 	return !isAbsolute(suffix) && suffix !== '..' && !suffix.startsWith(`..${sep}`);
+}
+
+export function normalizeVaultRelativePath(path: string): string | undefined {
+	if (!path.trim() || path.includes('\0') || isAbsolute(path) || win32.isAbsolute(path)) return;
+	const normalized = posix.normalize(path).replace(/\/$/u, '');
+	if (normalized === '.' || normalized === '..' || normalized.startsWith('../')) return;
+	return normalized;
 }
 
 export function toolAbsolutePath(cwd: string, input: string): string {

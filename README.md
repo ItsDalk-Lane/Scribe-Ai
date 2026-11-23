@@ -8,7 +8,7 @@ Open **Scribe Ai** and submit a task. The agent starts in the current vault. Und
 
 Saved text selections in older conversations remain available for local review.
 
-In **Settings → Scribe Ai → General → Writing rules**, save vault-wide rules to `AGENTS.md` at the root of the vault, or folder rules to `AGENTS.md` inside the selected folder. You can also edit these Markdown notes directly. Folder rules take priority over conflicting vault rules, and more specific subfolders take priority over their parents. Attach a vault note or folder to use its rules. A main chat without attachments uses the active note's folder when available. Empty rule notes have no effect. Applicable rules are sent to the selected model with the next task. On upgrade, old rules are copied to missing documents. If a document already contains different text or cannot be created, the old rule is retained under `writingRulesBackup` in the plugin's `data.json`.
+In **Settings → Scribe Ai → Personalization**, select **Edit** next to **AGENTS.md** under **Custom instructions**. Select **Save** to write your instructions to the vault’s root `AGENTS.md`. When leaving with unsaved edits, choose whether to save, discard, or keep editing. The instructions guide writing style, structure, and format throughout this vault and are sent to the selected model with the next task. Clear the editor and save to stop applying the instructions. Existing folder rule files are kept as ordinary notes, and legacy folder settings are retained under `writingRulesBackup` in the plugin’s `data.json`.
 
 Chats and tool results are saved locally in the Scribe Ai plugin folder for this vault. Reopening Obsidian restores your last chat, including any partial reply saved when you stopped or closed the chat view. Send a follow-up to pick up from it, or select **Review before resuming** to inspect the saved task's outgoing content and destination before continuing it.
 
@@ -16,9 +16,11 @@ Select **+** above the chat to open another conversation. Each tab keeps its own
 
 When you send a task, the current chat history, instructions, file references, and tool results it uses can be sent to the selected model provider. Select **Stop** to cancel pending work. Tools from a previous task only run again when a new task requests them and any required approval is granted.
 
+Select **Add context**, or type `@` at the start of the input or after a space and keep typing in the draft. Recent chats are listed directly in the menu. Select one by title, search vault files by name or path, or browse folders. Selecting an inline result replaces the search text with a reference in the draft. The main chat also lets you reference a path outside the vault. A long chat reference includes the most recent messages and marks where earlier text was omitted.
+
 When a chat approaches the model's context limit, Scribe first reduces older, longer tool results in the outgoing request and preserves references for reading them again where available. If a long main chat still needs to trim earlier activity, Scribe can send excerpts of conversations and relevant tool results to the selected model for a summary. Older chat summaries keep decisions, note sources, and outstanding tasks. A long task can also receive a handoff summary covering verified notes, completed actions, and remaining work. Both summaries are saved locally with the chat. Resuming a task can reuse its saved handoff. The original chat remains available. Open the context details next to the input to see the most recent compression and its result.
 
-Open a task's usage details to see the combined figures for chat, automatic review, and summaries. The conversation usage panel combines the recorded tasks. A field is unknown if it cannot be determined from every contributing request's report. Cost uses amounts returned by the provider. Reusing a saved summary adds no new summary request.
+Open a task's usage details to see the combined figures for chat, automatic review, and summaries. **Conversation activity** above the input box shows measured output speed in tokens per second (TPS). Open **Conversation usage** for usage details. Usage details show figures that can be calculated from the contributing requests. Reusing a saved summary adds no new summary request.
 
 Use the execution mode selector next to **Add context** in the main chat. New chats and tabs inherit the previous chat's mode. Saved conversations keep their own mode when reopened. If the previous mode is missing or invalid, the default is **Ask for approval**. Stop the current task and clear or finish queued messages before changing modes.
 
@@ -48,6 +50,12 @@ In an editable skill's details, open **Skill settings → Automatic recommendati
 
 Use `$skill-installer` in chat to list the public OpenAI curated skills or install from a public GitHub folder. This contacts GitHub to retrieve the catalog or selected files. Installation shows the source and destination, and does not run downloaded scripts or install dependencies. The details page reports declared dependencies. Connections to external tool services are not supplied by the skill system.
 
+## MCP
+
+Open **Settings → Scribe Ai → MCP** to add a local command or a remote MCP server (HTTP or SSE). Use the Obsidian secret picker to link an existing key or create one. For remote servers, you can also use **Sign in** if the service supports browser sign-in. When you import MCP JSON or Codex TOML, Scribe saves recognized credentials in Obsidian Secret Storage using the server name and a numeric suffix for each collision. This covers headers, environment variables, tokens, OAuth client secrets, URL query parameters, and common command arguments such as `--api-key`. JSON export leaves out stored credential values. Imported servers start disabled. Enabling a local server runs the configured program on your computer.
+
+Enabled servers can offer tools and resources to chats with tool access. MCP calls follow the permission mode selected in the chat composer. **Ask for approval** prompts you, **Approve for me** uses the same AI review as built-in tools, and **Full access** runs calls directly. Tool arguments go to the selected server. Tool results can be saved in the conversation and sent to the configured chat model. Text and structured data are supported. Attachments such as images and audio are described in the result. Use the server's **Tools** tab to enable or disable individual tools, or switch the server off to close the connection.
+
 ## Subagents
 
 In automatic mode, the main chat decides whether independent parts of a task would benefit from parallel work. It can choose a configured role or write instructions for a role specific to the assignment. Open **Settings → Scribe Ai → Subagents** to change when it delegates, how many subagents can run, and whether they can delegate further. The defaults allow six active subagents per chat and delegation from the main chat.
@@ -64,13 +72,18 @@ Select **Ask in side chat** on a queued message to send its text, references and
 
 ### Slash commands
 
-Type `/` at the start of a chat to find commands. Use the arrow keys to move, Tab to complete, Enter to run, and Esc to dismiss. Start with a space when you want to send a command as plain text. Side chat offers note and skill selection, copy, export, status, and warnings.
+Select **Slash commands** next to **Add context** in the main chat, or type `/` at the start of the input. Use the arrow keys to move, Tab to complete a typed command, Enter to run, and Esc to dismiss. Start with a space when you want to send a command as plain text. The side chat menu offers skills, MCP services, export, and warnings.
 
-- Use `/plan` to plan with read-only note access. Select **Exit** beside the composer to return to your usual permissions.
-- Use `/goal your objective` to set an objective with an automatic round limit. Each round uses your configured model and existing permissions. Reopening Obsidian leaves the goal paused until you select **Resume**.
+Type the first few characters of a skill's name after `/`, then select it to add it to the draft. In the main chat, the same search also finds preset creation, saved presets, current goal actions, review targets and operations waiting for retry approval. Review and retry still ask for confirmation.
+
+- Use `/mcp` to view configured services and their connection states. In the main chat, select a connected service, then write and send your task to use that service's tools. Calls follow the usual approvals.
+- Use `/agents` (or `/subagents`) to choose a built-in or custom subagent. Send your task to start the selected role in the current chat.
+- In the main chat, type `/` followed by the start of an MCP service or subagent name to select it directly from the suggestions.
+- Select **Plan** from the command menu to add a Plan label beside permissions, then send the task for read-only planning. Review the proposal and select **Revise** or **Execute plan**. Selecting Plan pauses any running goal. After closing Plan, resume that goal from its status bar.
+- Select **Goal** from the command menu, then send the objective, or enter `/goal your objective`. The status bar shows time spent on model requests and tool work, with controls to edit, clear, pause, and resume. Select the status to view acceptance criteria and progress. Progress and time are saved with the chat. Reopening Obsidian leaves the goal paused until you resume it.
 - Use `/diff` to see recorded Markdown edits made through Scribe's note tools. Small before-and-after snapshots stay in the local chat record. `/review` sends the selected note or changes to your configured model only after you confirm.
 - Use `/recap` to see a progress summary or `/compact` to summarize older chat content for future turns. Both use your configured model. The full chat stays available locally.
-- Use `/archive` to hide a conversation from recent chats. `/resume` can restore it. `/export` saves a separate Markdown note, and `/presets` saves frequently used prompts and commands.
+- Select **Chat history** in the title bar to reopen a conversation. Select **Archive chat** in history or recent chats. Open **Archived** in the history popover to view archived chats or select **Unarchive chat** to return a conversation to the regular lists. `/export` saves a separate Markdown note, and `/presets` saves frequently used prompts and commands.
 
 Side chat can read and search notes in the current vault using `Read`, `Glob`, and `Grep`. Use **Add context** to attach a vault file or folder, and choose a model for that side chat from the input box. The selected provider can receive the inherited conversation, attached text and paths, and note contents it reads. Closing the side chat tab cancels its current response and clears its messages. Side chats are separate from the saved chat history.
 
@@ -100,6 +113,10 @@ is the exact version number (no `v` prefix) and attach `manifest.json`,
 ## Model communication (desktop)
 
 The communication layer pins `@earendil-works/pi-ai@1.5.2` and exposes its built-in provider catalog. Model HTTP requests use Node's network stack rather than Chromium, so third-party gateways are not limited by browser CORS. This makes the plugin desktop-only.
+
+**Add model** loads the selected provider's model list. Use **Fetch models** to refresh it. For preset addresses, Scribe Ai combines details from the provider, the Pi catalog bundled with the plugin, and the public Models.dev catalog. Preset providers fall back to Pi's online catalog and then the bundled list when their own list is unavailable. The provider request may use your linked key. The Pi request includes the provider ID and Pi version. Models.dev receives a request for its public catalog. Neither public catalog receives your key, model selections, or vault content. Custom and local addresses supply their own model information.
+
+The picker keeps the combined catalog in memory while the configuration dialog is open. It shows known context and output limits, tool calling, reasoning, and available reasoning levels. Your model settings take precedence when you enter an explicit value.
 
 ### Credentials
 

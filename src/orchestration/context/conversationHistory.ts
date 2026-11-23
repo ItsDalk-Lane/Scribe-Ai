@@ -41,6 +41,9 @@ export function conversationHistory(snapshot: ConversationSnapshot): Pick<RunCon
 		const messages = run.state.messages.filter(({ subagentActivity }) => !subagentActivity)
 			.map((m) => m.role === 'tool' && readOnlySkillTools.includes(m.toolName ?? '')
 				? { ...m, content: '（历史记录）上次的技能资料已省略，需要时请按本轮权限重新读取。' } : m);
+		if (run.request.goalContext && messages[0]?.role === 'user') {
+			messages[0] = { ...messages[0], content: run.request.instruction };
+		}
 		const receipt = messages.at(-1);
 		if (run.subagentReport && receipt?.role === 'assistant' && receipt.local) {
 			messages[messages.length - 1] = { ...receipt, content: `${receipt.content}\n\n${run.subagentReport.content}` };

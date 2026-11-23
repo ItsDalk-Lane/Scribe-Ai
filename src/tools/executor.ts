@@ -15,7 +15,8 @@ export function createToolExecutor(registry: ToolRegistry): ToolExecutor {
 				const tool = registry.find(call.name);
 				if (!tool) return failure(`工具不可用：${call.name}`);
 				if (!permissions.canCallTool(tool)) return failure(`未授权使用工具：${call.name}`);
-				const prepared = await tool.prepare(toolExecutionInput(call.input), ctx);
+				if (tool.mcp && !ctx.mcpRun?.canInvoke(tool)) return failure('MCP 工具尚未加载或定义已变化。');
+				const prepared = await tool.prepare(tool.mcp ? call.input : toolExecutionInput(call.input), ctx);
 				signal.throwIfAborted();
 				if (retryApproval && (!prepared.approval || prepared.approvalIdentity !== retryApproval.identity
 					|| JSON.stringify(prepared.approval) !== JSON.stringify(retryApproval.approval))) {
@@ -38,7 +39,7 @@ export function createToolExecutor(registry: ToolRegistry): ToolExecutor {
 					return { callId: call.id, content, isError: output.shellStatus !== 'success', shellStatus: output.shellStatus };
 				}
 				return {
-					callId: call.id, content, isError: false,
+					callId: call.id, content, isError: typeof output !== 'string' && 'isError' in output && output.isError,
 					fileRead: typeof output !== 'string' && 'fileRead' in output && content === text ? output.fileRead : undefined,
 					...(typeof output !== 'string' && 'noteChange' in output && { noteChange: output.noteChange }),
 				};

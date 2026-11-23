@@ -9,6 +9,10 @@ import type {
 	Usage,
 } from '@earendil-works/pi-ai';
 import type { App } from 'obsidian';
+import type { ChatGoal } from './interaction/chatGoal';
+import type { McpManager } from './tools/external/mcp';
+import type { McpSettings } from './tools/external/mcpConfig';
+import type { McpRun } from './tools/external/mcpTools';
 import type { ShellJobHistory, ShellJobs } from './tools/external/shellJobs';
 
 /** 占位骨架期各层尚未实现的统一信号 */
@@ -133,10 +137,18 @@ export interface SkillSettings {
 	catalogBudgetMaxTokens: number;
 }
 
+export interface TaskTarget {
+	kind: 'mcp' | 'agent';
+	id: string;
+	label: string;
+}
+
 export interface TaskRequest {
+	target?: TaskTarget;
 	intent?: 'plan' | 'review';
 	reviewMaterial?: string;
 	goalRound?: true;
+	goalContext?: string;
 	/** 子助手按名称和来源继承已投递的用户选择。 */
 	inheritedSkills?: Pick<SkillMention, 'name' | 'id'>[];
 	/** 兼容只记录了来源的旧任务。 */
@@ -194,6 +206,7 @@ export interface ToolSpec {
 
 export interface ToolCall {
 	id: string;
+	label?: string;
 	name: string;
 	input: unknown;
 }
@@ -239,6 +252,7 @@ export interface ReadDelivery {
 }
 
 export interface ToolContext {
+	mcpRun?: McpRun;
 	skillRun?: SkillRun;
 	subagents?: SubagentToolAccess;
 	subagentId?: string;
@@ -259,7 +273,7 @@ export interface ToolApproval {
 	target: string;
 	before?: string;
 	after?: string;
-	kind?: 'shell' | 'access';
+	kind?: 'shell' | 'access' | 'mcp';
 	reason?: string;
 	background?: true;
 }
@@ -268,10 +282,11 @@ export interface PreparedTool {
 	approval?: ToolApproval;
 	approvalIdentity?: string;
 	independent?: true;
-	run(): Promise<string | { content: string; fileRead: FileReadPage } | { content: string; shellStatus: ShellStatus } | { content: string; noteChange: NoteChange }> | string;
+	run(): Promise<string | { content: string; fileRead: FileReadPage } | { content: string; shellStatus: ShellStatus } | { content: string; noteChange: NoteChange } | { content: string; isError: boolean }> | string;
 }
 
 export interface ToolDefinition extends ToolSpec {
+	mcp?: { kind: 'tool' | 'resource' | 'search'; binding: string; label: string };
 	isReadOnly: boolean;
 	maxResultSizeChars?: number;
 	isAvailable?(): boolean;
@@ -375,6 +390,7 @@ export interface SavedRetry {
 
 export interface RunObserver {
 	onEvent?: (event: RunEvent) => void;
+	onWork?: (taskId: string, active: boolean) => void;
 	onAutoReviewDenied?: (denial: AutoReviewDenial) => void;
 	approve?: (approval: ToolApproval, signal: AbortSignal) => Promise<boolean>;
 	retryConnection?: (signal: AbortSignal) => Promise<void>;
@@ -468,6 +484,24 @@ export interface ModelProviderInfo {
 	oauth?: { subscription: boolean };
 }
 
+export interface ModelCatalogDetails {
+	contextWindow?: number;
+	maxTokens?: number;
+	reasoning?: boolean;
+	tools?: boolean;
+	thinkingLevels?: readonly string[];
+	reportedThinkingLevels?: readonly string[];
+	inputModalities?: readonly string[];
+	outputModalities?: readonly string[];
+	structuredOutput?: boolean;
+}
+
+export interface ModelCatalogResult {
+	models: string[];
+	source: 'provider' | 'pi' | 'bundled';
+	details?: ReadonlyMap<string, ModelCatalogDetails>;
+}
+
 export interface ModelService {
 	providers(): ModelProviderInfo[];
 	thinkingOptions(this: void, model: Pick<ModelRequest, 'providerId' | 'model'>, preferred?: string): {
@@ -477,9 +511,9 @@ export interface ModelService {
 	modelOrigin?(model: RunContext['model']): string | undefined;
 	contextLimits?(model: RunContext['model']): Pick<ProviderModelInfo, 'contextWindow' | 'maxTokens'> | undefined;
 	login(providerId: string, interaction: AuthInteraction, options?: LoginOptions): Promise<Credential>;
-	refresh(providerId?: string): Promise<void>;
+	listProviderModels(providerId: string, signal?: AbortSignal): Promise<ModelCatalogResult>;
 	/** 自建/本地服务商：直接向它的 /models 查询模型清单 */
-	listCustomModels(providerId: string, baseUrl: string): Promise<{ models: string[]; baseUrl: string }>;
+	listCustomModels(providerId: string, baseUrl: string, signal?: AbortSignal): Promise<Omit<ModelCatalogResult, 'source'> & { baseUrl: string }>;
 	send(request: ModelRequest, onUsage?: (usage: ModelUsageReceipt) => void): Promise<ModelResponse>;
 	stream(request: ModelRequest): ModelStream;
 }
@@ -534,6 +568,7 @@ export interface ExternalToolModules {
 }
 
 export interface ToolLayer {
+	mcp?: McpManager;
 	registry: ToolRegistry;
 	executor: ToolExecutor;
 	external: ExternalToolModules;
@@ -548,6 +583,8 @@ export interface ConversationStore {
 	shellJobHistory: ShellJobHistory;
 	list(): Promise<ConversationSummary[]>;
 	load(id: string): Promise<ConversationSnapshot>;
+	loadGoal(id: string): Promise<ChatGoal | null | undefined>;
+	saveGoal(id: string, goal: ChatGoal | null): Promise<void>;
 	rename(id: string, title: string): Promise<void>;
 	setArchived(id: string, archived: boolean): Promise<void>;
 	saveManualCompaction(id: string, summary: HistorySummary): Promise<void>;
@@ -707,6 +744,7 @@ export interface SubagentToolAccess {
 }
 
 export interface ConversationSnapshot {
+	hasGoal?: true;
 	subagents?: SavedSubagentEntry[];
 	id: string;
 	runs: SavedRun[];
@@ -784,6 +822,7 @@ export interface PermissionPolicy {
 }
 
 export interface RunContext {
+	mcpRun?: McpRun;
 	manualSummary?: string;
 	skillRun?: SkillRun;
 	subagents?: SubagentToolAccess;
@@ -887,12 +926,13 @@ export interface CommunicationSettings {
 
 export type ChatLocation = 'right-sidebar' | 'left-sidebar' | 'editor-tab';
 
-export interface WritingRules {
+export interface LegacyWritingRules {
 	vault: string;
 	folders: Record<string, string>;
 }
 
 export interface ScribeSettings {
+	mcp?: McpSettings;
 	skillSettings?: SkillSettings;
 	subagents?: SubagentSettings;
 	/** 当前生效的模型；providerId + model 指向同一个服务商 */
@@ -904,9 +944,9 @@ export interface ScribeSettings {
 	/** Days before the one-shot startup cleanup removes spill files; 0 disables cleanup. */
 	spillCleanupDays: number;
 	/** 仅用于读取并迁移旧版配置。 */
-	writingRules?: WritingRules;
-	/** 与现有 AGENTS.md 冲突或无法迁移的旧内容，仅供恢复。 */
-	writingRulesBackup?: WritingRules;
+	writingRules?: LegacyWritingRules;
+	/** 旧文件夹规则和未迁移的全库规则，仅供恢复。 */
+	writingRulesBackup?: LegacyWritingRules;
 	/** providerId → modelId → 该模型的覆盖配置 */
 	modelOverrides: Record<string, Record<string, ModelOverride>>;
 	/** [服务商 ID, 模型 ID] 编码为键，记住各模型上次选中的推理档位。 */
