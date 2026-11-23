@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { composerShortcut, sideChatCommand } from '../composerKeyboard';
+import { composerShortcut, referenceQuery, removeReferenceQuery, sideChatCommand } from '../composerKeyboard';
 import { editSkillText, insertSkill, skillQuery, sliceSkillMentions } from '../components/skillMentionText';
 import { bindSkillMentions } from '../../skills/mentions';
 
@@ -17,12 +17,24 @@ void test('only unmodified Enter submits, without repeating or stealing IME conf
 	}
 });
 
-void test('the reference picker triggers at a word boundary but not inside a typed address or selection', () => {
-	assert.equal(composerShortcut(key('@', { shiftKey: true }), '', 0), 'reference');
-	assert.equal(composerShortcut(key('@'), '参考 ', 3), 'reference');
-	assert.equal(composerShortcut(key('@'), 'mail', 4), undefined);
-	assert.equal(composerShortcut(key('@'), '参考 正文', 3, 5), undefined);
-	assert.equal(composerShortcut(key('@', { isComposing: true }), '', 0), undefined);
+void test('inline reference queries use the last same-line marker and accept names with spaces', () => {
+	assert.equal(composerShortcut(key('@', { shiftKey: true })), undefined);
+	assert.deepEqual(referenceQuery('@', 1), { start: 0, end: 1, term: '' });
+	const text = '参考 @甲\n最近 @项目 计划';
+	assert.deepEqual(referenceQuery(text, text.length), { start: text.lastIndexOf('@'), end: text.length, term: '项目 计划' });
+	for (const body of ['name@example.com', '@研究\n正文', '@研究 $', '@研究 $skill']) {
+		assert.equal(referenceQuery(body, body.length), undefined, body);
+	}
+});
+
+void test('selecting an inline reference removes its query and preserves the rest of the draft', () => {
+	const before = '第一行\n前文 ';
+	const token = '@项目 计划';
+	const text = before + token + ' 后文\n第三行';
+	const query = referenceQuery(text, before.length + token.length)!;
+	assert.deepEqual(removeReferenceQuery(text, query), { instruction: before + '后文\n第三行', caret: before.length });
+	assert.deepEqual(removeReferenceQuery('@名字  正文', { start: 0, end: 3 }), { instruction: ' 正文', caret: 0 });
+	assert.deepEqual(removeReferenceQuery('前文 @名字\n正文', { start: 3, end: 6 }), { instruction: '前文 \n正文', caret: 3 });
 });
 
 void test('Escape skips repeat, IME and modified presses', () => {

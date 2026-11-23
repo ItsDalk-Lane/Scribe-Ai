@@ -44,7 +44,8 @@ export class SubagentView extends ItemView {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		const { target, root } = this;
-		const controller = this.plugin.services.orchestration.sessions.subagents;
+		const { sessions, skills } = this.plugin.services.orchestration;
+		const controller = sessions.subagents;
 		if (!root) return;
 		if (!target || !controller) {
 			root.render(null);
@@ -64,7 +65,7 @@ export class SubagentView extends ItemView {
 			const names = new Map(snapshot.agents.map(({ id, name }) => [id, name]));
 			root.render(<MetricPopoverProvider>
 				<div className="scribe-app scribe-subagent-sidebar" data-layout="conversation">
-					<SubagentDetail key={agent.id} agent={agent} app={this.app} submissions={snapshot.submissions}
+					<SubagentDetail key={agent.id} agent={agent} app={this.app} skills={skills} submissions={snapshot.submissions}
 						subagentNames={names} inspectSubagent={(id) => this.plugin.openSubagent(conversationId, id)}
 						onCloseTab={() => this.leaf.detach()} />
 				</div>

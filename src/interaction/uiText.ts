@@ -6,13 +6,16 @@ import type { ContextCompaction, ShellStatus, ToolReviewStatus } from '../types'
 export interface UiText {
 	openChatCommand: string;
 	generalTab: string;
+	personalizationTab: string;
 	chatLocation: string;
 	chatLocationDescription: string;
-	writingRules: string;
-	writingRulesDescription: string;
-	vaultWritingRules: string;
-	folderWritingRules: string;
-	chooseRuleFolder: string;
+	customInstructions: string;
+	editInstructions: string;
+	instructionsPlaceholder: string;
+	viewInstructionsSource: string;
+	unsavedInstructions: string;
+	discardInstructions: string;
+	continueEditing: string;
 	writingRuleSaved: string;
 	writingRuleReadFailed: string;
 	writingRuleChanged: string;
@@ -74,6 +77,9 @@ export interface UiText {
 	models: string;
 	fetchModels: string;
 	fetchModelsDescription: string;
+	modelsFromProvider: string;
+	modelsFromPi: string;
+	modelsFromBundled: string;
 	selectedModels: string;
 	addModel: string;
 	refreshing: string;
@@ -162,6 +168,9 @@ export interface UiText {
 	chatModeFullAccessDisclosure: string;
 	chatModeLocked: string;
 	chatPickVaultItem: string;
+	chatSearchReferences: string;
+	chatNoReferences: string;
+	chatNoReferenceText: string;
 	chatSelectionPreview: string;
 	chatRemoveQuotes: string;
 	chatAddSelection: string;
@@ -179,11 +188,17 @@ export interface UiText {
 	chatRecentConversations: string;
 	chatConversationTitle: string;
 	chatRenameConversation: string;
+	chatArchiveConversation: string;
+	chatUnarchiveConversation: string;
+	chatArchived: string;
+	chatNoArchivedConversations: string;
+	chatArchiveBusy: string;
+	chatArchiveUnsaved: string;
+	chatArchiveError: string;
 	chatDeleteConversation: string;
 	chatDeleteConfirm: string;
 	chatRenameError: string;
 	chatDeleteError: string;
-	chatNewConversation: string;
 	chatNewTab: string;
 	chatTabs: string;
 	chatCloseTab: string;
@@ -258,6 +273,16 @@ export interface UiText {
 	chatCopyFailed: string;
 	chatToolArguments: string;
 	chatToolOutput: string;
+	chatSkillLoaded: string;
+	chatSkillResourceRead: string;
+	chatSkillReading: string;
+	chatSkillFailed: string;
+	chatSkillContent: string;
+	chatSkillResource: string;
+	chatSkillTask: string;
+	chatSkillNoTask: string;
+	chatSkillUnavailable: string;
+	chatSkillUnknown: string;
 	chatShellRecentOutput: string;
 	chatShellRecentErrors: string;
 	chatBackgroundJobs: string;
@@ -369,10 +394,7 @@ export interface UiText {
 	chatCacheRead: string;
 	chatCacheWrite: string;
 	chatOutputTokens: string;
-	chatTotalTokens: string;
-	chatReportedCost: string;
 	chatUsageRequests: string;
-	chatUsageUnknown: string;
 	chatContextUsed: string;
 	chatContextStats: string;
 	chatContextCompaction: string;
@@ -397,16 +419,19 @@ export interface UiText {
 const EN: UiText = {
 	openChatCommand: 'Open agent chat',
 	generalTab: 'General',
+	personalizationTab: 'Personalization',
 	chatLocation: 'Chat location',
 	chatLocationDescription: 'Where a new chat view opens. Changes apply after closing the current chat view.',
-	writingRules: 'Writing rules',
-	writingRulesDescription: 'Save whole-vault rules to AGENTS.md at the vault root, and folder rules to AGENTS.md in each chosen folder. You can also edit these notes directly. Attach a note or folder to apply its rules. In main chat without attachments, rules follow the open note. More specific folder rules take precedence. Clearing and saving removes the rules. Changes apply from the next question and are sent to the selected model.',
-	vaultWritingRules: 'Whole vault',
-	folderWritingRules: 'Folder rules',
-	chooseRuleFolder: 'Choose folder',
-	writingRuleSaved: 'Writing rule saved. It applies from the next question.',
-	writingRuleReadFailed: 'Could not read the rule file. Reopen settings to retry.',
-	writingRuleChanged: 'The rule file changed. Keep a copy of your edits and reopen settings to see the latest file.',
+	customInstructions: 'Custom instructions',
+	editInstructions: 'Edit',
+	instructionsPlaceholder: 'Add custom instructions…',
+	viewInstructionsSource: 'View source',
+	unsavedInstructions: 'Save your changes before leaving?',
+	discardInstructions: 'Discard changes',
+	continueEditing: 'Continue editing',
+	writingRuleSaved: 'Instructions saved. They apply from the next question.',
+	writingRuleReadFailed: 'Could not read AGENTS.md. Reopen the editor to retry.',
+	writingRuleChanged: 'AGENTS.md changed outside this editor. Copy your edits, then reopen the editor to see the latest version.',
 	rightSidebar: 'Right sidebar',
 	leftSidebar: 'Left sidebar',
 	editorTab: 'Editor tab',
@@ -464,7 +489,10 @@ const EN: UiText = {
 	baseUrlRequired: 'Fill in the base URL first',
 	models: 'Models',
 	fetchModels: 'Fetch models',
-	fetchModelsDescription: 'Fetching only reads the model directory; it does not test a chat connection.',
+	fetchModelsDescription: 'Refresh the model list. Built-in providers also use Pi and Models.dev to check capabilities.',
+	modelsFromProvider: 'Model list from the provider',
+	modelsFromPi: 'Model list from Pi',
+	modelsFromBundled: 'Model list from the bundled catalog',
 	selectedModels: 'Selected models',
 	addModel: 'Add model',
 	refreshing: 'Loading…',
@@ -553,13 +581,16 @@ const EN: UiText = {
 	chatModeFullAccessDisclosure: 'Scribe Ai can read and change files your computer account can access, including files outside this vault. It can also run commands and use the internet without individual approvals. This chat saves the mode, and new chats and tabs inherit it from the current chat.',
 	chatModeLocked: 'You can change modes when the current task and queue finish.',
 	chatPickVaultItem: 'Select a vault file or folder',
+	chatSearchReferences: 'Search files, folders or chats',
+	chatNoReferences: 'No matching references',
+	chatNoReferenceText: 'This chat has no text to reference.',
 	chatSelectionPreview: 'Selected text preview',
 	chatRemoveQuotes: 'Remove quotes',
 	chatAddSelection: 'Add to chat',
 	chatQuotedText: 'Selected text ({n})',
 	chatAddExternalPath: 'Path outside the vault',
-	chatPickExternalFile: 'Choose file…',
-	chatPickExternalFolder: 'Choose folder…',
+	chatPickExternalFile: 'Choose external file',
+	chatPickExternalFolder: 'Choose external folder',
 	chatExternalPickerFailed: 'The system picker could not open. Enter the full path instead.',
 	chatAbsolutePath: 'Full path to file or folder',
 	chatInvalidPath: 'Enter the full path to an existing item of the selected type.',
@@ -570,11 +601,17 @@ const EN: UiText = {
 	chatRecentConversations: 'Recent chats',
 	chatConversationTitle: 'Chat title',
 	chatRenameConversation: 'Rename chat',
+	chatArchiveConversation: 'Archive chat',
+	chatUnarchiveConversation: 'Unarchive chat',
+	chatArchived: 'Archived',
+	chatNoArchivedConversations: 'No archived chats',
+	chatArchiveBusy: 'Finish running tasks and queued messages in this chat before archiving.',
+	chatArchiveUnsaved: 'This chat has no saved messages to archive.',
+	chatArchiveError: 'Could not update the chat’s archive status.',
 	chatDeleteConversation: 'Delete chat',
 	chatDeleteConfirm: 'Permanently delete “{title}” and all of its messages? This cannot be undone.',
 	chatRenameError: 'Could not save the chat title.',
 	chatDeleteError: 'Could not delete the chat.',
-	chatNewConversation: 'New conversation',
 	chatNewTab: 'New tab',
 	chatTabs: 'Conversation tabs',
 	chatCloseTab: 'Close tab',
@@ -649,6 +686,16 @@ const EN: UiText = {
 	chatCopyFailed: 'Could not copy the reply',
 	chatToolArguments: 'Call arguments',
 	chatToolOutput: 'Tool output',
+	chatSkillLoaded: 'Loaded skill {name}',
+	chatSkillResourceRead: 'Read skill resource ({name})',
+	chatSkillReading: 'Reading skill…',
+	chatSkillFailed: 'Could not read the skill',
+	chatSkillContent: 'Skill content',
+	chatSkillResource: 'Skill resource',
+	chatSkillTask: 'Task description',
+	chatSkillNoTask: 'No task description was provided.',
+	chatSkillUnavailable: 'The saved skill content could not be restored.',
+	chatSkillUnknown: 'Unknown skill',
 	chatShellRecentOutput: 'Recent output',
 	chatShellRecentErrors: 'Recent error output',
 	chatBackgroundJobs: 'Background tasks',
@@ -744,12 +791,12 @@ const EN: UiText = {
 	sideChatExternalFolder: 'Side chat can only receive individual files from outside the vault.',
 	chatProcessSummary: 'Steps {messages} · Tool calls {tools}',
 	chatActivitySummary: 'Turns {rounds} · Steps {messages}',
-	chatSpeedValue: '{n} tokens/s',
+	chatSpeedValue: '{n} tok/s',
 	chatActivityStats: 'Conversation activity',
 	chatModelDuration: 'Model time',
 	chatToolDuration: 'Tool time',
 	chatFirstDelta: 'Average time to first token',
-	chatSpeed: 'Average speed',
+	chatSpeed: 'Output speed',
 	chatMetricSeconds: '{s}s',
 	chatMetricMinutes: '{m}m {s}s',
 	chatSessionUsage: 'Conversation usage',
@@ -760,10 +807,7 @@ const EN: UiText = {
 	chatCacheRead: 'Cache read',
 	chatCacheWrite: 'Cache write',
 	chatOutputTokens: 'Output',
-	chatTotalTokens: 'Total',
-	chatReportedCost: 'Reported cost',
 	chatUsageRequests: 'Model requests',
-	chatUsageUnknown: 'Unknown',
 	chatContextUsed: '{n}%',
 	chatContextStats: 'Context {n}% used',
 	chatContextCompaction: 'Context compression',
@@ -788,16 +832,19 @@ const EN: UiText = {
 const ZH_CN: UiText = {
 	openChatCommand: '打开 Agent 对话',
 	generalTab: '通用',
+	personalizationTab: '个性化',
 	chatLocation: '聊天界面位置',
 	chatLocationDescription: '新建聊天界面时的打开位置。关闭当前聊天视图后，改动在下次打开时生效。',
-	writingRules: '写作规则',
-	writingRulesDescription: '全库规则保存到库根目录的 AGENTS.md，文件夹规则保存到所选文件夹的 AGENTS.md。也可以直接编辑这些笔记。添加笔记或文件夹时使用相应的规则，主聊未附资料时按当前打开的笔记匹配。发生冲突时以更具体的文件夹规则为准。清空并保存即可撤销，改动从下次提问生效，规则会随提问发给所选模型。',
-	vaultWritingRules: '全库规则',
-	folderWritingRules: '文件夹规则',
-	chooseRuleFolder: '选择文件夹',
-	writingRuleSaved: '写作规则已保存，下次提问生效。',
-	writingRuleReadFailed: '无法读取规则文件。重新打开设置后再试。',
-	writingRuleChanged: '规则文件已变动。请先复制你刚才的编辑，再重新打开设置查看新版。',
+	customInstructions: '自定义指令',
+	editInstructions: '编辑',
+	instructionsPlaceholder: '添加自定义指令…',
+	viewInstructionsSource: '查看源代码',
+	unsavedInstructions: '离开前要保存修改吗？',
+	discardInstructions: '放弃保存',
+	continueEditing: '继续编辑',
+	writingRuleSaved: '自定义指令已保存，下次提问生效。',
+	writingRuleReadFailed: '无法读取 AGENTS.md。重新打开编辑器后再试。',
+	writingRuleChanged: 'AGENTS.md 在编辑器外被修改。请复制你刚才的编辑，再重新打开编辑器查看新版。',
 	rightSidebar: '右侧边栏',
 	leftSidebar: '左侧边栏',
 	editorTab: '编辑器标签页',
@@ -855,7 +902,10 @@ const ZH_CN: UiText = {
 	baseUrlRequired: '请先填写 Base URL',
 	models: '模型',
 	fetchModels: '获取模型',
-	fetchModelsDescription: '获取操作只读取模型目录，不会测试聊天连接。',
+	fetchModelsDescription: '刷新模型列表。预置服务商会结合 Pi 和 Models.dev 核对能力。',
+	modelsFromProvider: '模型列表来自服务商',
+	modelsFromPi: '模型列表来自 Pi',
+	modelsFromBundled: '模型列表来自插件内置目录',
 	selectedModels: '已选模型',
 	addModel: '添加模型',
 	refreshing: '加载中…',
@@ -944,13 +994,16 @@ const ZH_CN: UiText = {
 	chatModeFullAccessDisclosure: 'Scribe Ai 可以读写你的电脑账户有权访问的文件，包括库外文件，也可以直接运行命令和联网。当前聊天会保存此模式，新开的聊天和标签页会沿用它。',
 	chatModeLocked: '当前任务和队列结束后可切换模式。',
 	chatPickVaultItem: '选择库内文件或文件夹',
+	chatSearchReferences: '搜索文件、文件夹或历史对话',
+	chatNoReferences: '没有匹配的参考资料',
+	chatNoReferenceText: '这段对话没有可引用的文字。',
 	chatSelectionPreview: '选区预览',
 	chatRemoveQuotes: '移除引文',
 	chatAddSelection: '添加到对话',
 	chatQuotedText: '{n} 个已选文本片段',
 	chatAddExternalPath: '库外路径',
-	chatPickExternalFile: '选择文件…',
-	chatPickExternalFolder: '选择文件夹…',
+	chatPickExternalFile: '选择库外文件',
+	chatPickExternalFolder: '选择库外文件夹',
 	chatExternalPickerFailed: '无法打开系统选择窗口，可以手动输入完整路径。',
 	chatAbsolutePath: '文件或文件夹的完整路径',
 	chatInvalidPath: '请输入实际存在且类型正确的完整路径。',
@@ -961,11 +1014,17 @@ const ZH_CN: UiText = {
 	chatRecentConversations: '最近对话',
 	chatConversationTitle: '对话标题',
 	chatRenameConversation: '编辑标题',
+	chatArchiveConversation: '归档对话',
+	chatUnarchiveConversation: '取消归档',
+	chatArchived: '已归档',
+	chatNoArchivedConversations: '暂无已归档的对话',
+	chatArchiveBusy: '请先处理这段对话中正在运行的任务和排队消息。',
+	chatArchiveUnsaved: '这段对话没有可归档的消息。',
+	chatArchiveError: '无法更新对话的归档状态。',
 	chatDeleteConversation: '删除对话',
 	chatDeleteConfirm: '永久删除「{title}」及其全部消息？删除后无法撤销。',
 	chatRenameError: '无法保存对话标题。',
 	chatDeleteError: '无法删除对话。',
-	chatNewConversation: '新建对话',
 	chatNewTab: '新建标签页',
 	chatTabs: '对话标签页',
 	chatCloseTab: '关闭标签页',
@@ -1040,6 +1099,16 @@ const ZH_CN: UiText = {
 	chatCopyFailed: '无法复制回复',
 	chatToolArguments: '调用参数',
 	chatToolOutput: '工具输出',
+	chatSkillLoaded: '已加载技能 {name}',
+	chatSkillResourceRead: '已读取技能资料（{name}）',
+	chatSkillReading: '正在读取技能…',
+	chatSkillFailed: '读取技能失败',
+	chatSkillContent: '技能内容',
+	chatSkillResource: '技能资料',
+	chatSkillTask: '任务描述',
+	chatSkillNoTask: '本次未提供任务描述。',
+	chatSkillUnavailable: '无法恢复当时读取的技能内容。',
+	chatSkillUnknown: '未知技能',
 	chatShellRecentOutput: '最近输出',
 	chatShellRecentErrors: '最近错误输出',
 	chatBackgroundJobs: '后台任务',
@@ -1135,12 +1204,12 @@ const ZH_CN: UiText = {
 	sideChatExternalFolder: '侧聊一次只能读取手动附上的库外文件，无法转交库外文件夹。',
 	chatProcessSummary: '{messages} 步 · {tools} 次工具调用',
 	chatActivitySummary: '{rounds} 轮 · {messages} 步',
-	chatSpeedValue: '{n} 字/秒',
+	chatSpeedValue: '{n} tok/秒',
 	chatActivityStats: '会话活动',
 	chatModelDuration: '大模型耗时',
 	chatToolDuration: '工具耗时',
 	chatFirstDelta: '平均首字延迟',
-	chatSpeed: '平均速度',
+	chatSpeed: '输出速度',
 	chatMetricSeconds: '{s} 秒',
 	chatMetricMinutes: '{m} 分 {s} 秒',
 	chatSessionUsage: '会话用量',
@@ -1151,10 +1220,7 @@ const ZH_CN: UiText = {
 	chatCacheRead: '缓存读取',
 	chatCacheWrite: '缓存写入',
 	chatOutputTokens: '输出',
-	chatTotalTokens: '合计',
-	chatReportedCost: '实报成本',
 	chatUsageRequests: '模型请求次数',
-	chatUsageUnknown: '未知',
 	chatContextUsed: '{n}%',
 	chatContextStats: '上下文已用 {n}%',
 	chatContextCompaction: '上下文压缩',
@@ -1179,16 +1245,19 @@ const ZH_CN: UiText = {
 const ZH_TW: UiText = {
 	openChatCommand: '開啟 Agent 對話',
 	generalTab: '一般',
+	personalizationTab: '個人化',
 	chatLocation: '聊天介面位置',
 	chatLocationDescription: '新建聊天介面時的開啟位置。關閉目前聊天檢視後，變更在下次開啟時生效。',
-	writingRules: '寫作規則',
-	writingRulesDescription: '全庫規則儲存到庫根目錄的 AGENTS.md，資料夾規則儲存到所選資料夾的 AGENTS.md。也可以直接編輯這些筆記。加入筆記或資料夾時使用相應的規則，主聊天未附資料時依目前開啟的筆記配對。發生衝突時以更明確的資料夾規則為準。清空後儲存即可撤銷，變更從下次提問生效，規則會隨提問傳送給所選模型。',
-	vaultWritingRules: '全庫規則',
-	folderWritingRules: '資料夾規則',
-	chooseRuleFolder: '選擇資料夾',
-	writingRuleSaved: '寫作規則已儲存，下次提問生效。',
-	writingRuleReadFailed: '無法讀取規則檔案。重新開啟設定後再試。',
-	writingRuleChanged: '規則檔案已變動。請先複製剛才的編輯，再重新開啟設定查看新版。',
+	customInstructions: '自訂指令',
+	editInstructions: '編輯',
+	instructionsPlaceholder: '新增自訂指令…',
+	viewInstructionsSource: '查看原始碼',
+	unsavedInstructions: '離開前要儲存變更嗎？',
+	discardInstructions: '捨棄變更',
+	continueEditing: '繼續編輯',
+	writingRuleSaved: '自訂指令已儲存，下次提問生效。',
+	writingRuleReadFailed: '無法讀取 AGENTS.md。重新開啟編輯器後再試。',
+	writingRuleChanged: 'AGENTS.md 在編輯器外被修改。請複製剛才的編輯，再重新開啟編輯器查看新版。',
 	rightSidebar: '右側邊欄',
 	leftSidebar: '左側邊欄',
 	editorTab: '編輯器分頁',
@@ -1246,7 +1315,10 @@ const ZH_TW: UiText = {
 	baseUrlRequired: '請先填寫 Base URL',
 	models: '模型',
 	fetchModels: '取得模型',
-	fetchModelsDescription: '取得操作只讀取模型目錄，不會測試聊天連線。',
+	fetchModelsDescription: '重新整理模型清單。預設服務商會結合 Pi 和 Models.dev 核對能力。',
+	modelsFromProvider: '模型清單來自服務商',
+	modelsFromPi: '模型清單來自 Pi',
+	modelsFromBundled: '模型清單來自外掛內建目錄',
 	selectedModels: '已選模型',
 	addModel: '新增模型',
 	refreshing: '載入中…',
@@ -1335,13 +1407,16 @@ const ZH_TW: UiText = {
 	chatModeFullAccessDisclosure: 'Scribe Ai 可以讀寫你的電腦帳戶有權存取的檔案，包括庫外檔案，也可以直接執行指令及連網。目前對話會儲存此模式，新開的對話和分頁會沿用它。',
 	chatModeLocked: '目前任務及佇列結束後可切換模式。',
 	chatPickVaultItem: '選擇庫內檔案或資料夾',
+	chatSearchReferences: '搜尋檔案、資料夾或歷史對話',
+	chatNoReferences: '沒有符合的參考資料',
+	chatNoReferenceText: '這段對話沒有可引用的文字。',
 	chatSelectionPreview: '選取文字預覽',
 	chatRemoveQuotes: '移除引文',
 	chatAddSelection: '新增至對話',
 	chatQuotedText: '{n} 個已選文字片段',
 	chatAddExternalPath: '庫外路徑',
-	chatPickExternalFile: '選擇檔案…',
-	chatPickExternalFolder: '選擇資料夾…',
+	chatPickExternalFile: '選擇庫外檔案',
+	chatPickExternalFolder: '選擇庫外資料夾',
 	chatExternalPickerFailed: '無法開啟系統選擇視窗，可以手動輸入完整路徑。',
 	chatAbsolutePath: '檔案或資料夾的完整路徑',
 	chatInvalidPath: '請輸入實際存在且類型正確的完整路徑。',
@@ -1352,11 +1427,17 @@ const ZH_TW: UiText = {
 	chatRecentConversations: '最近對話',
 	chatConversationTitle: '對話標題',
 	chatRenameConversation: '編輯標題',
+	chatArchiveConversation: '封存對話',
+	chatUnarchiveConversation: '取消封存',
+	chatArchived: '已封存',
+	chatNoArchivedConversations: '暫無已封存的對話',
+	chatArchiveBusy: '請先處理這段對話中正在執行的工作和排隊訊息。',
+	chatArchiveUnsaved: '這段對話沒有可封存的訊息。',
+	chatArchiveError: '無法更新對話的封存狀態。',
 	chatDeleteConversation: '刪除對話',
 	chatDeleteConfirm: '永久刪除「{title}」及其全部訊息？刪除後無法復原。',
 	chatRenameError: '無法儲存對話標題。',
 	chatDeleteError: '無法刪除對話。',
-	chatNewConversation: '新建對話',
 	chatNewTab: '新建分頁',
 	chatTabs: '對話分頁',
 	chatCloseTab: '關閉分頁',
@@ -1431,6 +1512,16 @@ const ZH_TW: UiText = {
 	chatCopyFailed: '無法複製回覆',
 	chatToolArguments: '呼叫參數',
 	chatToolOutput: '工具輸出',
+	chatSkillLoaded: '已載入技能 {name}',
+	chatSkillResourceRead: '已讀取技能資料（{name}）',
+	chatSkillReading: '正在讀取技能…',
+	chatSkillFailed: '讀取技能失敗',
+	chatSkillContent: '技能內容',
+	chatSkillResource: '技能資料',
+	chatSkillTask: '任務描述',
+	chatSkillNoTask: '本次未提供任務描述。',
+	chatSkillUnavailable: '無法還原當時讀取的技能內容。',
+	chatSkillUnknown: '未知技能',
 	chatShellRecentOutput: '最近輸出',
 	chatShellRecentErrors: '最近錯誤輸出',
 	chatBackgroundJobs: '背景任務',
@@ -1526,12 +1617,12 @@ const ZH_TW: UiText = {
 	sideChatExternalFolder: '側聊一次只能讀取手動附上的庫外檔案，無法轉交庫外資料夾。',
 	chatProcessSummary: '{messages} 步 · {tools} 次工具呼叫',
 	chatActivitySummary: '{rounds} 輪 · {messages} 步',
-	chatSpeedValue: '{n} 字／秒',
+	chatSpeedValue: '{n} tok/秒',
 	chatActivityStats: '對話活動',
 	chatModelDuration: '模型耗時',
 	chatToolDuration: '工具耗時',
 	chatFirstDelta: '平均首字延遲',
-	chatSpeed: '平均速度',
+	chatSpeed: '輸出速度',
 	chatMetricSeconds: '{s} 秒',
 	chatMetricMinutes: '{m} 分 {s} 秒',
 	chatSessionUsage: '對話用量',
@@ -1542,10 +1633,7 @@ const ZH_TW: UiText = {
 	chatCacheRead: '快取讀取',
 	chatCacheWrite: '快取寫入',
 	chatOutputTokens: '輸出',
-	chatTotalTokens: '合計',
-	chatReportedCost: '實報成本',
 	chatUsageRequests: '模型請求次數',
-	chatUsageUnknown: '未知',
 	chatContextUsed: '{n}%',
 	chatContextStats: '上下文已用 {n}%',
 	chatContextCompaction: '上下文壓縮',

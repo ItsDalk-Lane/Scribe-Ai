@@ -1,5 +1,6 @@
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { updateOverflowTitle } from '../overflowTitle';
 import ChatIcon from './ChatIcon';
 
 export default function ActivityDisclosure({
@@ -22,6 +23,7 @@ export default function ActivityDisclosure({
 	keepMounted?: boolean;
 }) {
 	const bodyId = useId();
+	const labelElement = useRef<HTMLSpanElement>(null);
 	const open = plain || expanded;
 	const [opened, setOpened] = useState(open);
 	// 首次展开才渲染详情，之后保留内容以支持收起动画。
@@ -30,9 +32,10 @@ export default function ActivityDisclosure({
 		<div className={`scribe-activity-disclosure ${className}`} data-state={state} data-plain={plain || undefined}>
 			{!plain && <div className="scribe-activity-heading">
 				<button type="button" className="scribe-activity-toggle" aria-expanded={open} aria-controls={bodyId}
-					aria-label={accessibilityLabel ?? label} title={title ?? label} onClick={onToggle} />
+					aria-label={accessibilityLabel ?? label} title={title} onClick={onToggle}
+					onPointerEnter={title ? undefined : ({ currentTarget }) => updateOverflowTitle(currentTarget, labelElement.current)} />
 				{icon && <ChatIcon name={icon} />}
-				<span className="scribe-activity-label" aria-hidden="true">
+				<span ref={labelElement} className="scribe-activity-label" aria-hidden="true">
 					{labelContent ?? label}
 				</span>
 				{end}

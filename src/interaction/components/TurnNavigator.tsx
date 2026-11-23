@@ -15,7 +15,7 @@ export default function TurnNavigator({
 		const turn = text.chatJumpToTurn.replace('{n}', (index + 1).toLocaleString());
 		return { ...entry, turn, label: [turn, entry.prompt].filter(Boolean).join(' · ') };
 	});
-	return <JumpNavigator entries={turns} current={current} label={text.chatTurnNavigator} icon="list" onJump={onJump}
+	return <JumpNavigator entries={turns} current={current} label={text.chatTurnNavigator} onJump={onJump}
 		renderListLabel={({ prompt, reply, turn }) => <><span>{prompt || turn}</span>{reply && <span>{reply}</span>}</>}
 		renderPreview={({ prompt, reply, turn }, choose) => (prompt || reply) && <button type="button"
 			className="scribe-turn-preview-action" tabIndex={-1} aria-label={turn} onClick={choose}>

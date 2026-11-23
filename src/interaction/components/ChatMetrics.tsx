@@ -27,22 +27,16 @@ function cachePercent(hit: number, turn: boolean) {
 	return hit.toLocaleString(undefined, { style: 'percent', maximumFractionDigits: turn ? 1 : 0 });
 }
 
-function usageRows(usage: UsageTotals, turn: boolean): [string, string][] {
+function usageRows(usage: UsageTotals, turn: boolean) {
 	const text = uiText();
-	const unknown = text.chatUsageUnknown;
-	const cost = usage.cost?.toLocaleString(undefined, {
-		style: 'currency', currency: 'USD', minimumFractionDigits: 4, maximumFractionDigits: 10,
-	});
 	return [
 		[text.chatUsageRequests, usage.count.toLocaleString()],
-		[text.chatCacheHit, usage.hit === undefined ? unknown : cachePercent(usage.hit, turn)],
-		[text.chatUncachedInput, optionalTokens(usage.input) ?? unknown],
-		[text.chatCacheRead, optionalTokens(usage.cacheRead) ?? unknown],
-		[text.chatCacheWrite, optionalTokens(usage.cacheWrite) ?? unknown],
-		[text.chatOutputTokens, optionalTokens(usage.output) ?? unknown],
-		[text.chatTotalTokens, optionalTokens(usage.total) ?? unknown],
-		[text.chatReportedCost, cost ?? unknown],
-	];
+		[text.chatCacheHit, usage.hit === undefined ? undefined : cachePercent(usage.hit, turn)],
+		[text.chatUncachedInput, optionalTokens(usage.input)],
+		[text.chatCacheRead, optionalTokens(usage.cacheRead)],
+		[text.chatCacheWrite, optionalTokens(usage.cacheWrite)],
+		[text.chatOutputTokens, optionalTokens(usage.output)],
+	] as const;
 }
 
 export function UsagePopover({ usage, model, busy, turn = false, title }: {
@@ -51,9 +45,9 @@ export function UsagePopover({ usage, model, busy, turn = false, title }: {
 	const text = uiText();
 	const heading = title ?? (turn ? text.chatRunUsage : text.chatSessionUsage);
 	const hit = usage.hit === undefined ? undefined : cachePercent(usage.hit, turn);
-	const label = [optionalTokens(usage.total, true) ?? `${heading} · ${text.chatUsageUnknown}`,
+	const label = [optionalTokens(usage.total, true) ?? heading,
 		!turn && hit ? `${text.chatCacheHit} ${hit}` : undefined].filter(Boolean).join(' · ');
-	return <MetricPopover icon="database" label={label} heading={heading} value={optionalTokens(usage.total) ?? text.chatUsageUnknown} wrapValues>
+	return <MetricPopover icon="database" label={label} heading={heading} value={optionalTokens(usage.total)} wrapValues hover={!turn}>
 		<MetricRows rows={[[text.chatProviderModel, model && `${model.providerId} / ${model.model}`], ...usageRows(usage, turn)]} />
 		{busy && <p>{text.chatMetricsRunning}</p>}
 	</MetricPopover>;
@@ -67,19 +61,27 @@ export function useChatMetrics(history: readonly SavedRun[], live: RunState | nu
 	}, [history, live, subagents]);
 }
 
+function speedValue(speed: ConversationMetrics['speed']) {
+	return speed === undefined ? undefined : uiText().chatSpeedValue.replace('{n}',
+		speed.toLocaleString(undefined, { maximumFractionDigits: 1 }));
+}
+
+function activityRows({ modelMs, toolMs, lagMs, speed }: ConversationMetrics) {
+	const text = uiText();
+	return [
+		[text.chatModelDuration, chatDuration(modelMs, 1)], [text.chatToolDuration, chatDuration(toolMs, 1)],
+		[text.chatFirstDelta, chatDuration(lagMs, 1)], [text.chatSpeed, speedValue(speed)],
+	] as const;
+}
+
 export function ActivityMetric({ metrics, busy }: { metrics: ConversationMetrics; busy: boolean }) {
 	const text = uiText();
-	const { rounds, count, modelMs, toolMs, lagMs, speed } = metrics;
+	const { rounds, count } = metrics;
 	if (!count) return null;
 	const activity = text.chatActivitySummary.replace('{rounds}', abbreviatedNumber(rounds)).replace('{messages}', abbreviatedNumber(count));
-	const speedNumber = speed === undefined ? undefined : abbreviatedNumber(Math.round(speed));
-	const speedLabel = speedNumber === undefined ? '' : ` · ${text.chatSpeedValue.replace('{n}', speedNumber)}`;
-	return <MetricPopover icon="gauge" label={activity + speedLabel} heading={text.chatActivityStats} value={activity}>
-		<MetricRows rows={[
-			[text.chatModelDuration, chatDuration(modelMs, 1)], [text.chatToolDuration, chatDuration(toolMs, 1)],
-			[text.chatFirstDelta, chatDuration(lagMs, 1)],
-			[text.chatSpeed, speedNumber === undefined ? undefined : text.chatSpeedValue.replace('{n}', speedNumber)],
-		]} />
+	const speed = speedValue(metrics.speed);
+	return <MetricPopover icon="gauge" label={speed === undefined ? activity : `${activity} · ${speed}`} heading={text.chatActivityStats} value={activity} hover>
+		<MetricRows rows={activityRows(metrics)} />
 		{busy && <p>{text.chatMetricsRunning}</p>}
 	</MetricPopover>;
 }

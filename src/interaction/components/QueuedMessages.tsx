@@ -7,6 +7,8 @@ import type { MouseEventHandler, RefObject } from 'react';
 import { SIDE_CHAT_ICON } from '../../constants';
 import type { NoteRef, SkillRegistry, TaskRequest } from '../../types';
 import { composerShortcut } from '../composerKeyboard';
+import { tr } from '../skills/dialog';
+import { updateOverflowTitle } from '../overflowTitle';
 import { uiText } from '../uiText';
 import ChatIcon from './ChatIcon';
 import SkillTextArea from './SkillTextArea';
@@ -80,7 +82,8 @@ function QueueAttachment({ app, attachment: { kind, path }, visible }: { app: Ap
 
 	const size = file?.stat.size ?? externalSize;
 	const label = text.queueFile.replace('{name}', () => name);
-	return <span className="scribe-queue-file" role="img" aria-label={label} title={label}>
+	return <span className="scribe-queue-file" role="img" aria-label={label}
+		onPointerEnter={({ currentTarget }) => updateOverflowTitle(currentTarget, currentTarget.querySelector('.scribe-queue-file-name'))}>
 		<ChatIcon name={kind === 'folder' ? 'folder' : imageType ? 'image' : 'file-text'} />
 		<span className="scribe-queue-file-name">{name}</span>
 		{size !== undefined && <span className="scribe-queue-file-size">{fileSize(size)}</span>}
@@ -178,6 +181,7 @@ export default function QueuedMessages({
 					const locked = work.has(id);
 					const status = failed ? text.queueSendFailed : pending ? text.queueSending : undefined;
 					const selectionUnavailable = request.selection ? text.queueSelectionUnavailable : undefined;
+					const targetUnavailable = request.target ? tr('请在主聊天中单独发送这条任务。', 'Send this as a separate task in the main chat.') : undefined;
 					const preview = request.instruction.replace(/\s+/gu, ' ').trim();
 					const attachments = request.selection ? [{ path: request.selection.path }] : request.refs;
 					return <li className="scribe-queue-row" key={id} onKeyDown={(event) => {
@@ -196,7 +200,7 @@ export default function QueuedMessages({
 						{edit ? <SkillTextArea inputRef={editor} className="scribe-queue-editor" rows={2} aria-label={text.queueEdit}
 							registry={skills} refs={request.refs} scope={request.skillScope}
 							draft={edit.draft} readOnly={locked} onDraftChange={(draft) => setEditing({ id, draft })} />
-							: <span className="scribe-queue-preview">{preview}</span>}
+							: <span className="scribe-queue-preview">{request.target && <strong>{request.target.label} · </strong>}{preview}</span>}
 						{(status || selectionUnavailable) && <span className="scribe-queue-status" role="status">{status ?? selectionUnavailable}</span>}
 						<div className="scribe-queue-actions">
 							{edit ? <>
@@ -218,11 +222,11 @@ export default function QueuedMessages({
 								<Action icon="trash-2" label={text.queueDelete} disabled={locked} reason={status}
 									onClick={() => void perform(id, text.queueDeleteFailed, () => onDelete(id))} />
 								<Action icon="send" label={text.queueSteer} disabled={locked}
-									reason={status ?? selectionUnavailable ?? (!canSteer ? text.queueSteerUnavailable : undefined)}
+									reason={status ?? selectionUnavailable ?? targetUnavailable ?? (!canSteer ? text.queueSteerUnavailable : undefined)}
 									onClick={() => void perform(id, text.queueSteerFailed, () => onSteer(id))} />
 							</>}
 							{(!edit || locked) && <Action icon={SIDE_CHAT_ICON} label={text.queueSideChat} sideChat
-								reason={status ?? selectionUnavailable ?? (locked ? text.queueActionPending : undefined)}
+								reason={status ?? selectionUnavailable ?? targetUnavailable ?? (locked ? text.queueActionPending : undefined)}
 								onClick={(event) => {
 									const trigger = event.currentTarget;
 									void perform(id, (error) => error instanceof Error ? error.message : text.sideChatOpenFailed,

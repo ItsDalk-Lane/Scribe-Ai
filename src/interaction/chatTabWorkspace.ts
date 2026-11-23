@@ -16,7 +16,7 @@ export function loadExecutionMode(app: Pick<App, 'loadLocalStorage'>, conversati
 }
 
 export interface TabPaneState {
-	conversation: { id: string; runs: readonly unknown[]; queue?: readonly unknown[] };
+	conversation: { id: string; runs: readonly unknown[]; queue?: readonly unknown[]; hasGoal?: true };
 	open: boolean;
 	unread?: boolean;
 	hasDraft: boolean;
@@ -35,7 +35,7 @@ export function replaceActiveTabPane<P extends TabPaneState>(
 	const previous = workspace.panes[index];
 	if (!previous) return { activeId: workspace.activeId, panes: [...workspace.panes] };
 	const keep = previous.hasDraft || Boolean(previous.status) || Boolean(previous.title) || Boolean(previous.customTitle)
-		|| previous.conversation.runs.length > 0 || Boolean(previous.conversation.queue?.length);
+		|| previous.conversation.runs.length > 0 || Boolean(previous.conversation.queue?.length) || previous.conversation.hasGoal;
 	let panes: P[] = workspace.panes.map((pane, at) => at === index ? replacement : pane);
 	if (keep) panes = [...panes, { ...previous, open: false, unread: false }];
 	const idle = panes.filter((pane) => !pane.open && !pane.status && !pane.unread && !pane.hasDraft

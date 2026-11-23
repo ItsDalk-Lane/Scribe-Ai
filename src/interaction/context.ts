@@ -1,6 +1,6 @@
-import type { ConversationSnapshot, Message, RunEvent, RunState, RunStep, SavedRun, ToolApproval } from '../types';
+import type { Message, RunEvent, RunState, RunStep, SavedRun, ToolApproval } from '../types';
 import { toolSignature } from '../tools/support/toolSignature';
-import { chatTurnPreview, recordedTimeline, skippedNotice, toolRowId } from './chatTurnContent';
+import { recordedTimeline, skippedNotice, toolRowId } from './chatTurnContent';
 import { applyTimelineChange, attemptGroup, blockId, retryNotice } from './chatTimeline';
 import type { NoticeRow, TimelineItem, ToolRow } from './chatTimeline';
 
@@ -105,11 +105,6 @@ export function restoreExecution(run: DisplayedRun): ChatExecution {
 	const items = last?.kind === 'notice'
 		? [...restored.items.slice(0, -1), item, last] : [...restored.items, item];
 	return { ...restored, items };
-}
-
-export function conversationPreview(conversation: ConversationSnapshot) {
-	const run = conversation.runs.at(-1);
-	return run ? chatTurnPreview(restoreExecution(run), run.request.instruction, run.subagentReport) : { prompt: '', reply: '' };
 }
 
 export function updateExecution(previous: ChatExecution, event: RunEvent): ChatExecution {

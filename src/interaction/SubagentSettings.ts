@@ -99,6 +99,7 @@ function openRoleEditor(
 	const { settings, communication } = plugin.services;
 	const draft: SubagentRole = role ? { ...role } : { name: '', description: '', instructions: '' };
 	const modal = new Modal(plugin.app);
+	modal.modalEl.addClass('scribe-role-modal');
 	modal.setTitle(role ? copy.editRole : copy.addRole);
 	const content = modal.contentEl;
 	new Setting(content).setName(copy.roleName).addText((input) => {

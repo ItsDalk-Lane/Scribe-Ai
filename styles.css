@@ -60,6 +60,7 @@
 
 .scribe-chat-tab-strip {
 	--scribe-tab-width: 144px;
+	--scribe-tab-action-width: 28px;
 	box-sizing: border-box;
 	display: flex;
 	flex: 0 0 auto;
@@ -157,7 +158,7 @@ button.scribe-chat-tab-select {
 .scribe-chat-tab-strip :is(.scribe-chat-tab-action, .scribe-chat-tab-close) {
 	flex: none;
 	justify-content: center;
-	inline-size: 28px;
+	inline-size: var(--scribe-tab-action-width);
 	color: var(--text-muted);
 }
 
@@ -218,7 +219,8 @@ button.scribe-chat-tab-select {
 	display: none;
 }
 
-.scribe-app {
+.scribe-app,
+.scribe-history-panel {
 	--scribe-radius-detail: 4px;
 	--scribe-radius-compact: 8px;
 	--scribe-radius-control: 12px;
@@ -258,6 +260,9 @@ button.scribe-chat-tab-select {
 	--scribe-error: var(--text-error);
 	--scribe-success: var(--text-success);
 	--scribe-shadow: var(--shadow-s);
+}
+
+.scribe-app {
 	position: relative;
 	display: flex;
 	flex-direction: column;
@@ -271,7 +276,7 @@ button.scribe-chat-tab-select {
 	font: var(--scribe-type-body) var(--font-interface);
 }
 
-.scribe-app :is(.scribe-chat-column, .scribe-chat-hero, .scribe-chat-recents, .scribe-task-input, .scribe-approval-view, .scribe-queued-messages) {
+.scribe-app :is(.scribe-chat-column, .scribe-chat-hero, .scribe-chat-recents, .scribe-task-input, .scribe-approval-view, .scribe-queued-messages, .scribe-task-card) {
 	box-sizing: border-box;
 	inline-size: min(100%, var(--scribe-chat-width));
 	margin-inline: auto;
@@ -285,9 +290,30 @@ button.scribe-chat-tab-select {
 	--scribe-accent-active: color-mix(in srgb, var(--scribe-accent-hover) 86%, var(--scribe-ink));
 }
 
-.scribe-app button:not(.scribe-markdown-block *),
+/* 朗读标签和原生悬停提示各司其职，子控件保留自己的提示。 */
+:where(
+	.scribe-app, .scribe-history-panel, .scribe-chat-tab-strip, .scribe-settings-panel, .scribe-dialog-content,
+	.scribe-skill-modal, .scribe-resume-modal, .scribe-goal-modal, .scribe-role-modal
+) :where(
+	[role="group"], [role="region"], [role="dialog"], [role="listbox"], [role="tablist"], [role="radiogroup"],
+	section, nav, ul, pre, progress, td, input, textarea, select, [title]:not([title=""]),
+	.scribe-activity-toggle, .scribe-job-row, .scribe-queue-file, .scribe-chat-provider-trigger, .scribe-subagent-stop,
+	.scribe-skill-suggestions, .scribe-thinking-track, .scribe-add-provider-card,
+	.scribe-turn-navigator:not([data-compact]) .scribe-turn-marker, .scribe-turn-preview-action
+)[aria-label]:not(:where(.scribe-markdown-block *)),
+:where(.scribe-history-panel, .scribe-settings-tabs, .scribe-settings-tab)[aria-label] {
+	& > * {
+		--no-tooltip: initial;
+	}
+
+	& {
+		--no-tooltip: true;
+	}
+}
+
+:is(.scribe-app, .scribe-history-panel) button:not(.scribe-markdown-block *),
 .scribe-app select,
-.scribe-app input[type="text"] {
+:is(.scribe-app, .scribe-history-panel) input[type="text"] {
 	box-sizing: border-box;
 	min-height: var(--scribe-height-control);
 	max-width: 100%;
@@ -323,7 +349,7 @@ button.scribe-chat-tab-select {
 	color: var(--scribe-ink);
 }
 
-.scribe-app button:disabled {
+:is(.scribe-app, .scribe-history-panel) button:disabled {
 	--scribe-hover: var(--scribe-raised);
 	--scribe-active: var(--scribe-raised);
 	--scribe-accent-hover: var(--scribe-accent);
@@ -557,7 +583,7 @@ button.scribe-chat-tab-select {
 	cursor: default;
 }
 
-.scribe-app button.scribe-chat-icon-button {
+:is(.scribe-app, .scribe-history-panel) button.scribe-chat-icon-button {
 	display: grid;
 	width: 28px;
 	height: 28px;
@@ -623,6 +649,42 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	font-weight: 600;
 }
 
+.scribe-history-panel {
+	position: absolute;
+	z-index: 6;
+	inset-block-start: calc(100% + 4px);
+	inset-inline-end: 8px;
+	box-sizing: border-box;
+	inline-size: min(320px, calc(100% - 16px));
+	max-block-size: min(400px, 42dvh);
+	padding: var(--scribe-space-action);
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--radius-m);
+	background: var(--scribe-page);
+	color: var(--scribe-ink);
+	box-shadow: var(--scribe-shadow);
+	font: var(--scribe-type-secondary) var(--font-interface);
+}
+
+.scribe-history-panel button.scribe-history-archive-entry,
+.scribe-history-archive-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-block-end: 4px;
+}
+
+.scribe-history-panel button.scribe-history-archive-entry {
+	width: 100%;
+	text-align: start;
+}
+
+.scribe-history-archive-entry > span:not(.scribe-chat-icon) {
+	flex: 1;
+}
+
 .scribe-conversation-list {
 	display: grid;
 	gap: 4px;
@@ -649,7 +711,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	margin-inline-end: 4px;
 }
 
-.scribe-app button.scribe-conversation-row {
+:is(.scribe-app, .scribe-history-panel) button.scribe-conversation-row {
 	display: flex;
 	align-items: center;
 	gap: 8px;
@@ -662,7 +724,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	text-align: start;
 }
 
-.scribe-app button.scribe-conversation-row[aria-current] {
+:is(.scribe-app, .scribe-history-panel) button.scribe-conversation-row[aria-current] {
 	background: var(--scribe-hover);
 }
 
@@ -692,7 +754,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 
 .scribe-conversation-row time {
 	flex: none;
-	min-inline-size: 60px;
+	min-inline-size: calc(3 * var(--scribe-height-compact) + 2 * var(--scribe-space-row));
 	color: var(--scribe-muted);
 	font-size: var(--font-ui-smaller);
 	text-align: end;
@@ -710,86 +772,13 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	}
 }
 
-.scribe-history-card,
-.scribe-history-empty {
-	box-sizing: border-box;
-	max-block-size: 100%;
-	overflow-y: auto;
-	padding: var(--scribe-space-action);
-	border: 1px solid var(--scribe-border);
-	border-radius: var(--scribe-radius-control);
-	background: var(--scribe-page);
-	box-shadow: var(--scribe-shadow);
-}
-
-.scribe-history-card {
-	display: grid;
-	grid-template-columns: minmax(0, 1fr) auto;
-	gap: var(--scribe-space-row);
-}
-
-.scribe-history-card[data-compact] {
-	border: 0;
-	border-radius: var(--scribe-radius-compact);
-	box-shadow: none;
-}
-
-.scribe-history-card[data-compact][data-current] {
-	background: var(--scribe-hover);
-}
-
-.scribe-app button.scribe-history-choice {
-	display: grid;
-	align-content: start;
-	gap: var(--scribe-space-row);
-	width: 100%;
-	min-width: 0;
-	padding: 0;
-	border: 0;
-	background: transparent;
-	text-align: start;
-	white-space: normal;
-}
-
-.scribe-history-choice > :is(strong, span) {
-	display: -webkit-box;
-	overflow: hidden;
-	overflow-wrap: anywhere;
-	-webkit-box-orient: vertical;
-	-webkit-line-clamp: 2;
-}
-
-.scribe-history-choice > strong {
-	font-weight: 600;
-}
-
-.scribe-history-choice time,
-.scribe-history-choice small {
-	color: var(--scribe-muted);
-	font: var(--scribe-type-caption) var(--font-interface);
-}
-
-.scribe-history-reply {
-	color: var(--scribe-muted);
-}
-
 .scribe-history-actions {
 	display: flex;
 	flex-direction: column;
 	align-self: start;
 }
 
-.scribe-history-card[data-compact] .scribe-history-actions {
-	flex-direction: row;
-}
-
-.scribe-history-empty p {
-	margin: 0;
-	padding: var(--scribe-space-action);
-	color: var(--scribe-muted);
-}
-
-.scribe-app button.scribe-conversation-delete:hover {
+:is(.scribe-app, .scribe-history-panel) button.scribe-conversation-delete:hover {
 	color: var(--text-error);
 }
 
@@ -803,7 +792,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	padding-inline: 4px;
 }
 
-.scribe-app .scribe-conversation-editor input {
+:is(.scribe-app, .scribe-history-panel) .scribe-conversation-editor input {
 	min-width: 0;
 	min-height: 28px;
 	border-radius: var(--radius-m);
@@ -842,6 +831,8 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 }
 
 .scribe-app textarea.scribe-input {
+	position: relative;
+	display: block;
 	box-sizing: border-box;
 	width: 100%;
 	min-height: 60px;
@@ -852,7 +843,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	background: transparent;
 	color: var(--text-normal);
 	box-shadow: none;
-	font: 14px / 20px var(--font-interface);
+	font: 14px / var(--scribe-compose-line-height, 20px) var(--font-interface);
 	field-sizing: content;
 	resize: none;
 	overflow-y: auto;
@@ -1233,7 +1224,6 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	fill: currentColor;
 }
 
-.scribe-context-actions,
 .scribe-execution-picker {
 	position: relative;
 	flex: 0 0 auto;
@@ -1241,16 +1231,6 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 
 .scribe-app button.scribe-compose-execution[data-full-access] {
 	color: var(--scribe-warning);
-}
-
-@container (width < 26rem) {
-	.scribe-compose-toolbar {
-		position: relative;
-	}
-
-	.scribe-context-actions {
-		position: static;
-	}
 }
 
 .scribe-context-popover {
@@ -1283,10 +1263,45 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	overflow-wrap: anywhere;
 }
 
-.scribe-context-popover > button[aria-expanded] > .scribe-chat-icon:last-child {
-	width: 12px;
-	height: 12px;
-	margin-inline-start: auto;
+.scribe-context-popover.scribe-reference-menu {
+	display: flex;
+	flex-direction: column;
+}
+
+.scribe-reference-search {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding-block-end: 4px;
+}
+
+.scribe-reference-search input {
+	flex: 1;
+	min-width: 0;
+}
+
+.scribe-reference-menu [role="listbox"] {
+	min-height: 0;
+	overflow-y: auto;
+}
+
+.scribe-app .scribe-reference-menu button[role="option"] {
+	width: 100%;
+	white-space: nowrap;
+}
+
+.scribe-app .scribe-reference-menu button[aria-selected="true"] {
+	background-color: var(--background-modifier-hover);
+}
+
+.scribe-reference-menu [role="option"] :is(span:not(.scribe-chat-icon), small) {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.scribe-reference-menu [role="option"] small {
+	color: var(--text-muted);
 }
 
 .scribe-context-popover.scribe-execution-menu {
@@ -1313,12 +1328,6 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 .scribe-execution-option > small {
 	color: var(--text-muted);
 	font: var(--scribe-type-caption) var(--font-interface);
-}
-
-.scribe-context-outside {
-	display: grid;
-	min-width: 0;
-	padding-inline-start: 12px;
 }
 
 .scribe-context-chips {
@@ -1495,7 +1504,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 
 .scribe-turn-navigator {
 	--scribe-turn-marker-width: calc(var(--scribe-timeline-icon) + var(--scribe-space-row));
-	/* 两侧的短线朝聊天内容伸长，最多占用边缘的留白。 */
+	/* 短线朝聊天内容伸长，最多占用边缘的留白。 */
 	--scribe-turn-tick-range: clamp(0px, calc((100cqw - var(--scribe-chat-width)) / 2 - 12px), 20px);
 	--scribe-turn-rail-width: max(var(--scribe-turn-marker-width), calc(8px + var(--scribe-turn-tick-range)));
 	--scribe-turn-preview-start: calc(var(--scribe-turn-marker-width) + var(--scribe-space-section));
@@ -1507,17 +1516,6 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	block-size: max-content;
 	max-block-size: calc(100% - 2 * var(--scribe-space-action));
 	margin-block: auto;
-}
-
-.scribe-turn-navigator[data-side="right"] {
-	inset-inline-start: auto;
-	inset-inline-end: var(--scribe-rail-inset, var(--scribe-space-row));
-}
-
-.scribe-turn-navigator[data-side="right"]:not([data-compact]) button.scribe-turn-marker {
-	justify-items: end;
-	justify-content: end;
-	padding-inline: 0 2px;
 }
 
 .scribe-turn-nav-items {
@@ -1619,16 +1617,6 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	content: "";
 }
 
-.scribe-turn-navigator[data-side="right"] .scribe-turn-preview {
-	inset-inline-start: auto;
-	inset-inline-end: var(--scribe-turn-preview-start);
-}
-
-.scribe-turn-navigator[data-side="right"] .scribe-turn-preview::before {
-	inset-inline-end: auto;
-	inset-inline-start: 100%;
-}
-
 .scribe-app button.scribe-turn-preview-action {
 	--scribe-hover: var(--scribe-page);
 	--scribe-active: var(--scribe-page);
@@ -1691,11 +1679,6 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	background: var(--scribe-page);
 	box-shadow: var(--scribe-shadow);
 	scrollbar-width: thin;
-}
-
-.scribe-turn-navigator[data-compact][data-side="right"] .scribe-turn-nav-items {
-	inset-inline-start: auto;
-	inset-inline-end: 0;
 }
 
 .scribe-app .scribe-turn-navigator[data-compact] button.scribe-turn-marker {
@@ -2375,6 +2358,11 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	padding-block-start: var(--scribe-timeline-detail-gap);
 }
 
+.scribe-skill-activity .scribe-skill-caption {
+	color: var(--scribe-muted);
+	font: var(--scribe-type-caption) var(--font-interface);
+}
+
 .scribe-app .scribe-tool-body .scribe-chat-pre {
 	max-height: 24rem;
 	margin: 0;
@@ -2971,6 +2959,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 
 .scribe-settings-tabs {
 	display: flex;
+	flex-wrap: wrap;
 	gap: 4px;
 	margin-bottom: 12px;
 	border-bottom: 1px solid var(--background-modifier-border);
@@ -3009,10 +2998,97 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	font-size: var(--font-ui-smaller);
 }
 
-.scribe-writing-rule-input {
-	display: block;
+.scribe-instructions-modal.modal {
+	display: flex;
+	width: min(94vw, 960px);
+	height: min(90vh, 800px);
+	flex-direction: column;
+	padding: 0;
+}
+
+.is-popout-modal .scribe-instructions-overlay {
+	inset-block-start: var(--titlebar-height, 30px);
+}
+
+.is-popout-modal .scribe-instructions-modal.modal {
 	width: 100%;
-	resize: vertical;
+	height: 100%;
+	max-width: none;
+	max-height: none;
+	border: 0;
+	border-radius: 0;
+}
+
+.scribe-instructions-modal > :is(.modal-header, .modal-header-button, .modal-close-button) {
+	display: none;
+}
+
+.scribe-instructions-modal > .modal-content {
+	display: flex;
+	min-height: 0;
+	flex: 1;
+	flex-direction: column;
+	margin: 0;
+	overflow: hidden;
+}
+
+.scribe-instructions-toolbar,
+.scribe-instructions-heading,
+.scribe-instructions-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.scribe-instructions-toolbar {
+	flex-wrap: wrap;
+	justify-content: space-between;
+	padding: 10px 14px;
+}
+
+.scribe-instructions-heading h2 {
+	margin: 0;
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-medium);
+}
+
+.scribe-instructions-back {
+	gap: 5px;
+}
+
+.scribe-instructions-back span {
+	display: flex;
+}
+
+.scribe-instructions-body {
+	display: flex;
+	min-height: 0;
+	flex: 1;
+	flex-direction: column;
+	padding: clamp(16px, 4vh, 40px) clamp(20px, 8vw, 72px) 24px;
+}
+
+.scribe-instructions-modal textarea.scribe-instructions-input {
+	width: 100%;
+	min-height: 0;
+	flex: 1;
+	resize: none;
+	border: 0;
+	padding: 4px;
+	background: transparent;
+	box-shadow: none;
+	font-family: var(--font-text);
+	font-size: var(--font-ui-medium);
+	line-height: 1.65;
+}
+
+.scribe-instructions-modal textarea.scribe-instructions-input.is-source {
+	font-family: var(--font-monospace);
+}
+
+.scribe-instructions-error {
+	margin: 8px 4px 0;
+	color: var(--text-error);
 }
 
 .scribe-models-panel {
@@ -3289,6 +3365,10 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	flex-direction: column;
 }
 
+.scribe-configure-modal .scribe-dialog-content {
+	position: relative;
+}
+
 .scribe-configure-modal .modal-title,
 .scribe-model-config-modal .modal-title {
 	display: none;
@@ -3345,21 +3425,21 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	gap: 6px;
 }
 
-/* 配置弹窗的四项：左侧标题，右侧固定宽度控件（对照参考图） */
-.scribe-dialog-fields > .scribe-form-field {
+/* 横排配置项使用左侧标题和右侧控件。 */
+.scribe-dialog-fields > .scribe-form-field:not(.is-stacked) {
 	flex-direction: row;
 	align-items: flex-start;
 	justify-content: space-between;
 	gap: 16px;
 }
 
-.scribe-dialog-fields > .scribe-form-field > label {
+.scribe-dialog-fields > .scribe-form-field:not(.is-stacked) > label {
 	flex: 0 0 auto;
 	padding-top: 6px;
 	white-space: nowrap;
 }
 
-.scribe-dialog-fields > .scribe-form-field > .scribe-form-control {
+.scribe-dialog-fields > .scribe-form-field:not(.is-stacked) > .scribe-form-control {
 	flex: 0 0 260px;
 	width: 260px;
 	max-width: 62%;
@@ -3562,6 +3642,138 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 
 .scribe-modal-actions.is-between {
 	justify-content: space-between;
+}
+
+.scribe-task-card {
+	flex: none;
+	min-width: 0;
+	max-height: 45%;
+	overflow: auto;
+	overflow-wrap: anywhere;
+	padding: 8px 12px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+}
+
+.scribe-task-card .scribe-modal-actions {
+	flex-wrap: wrap;
+	margin-block-start: 8px;
+	padding: 0;
+}
+
+.scribe-task-card-plan {
+	max-height: 25vh;
+	overflow: auto;
+}
+
+.scribe-goal-status {
+	box-sizing: border-box;
+	flex: none;
+	min-width: 0;
+	inline-size: var(--scribe-chat-width);
+	margin: 0 auto 6px;
+	border: 1px solid var(--scribe-border);
+	border-radius: var(--scribe-radius-control);
+	background: var(--scribe-raised);
+}
+
+.scribe-goal-status-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto auto;
+	align-items: center;
+	gap: 4px;
+	min-block-size: 34px;
+	padding: 2px 5px;
+}
+
+.scribe-app .scribe-goal-status button.scribe-goal-status-toggle {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	min-height: 28px;
+	padding: 2px 5px;
+	border: 0;
+	border-radius: var(--scribe-radius-compact);
+	background: transparent;
+	text-align: start;
+}
+
+.scribe-goal-status-toggle > strong {
+	flex: none;
+	font-weight: 600;
+}
+
+.scribe-goal-status-icon,
+.scribe-goal-status-chevron {
+	display: flex;
+	flex: none;
+	color: var(--scribe-muted);
+}
+
+.scribe-goal-status[data-status="active"] .scribe-goal-status-icon {
+	color: var(--text-accent, var(--scribe-accent));
+}
+
+.scribe-goal-status[data-status="complete"] .scribe-goal-status-icon {
+	color: var(--scribe-success, var(--scribe-ink));
+}
+
+.scribe-goal-status-toggle[aria-expanded="true"] .scribe-goal-status-chevron {
+	rotate: 180deg;
+}
+
+.scribe-goal-status-objective {
+	overflow: hidden;
+	color: var(--scribe-muted);
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.scribe-goal-status-time {
+	color: var(--scribe-muted);
+	white-space: nowrap;
+	font: var(--scribe-type-caption) var(--font-interface);
+	font-variant-numeric: tabular-nums;
+}
+
+.scribe-goal-status-actions {
+	display: flex;
+	gap: 1px;
+}
+
+.scribe-app .scribe-goal-status :is(.scribe-goal-status-toggle, .scribe-chat-icon-button):hover {
+	background: var(--scribe-hover);
+	color: var(--scribe-ink);
+}
+
+.scribe-goal-status-details {
+	max-block-size: min(32vh, 240px);
+	overflow: auto;
+	overflow-wrap: anywhere;
+	padding: 8px 10px;
+	border-block-start: 1px solid var(--scribe-border);
+	font: var(--scribe-type-secondary) var(--font-interface);
+}
+
+.scribe-goal-status-details :is(p, ul) {
+	margin-block: 0 4px;
+}
+
+.scribe-goal-status-details > p:first-child {
+	white-space: pre-wrap;
+}
+
+@container (max-width: 360px) {
+	.scribe-goal-status-chevron {
+		display: none;
+	}
+
+	.scribe-app .scribe-goal-status button.scribe-chat-icon-button {
+		width: 25px;
+		height: 26px;
+		min-height: 26px;
+	}
 }
 
 .scribe-resume-contents {
@@ -3787,7 +3999,6 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 }
 
 
-/* 模型栏：左侧“添加模型”下拉铺到右侧“获取模型”之前，面板宽度与它对齐 */
 .scribe-model-bar {
 	display: flex;
 	flex-shrink: 0;
@@ -3797,7 +4008,6 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 }
 
 .scribe-model-picker {
-	position: relative;
 	display: flex;
 	min-width: 0;
 	flex: 1;
@@ -3831,21 +4041,24 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 }
 
 .scribe-model-panel {
-	/* 向上浮出，宽度与触发按钮一致，盖住上方字段区而不是撑高弹窗 */
+	/* 居中于配置窗口，面板高度不超过窗口可见区域。 */
 	position: absolute;
-	left: 0;
-	right: 0;
-	bottom: calc(100% + 8px);
+	top: 50%;
+	left: 50%;
 	z-index: 20;
 	display: flex;
-	max-height: 320px;
+	box-sizing: border-box;
+	width: min(440px, calc(100% - 16px));
+	max-height: min(320px, calc(100% - 16px));
 	flex-direction: column;
 	gap: 8px;
+	overflow: auto;
 	padding: 10px;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-m);
 	background: var(--background-primary);
 	box-shadow: var(--shadow-l);
+	transform: translate(-50%, -50%);
 }
 
 .scribe-model-panel-title {
@@ -3871,6 +4084,25 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 
 .scribe-model-panel-row:hover {
 	background: var(--scribe-hover);
+}
+
+.scribe-model-panel-summary {
+	display: flex;
+	min-width: 0;
+	flex: 1;
+	flex-direction: column;
+	gap: 3px;
+}
+
+.scribe-model-panel-details {
+	display: flex;
+	flex-wrap: wrap;
+	column-gap: 10px;
+	row-gap: 2px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
+	overflow-wrap: anywhere;
 }
 
 .scribe-model-panel-name {
@@ -4418,7 +4650,29 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	min-width: 0;
 }
 
-/* 贴在输入框文字下方的背景层，只画技能标签底色，文字仍由 textarea 绘制。 */
+.scribe-composer-skill-field:has(.scribe-skill-mention-chip) {
+	--scribe-compose-line-height: 24px;
+}
+
+/* 背景层绘制标签和图标，文字仍由输入框绘制。 */
+.scribe-composer-skill-field[data-target] {
+	--scribe-target-icon-width: 12px;
+	--scribe-target-icon-gap: 4px;
+}
+
+.scribe-app .scribe-composer-skill-field[data-target] > textarea.scribe-input {
+	text-indent: calc(var(--scribe-target-icon-width) + var(--scribe-target-icon-gap));
+}
+
+.scribe-target-mention-chip > .scribe-chat-icon {
+	width: var(--scribe-target-icon-width);
+	height: var(--scribe-target-icon-width);
+	margin-inline-end: var(--scribe-target-icon-gap);
+	vertical-align: -1px;
+	color: var(--text-normal);
+}
+
+
 .scribe-skill-mention-layer {
 	position: absolute;
 	inset: 0;
@@ -4429,17 +4683,27 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	color: transparent;
 	pointer-events: none;
 	user-select: none;
-	font: 14px / 20px var(--font-interface);
+	font: 14px / var(--scribe-compose-line-height, 20px) var(--font-interface);
 	white-space: pre-wrap;
 	overflow-wrap: break-word;
 }
 
 .scribe-skill-mention-chip {
-	padding: 0 .35em;
-	margin: 0 -.35em;
+	/* 左右留白与外边距相抵，标签和原文字的换行位置保持一致。 */
+	padding: .15em .23em;
+	margin-inline: -.23em;
 	border-radius: 999px;
-	background: var(--tag-background, var(--background-modifier-hover));
-	box-shadow: inset 0 0 0 1px var(--tag-background-hover, transparent);
+	-webkit-box-decoration-break: clone;
+	box-decoration-break: clone;
+	background: linear-gradient(
+		color-mix(in srgb, var(--scribe-accent) 34%, var(--scribe-raised)),
+		color-mix(in srgb, var(--scribe-accent) 19%, var(--scribe-raised))
+	);
+	box-shadow:
+		inset 0 0 0 1px color-mix(in srgb, var(--scribe-accent) 78%, var(--text-normal)),
+		inset 0 2px 2px rgb(255 255 255 / 18%),
+		0 1px 1px rgb(0 0 0 / 22%),
+		0 3px 5px rgb(0 0 0 / 34%);
 }
 
 .scribe-queue-row > .scribe-composer-skill-field {
@@ -4636,12 +4900,12 @@ pre.scribe-skill-preview { white-space: pre-wrap; }
 	.scribe-skill-detail-head > :last-child { grid-column: 2; }
 }
 
-.scribe-slash-suggestions.scribe-context-popover {
+:is(.scribe-slash-suggestions, .scribe-reference-menu).scribe-context-popover {
 	z-index: 6;
 	inset-block-end: calc(100% + 10px);
 	width: 100%;
 	max-width: 100%;
-	max-height: min(30rem, 55dvh, var(--scribe-slash-height, 30rem));
+	max-height: min(30rem, 55dvh, var(--scribe-composer-popover-height, 30rem));
 	padding: 6px;
 	border-radius: 12px;
 	box-shadow: var(--shadow-l);
@@ -4653,7 +4917,7 @@ pre.scribe-skill-preview { white-space: pre-wrap; }
 	inset-block-start: calc(100% + 10px);
 }
 
-.scribe-app .scribe-slash-suggestions button {
+.scribe-app :is(.scribe-slash-suggestions button, .scribe-reference-menu button[role="option"]) {
 	display: flex;
 	align-items: center;
 	gap: 8px;
@@ -4751,6 +5015,42 @@ pre.scribe-skill-preview { white-space: pre-wrap; }
 	overflow-wrap: anywhere;
 }
 
+.scribe-slash-mcp-row {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	align-items: center;
+	gap: 2px 8px;
+	padding: 6px 4px;
+	font-size: var(--font-ui-small);
+	overflow-wrap: anywhere;
+}
+
+.scribe-slash-mcp-status {
+	grid-column: 2 / -1;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.scribe-app .scribe-slash-suggestions :is(button.scribe-slash-mcp-row, button.scribe-slash-agent-row) {
+	display: grid;
+	justify-items: start;
+	gap: 2px 8px;
+	text-align: start;
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+
+.scribe-app .scribe-slash-suggestions :is(button.scribe-slash-mcp-row, button.scribe-slash-agent-row):disabled {
+	background: transparent;
+	color: var(--text-muted);
+	cursor: default;
+}
+
+.scribe-slash-agent-description {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
 .scribe-slash-panel-field {
 	width: 100%;
 	margin-top: 8px;
@@ -4827,4 +5127,273 @@ pre.scribe-skill-preview { white-space: pre-wrap; }
 	height: 28px;
 	min-height: 0;
 	padding: 0;
+}
+
+.scribe-mcp-panel {
+	padding: 16px;
+}
+
+.scribe-mcp-page, .scribe-mcp-modal .modal-content {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	min-width: 0;
+}
+
+.scribe-mcp-header, .scribe-mcp-toolbar, .scribe-mcp-loading, .scribe-mcp-modal-heading, .scribe-mcp-auth {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.scribe-mcp-header, .scribe-mcp-loading, .scribe-mcp-modal-heading {
+	justify-content: space-between;
+}
+
+.scribe-mcp-header {
+	align-items: flex-start;
+}
+
+.scribe-mcp-heading {
+	flex: 1 1 12rem;
+	min-width: 0;
+}
+
+.scribe-mcp-heading h3 {
+	margin: 0 0 4px;
+	font-size: var(--font-ui-medium);
+	font-weight: var(--font-semibold);
+	overflow-wrap: anywhere;
+}
+
+.scribe-mcp-description, .scribe-mcp-loading, .scribe-mcp-field small, .scribe-mcp-tool-detail {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.5;
+}
+
+.scribe-mcp-description {
+	margin: 0;
+	overflow-wrap: anywhere;
+}
+
+.scribe-mcp-toolbar .search-input-container {
+	flex: 1 1 12rem;
+}
+
+.scribe-mcp-toolbar .search-input-container input, .scribe-mcp-field :is(input, select, textarea) {
+	width: 100%;
+}
+
+.scribe-mcp-group {
+	display: inline-flex;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+}
+
+.scribe-mcp-group button {
+	border: 0;
+	border-radius: 0;
+	padding-inline: 10px;
+	color: var(--text-muted);
+	background: transparent;
+	box-shadow: none;
+	font-size: var(--font-ui-smaller);
+}
+
+.scribe-mcp-group button:first-child { border-start-start-radius: var(--radius-m); border-end-start-radius: var(--radius-m); }
+.scribe-mcp-group button:last-child { border-start-end-radius: var(--radius-m); border-end-end-radius: var(--radius-m); }
+.scribe-mcp-group button + button { border-inline-start: 1px solid var(--background-modifier-border); }
+.scribe-mcp-group button[aria-pressed="true"] { color: var(--text-normal); background: var(--background-modifier-hover); }
+
+.scribe-mcp-list, .scribe-mcp-fields, .scribe-mcp-tools {
+	display: grid;
+	min-width: 0;
+	gap: 8px;
+}
+
+.scribe-mcp-empty, .scribe-mcp-row, .scribe-mcp-tool {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+}
+
+.scribe-mcp-empty {
+	padding: 28px 12px;
+	text-align: center;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.scribe-mcp-row, .scribe-mcp-tool-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+	padding: 6px 8px;
+}
+
+.scribe-mcp-row:hover, .scribe-mcp-row.is-drop-target {
+	background: var(--background-modifier-hover);
+}
+
+.scribe-mcp-row button.scribe-mcp-row-main, .scribe-mcp-tool-head button.scribe-mcp-tool-name {
+	min-width: 0;
+	height: auto;
+	flex: 1;
+	justify-content: flex-start;
+	padding: 4px 0;
+	background: transparent;
+	box-shadow: none;
+	text-align: start;
+}
+
+.scribe-mcp-row button.scribe-mcp-row-main {
+	gap: 6px;
+}
+
+.scribe-mcp-row-main span:last-child, .scribe-mcp-tool-name span:last-child {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.scribe-mcp-row .scribe-mcp-reorder {
+	width: 22px;
+	height: 24px;
+	padding: 0;
+	justify-content: center;
+	cursor: grab;
+}
+
+.scribe-mcp-status-dot {
+	width: 7px;
+	height: 7px;
+	flex-shrink: 0;
+	border-radius: 50%;
+	background: var(--background-modifier-border-hover);
+}
+
+.scribe-mcp-status-dot[data-state="ready"] { background: var(--text-success); }
+.scribe-mcp-status-dot[data-state="connecting"], .scribe-mcp-status-dot[data-state="auth"] { background: var(--text-warning); }
+.scribe-mcp-status-dot[data-state="error"] { background: var(--text-error); }
+
+.scribe-mcp-type, .scribe-mcp-version {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.scribe-mcp-type {
+	padding: 2px 5px;
+	border-radius: var(--radius-s);
+	background: var(--background-secondary);
+	font-family: var(--font-monospace);
+}
+
+.scribe-mcp-row button[role="switch"], .scribe-mcp-modal button[role="switch"] {
+	position: relative;
+	width: 30px;
+	height: 17px;
+	min-width: 0;
+	flex: 0 0 30px;
+	padding: 0;
+	border: 0;
+	border-radius: 10px;
+	background: var(--background-modifier-border-hover);
+	box-shadow: none;
+}
+
+.scribe-mcp-row button[role="switch"]::after, .scribe-mcp-modal button[role="switch"]::after {
+	position: absolute;
+	inset-block-start: 3px;
+	inset-inline-start: 3px;
+	width: 11px;
+	height: 11px;
+	border-radius: 50%;
+	background: var(--toggle-thumb-color, white);
+	content: '';
+}
+
+.scribe-mcp-row button[role="switch"][aria-checked="true"], .scribe-mcp-modal button[role="switch"][aria-checked="true"] { background: var(--interactive-accent); }
+.scribe-mcp-row button[role="switch"][aria-checked="true"]::after, .scribe-mcp-modal button[role="switch"][aria-checked="true"]::after { inset-inline-start: 16px; }
+.scribe-mcp-panel button:focus-visible, .scribe-mcp-modal button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 1px; }
+.scribe-mcp-panel [hidden], .scribe-mcp-modal [hidden] { display: none !important; }
+
+.scribe-mcp-threshold { display: inline-flex; align-items: center; gap: 6px; margin-inline-start: 8px; }
+.scribe-mcp-threshold input { width: 5.5rem; }
+.scribe-mcp-announcement { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+
+.scribe-mcp-modal .modal-content {
+	max-height: 73vh;
+	overflow-y: auto;
+	/* 给悬浮滚动条留出空间，避免盖住右侧的控件。 */
+	padding-inline-end: max(16px, calc(var(--scrollbar-width, 12px) + 4px));
+}
+.scribe-mcp-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.scribe-mcp-field { display: grid; align-content: start; gap: 4px; min-width: 0; font-size: var(--font-ui-small); }
+.scribe-mcp-fields > .is-wide { grid-column: 1 / -1; }
+.scribe-mcp-field textarea { resize: vertical; }
+.scribe-mcp-code { font-family: var(--font-monospace); }
+.scribe-mcp-secret-map { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 8px; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); }
+.scribe-mcp-secret-map legend { padding: 0 4px; font-size: var(--font-ui-small); }
+.scribe-mcp-secret-map > button { justify-self: start; }
+.scribe-mcp-secret-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.scribe-mcp-secret-name { flex: 0 1 40%; min-width: 0; }
+.scribe-mcp-secret-picker, .scribe-mcp-secret-picker .scribe-secret-button { flex: 1; min-width: 0; }
+.scribe-mcp-secret-picker .scribe-secret-button { display: inline-flex; align-items: center; width: auto; }
+.scribe-mcp-secret-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scribe-mcp-secret-picker .scribe-secret-dot { flex-shrink: 0; }
+.scribe-mcp-advanced { min-width: 0; border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); padding: 8px 10px; }
+.scribe-mcp-advanced summary { cursor: pointer; font-size: var(--font-ui-small); }
+.scribe-mcp-advanced[open] summary { margin-bottom: 8px; }
+.scribe-mcp-required { display: flex; align-items: center; gap: 4px; font-size: var(--font-ui-small); }
+.scribe-mcp-status, .scribe-mcp-tool-switch { display: inline-flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: var(--font-ui-smaller); overflow-wrap: anywhere; }
+.scribe-mcp-tool-detail { padding: 0 8px 8px; overflow-wrap: anywhere; }
+.scribe-mcp-tool-detail pre { margin: 8px 0 0; max-height: 12em; overflow: auto; white-space: pre-wrap; }
+.scribe-mcp-issue { margin: 0; color: var(--text-error); font-size: var(--font-ui-small); overflow-wrap: anywhere; }
+.scribe-mcp-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.scribe-mcp-actions .mod-warning { margin-inline-end: auto; }
+.scribe-mcp-import textarea { min-height: 12rem; }
+.scribe-mcp-import .scribe-mcp-issue { max-height: 9rem; overflow: auto; }
+
+@media (max-width: 540px) {
+	.scribe-mcp-panel { padding-inline: 8px; }
+	.scribe-mcp-fields { grid-template-columns: minmax(0, 1fr); }
+	.scribe-mcp-tool-head { flex-wrap: wrap; }
+	.scribe-mcp-tool-head button.scribe-mcp-tool-name { flex-basis: 100%; }
+}
+
+.scribe-app button.scribe-compose-mode {
+	width: auto;
+	padding-inline: 7px;
+	gap: 4px;
+	border: 1px solid var(--background-modifier-border);
+	background-color: var(--background-secondary);
+	font-size: var(--font-ui-small);
+	white-space: nowrap;
+}
+
+.scribe-compose-mode-icon {
+	display: grid;
+	color: var(--text-accent);
+}
+
+.scribe-compose-mode-icon .scribe-chat-icon {
+	grid-area: 1 / 1;
+	width: 14px;
+	height: 14px;
+}
+
+.scribe-compose-mode-icon .scribe-chat-icon:last-child,
+.scribe-compose-mode:not(:disabled):is(:hover, :focus-visible) .scribe-compose-mode-icon .scribe-chat-icon:first-child {
+	visibility: hidden;
+}
+
+.scribe-compose-mode:not(:disabled):is(:hover, :focus-visible) .scribe-compose-mode-icon .scribe-chat-icon:last-child {
+	visibility: visible;
+}
+
+@media (hover: none) {
+	.scribe-compose-mode:not(:disabled) .scribe-compose-mode-icon .scribe-chat-icon:first-child { visibility: hidden; }
+	.scribe-compose-mode:not(:disabled) .scribe-compose-mode-icon .scribe-chat-icon:last-child { visibility: visible; }
 }

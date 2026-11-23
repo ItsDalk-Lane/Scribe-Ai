@@ -1,14 +1,16 @@
-import { useCallback, useRef } from 'react';
-import type { ConversationStore, ConversationSummary } from '../../types';
-import { conversationPreview } from '../context';
+import { useEffect, useEffectEvent, useId, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import type { ConversationSummary } from '../../types';
+import { updateOverflowTitle } from '../overflowTitle';
 import { uiText } from '../uiText';
 import ChatIcon from './ChatIcon';
 import EditableConversation from './EditableConversation';
-import { tr } from '../skills/dialog';
 import type { EditableConversationProps } from './EditableConversation';
-import HistoryPreviewCard from './HistoryPreviewCard';
-import type { HistoryExcerpt } from './HistoryPreviewCard';
-import JumpNavigator from './JumpNavigator';
+
+export interface HistoryTrigger {
+	button: HTMLElement;
+	registerToggle: (toggle?: () => void) => void;
+}
 
 interface ConversationListProps extends Omit<EditableConversationProps, 'conversation'> {
 	conversations: ConversationSummary[];
@@ -16,16 +18,17 @@ interface ConversationListProps extends Omit<EditableConversationProps, 'convers
 	onSelect: (id: string) => void;
 }
 
-export function ConversationList({ conversations, conversationId, disabled, onSelect, onRename, onDelete }: ConversationListProps) {
+export function ConversationList({ conversations, conversationId, disabled, onSelect, onRename, onArchive, onDelete }: ConversationListProps) {
 	const text = uiText();
 	return <ul className="scribe-conversation-list">
 		{conversations.map((conversation) => <li key={conversation.id}>
-			<EditableConversation conversation={conversation} disabled={disabled} onRename={onRename} onDelete={onDelete}>
+			<EditableConversation conversation={conversation} disabled={disabled} onRename={onRename} onArchive={onArchive} onDelete={onDelete}>
 				<button type="button" className="scribe-conversation-row" disabled={disabled}
 					aria-current={conversation.id === conversationId || undefined} onClick={() => onSelect(conversation.id)}>
 					<ChatIcon name="message-circle" />
-					<span className="scribe-conversation-title">{conversation.title || text.chatUntitled}
-						{conversation.archived ? ` · ${tr('已归档', 'Archived')}` : ''}</span>
+					<span className="scribe-conversation-title" onPointerEnter={({ currentTarget }) => updateOverflowTitle(currentTarget)}>
+						{conversation.title || text.chatUntitled}
+					</span>
 					<time>{new Date(conversation.updatedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</time>
 				</button>
 			</EditableConversation>
@@ -34,45 +37,91 @@ export function ConversationList({ conversations, conversationId, disabled, onSe
 }
 
 interface HistoryProps extends ConversationListProps {
-	store: Pick<ConversationStore, 'load'>;
+	trigger: HistoryTrigger;
 	onRefresh: () => Promise<void>;
 }
 
-export default function ChatNavigation({ conversations, conversationId, disabled,
-	store, onSelect, onRename, onDelete, onRefresh }: HistoryProps) {
+export default function ChatNavigation({ trigger, conversations, conversationId, disabled,
+	onSelect, onRename, onArchive, onDelete, onRefresh }: HistoryProps) {
 	const text = uiText();
-	const refreshing = useRef(false);
-	const cache = useRef(new Map<string, { updatedAt: number; value: Promise<HistoryExcerpt> }>());
+	const panelId = useId();
+	const panel = useRef<HTMLElement>(null);
+	const host = trigger.button.closest('.view-header');
+	const [page, setPage] = useState<'history' | 'archived' | null>(null);
+	const open = page !== null;
+	const showArchived = page === 'archived';
+	const [refreshing, setRefreshing] = useState(false);
+	const refresh = useEffectEvent(onRefresh);
 
-	function refresh() {
-		if (refreshing.current || disabled) return;
-		refreshing.current = true;
-		void onRefresh().finally(() => { refreshing.current = false; });
-	}
+	useLayoutEffect(() => {
+		trigger.registerToggle(() => setPage((previous) => previous ? null : 'history'));
+		return () => trigger.registerToggle();
+	}, [trigger]);
 
-	const readExcerpt = useCallback((id: string, updatedAt: number) => {
-		const last = cache.current.get(id);
-		if (last?.updatedAt === updatedAt) return last.value;
-		const value = store.load(id).then(conversationPreview).catch((error: unknown) => {
-			if (cache.current.get(id)?.value === value) cache.current.delete(id);
-			throw error;
+	useLayoutEffect(() => {
+		if (!page || !panel.current) return;
+		panel.current.scrollTop = 0;
+		panel.current.focus({ preventScroll: true });
+	}, [page]);
+
+	useLayoutEffect(() => {
+		const popup = panel.current;
+		if (!open || !popup) return;
+		const { button } = trigger;
+		const doc = button.ownerDocument;
+		button.setAttribute('aria-expanded', 'true');
+		button.setAttribute('aria-controls', panelId);
+		const dismiss = (event: PointerEvent) => {
+			const path = event.composedPath();
+			if (!path.includes(button) && !path.includes(popup) && !(event.target as Element | null)?.closest?.('.modal-container')) setPage(null);
+		};
+		doc.addEventListener('pointerdown', dismiss);
+		return () => {
+			button.setAttribute('aria-expanded', 'false');
+			button.removeAttribute('aria-controls');
+			doc.removeEventListener('pointerdown', dismiss);
+		};
+	}, [open, panelId, trigger]);
+
+	useEffect(() => {
+		if (!open) return;
+		let current = true;
+		setRefreshing(true);
+		void refresh().finally(() => {
+			if (current) setRefreshing(false);
 		});
-		cache.current.set(id, { updatedAt, value });
-		return value;
-	}, [store]);
+		return () => { current = false; };
+	}, [open]);
 
-	const entries = conversations.map((row) => ({ ...row, label: `${row.title || text.chatUntitled}${row.archived ? ` · ${tr('已归档', 'Archived')}` : ''}` }));
+	if (!open || !host) return null;
+	const entries = conversations.filter(({ archived }) => Boolean(archived) === showArchived);
 
-	function card(row: ConversationSummary, onChoose: () => void, compact: boolean) {
-		return <HistoryPreviewCard key={row.id} conversation={row} current={row.id === conversationId}
-			compact={compact} disabled={disabled}
-			readExcerpt={readExcerpt} onChoose={onChoose} onRename={onRename} onDelete={onDelete} />;
+	function close() {
+		setPage(null);
+		trigger.button.focus({ preventScroll: true });
 	}
 
-	return <JumpNavigator side="right" icon="history" label={text.chatHistory} entries={entries} current={conversationId}
-		onJump={onSelect} onInteract={refresh} disabled={disabled}
-		renderPreview={(row, choose) => card(row, choose, false)} renderCompactEntry={(row, choose) => card(row, choose, true)}
-		emptyLabel={text.chatNoSavedConversations} renderEmpty={() => <div className="scribe-history-empty">
-			<p role="status">{text.chatNoSavedConversations}</p>
-		</div>} />;
+	return createPortal(<section ref={panel} className="scribe-history-panel" id={panelId}
+		role="dialog" aria-label={showArchived ? text.chatArchived : text.chatHistory} tabIndex={-1} onKeyDown={(event) => {
+			if (event.key !== 'Escape' || event.defaultPrevented || event.nativeEvent.isComposing) return;
+			event.preventDefault();
+			event.stopPropagation();
+			close();
+		}}>
+		{showArchived ? <header className="scribe-history-archive-header">
+			<button type="button" className="scribe-chat-icon-button" aria-label={text.back} title={text.back} onClick={() => setPage('history')}>
+				<ChatIcon name="arrow-left" />
+			</button>
+			<strong>{text.chatArchived}</strong>
+		</header> : <button type="button" className="scribe-history-archive-entry" onClick={() => setPage('archived')}>
+			<ChatIcon name="archive" /><span>{text.chatArchived}</span><ChatIcon name="chevron-right" />
+		</button>}
+		{refreshing || !entries.length ? <p className="scribe-chat-loading" role="status">
+			{refreshing ? text.chatLoadingHistory : showArchived ? text.chatNoArchivedConversations : text.chatNoSavedConversations}
+		</p> : <ConversationList conversations={entries} conversationId={conversationId} disabled={disabled}
+			onRename={onRename} onArchive={onArchive} onDelete={onDelete} onSelect={(id) => {
+				close();
+				onSelect(id);
+			}} />}
+	</section>, host);
 }

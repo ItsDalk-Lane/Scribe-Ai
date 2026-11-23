@@ -50,7 +50,7 @@ export function ToolActivityGroup({
 		notebook: text.chatToolGroupEdit,
 		terminal: text.chatToolGroupRun,
 		generic: text.chatToolGroupGeneric,
-	}[kind].replace('{count}', count.toLocaleString()).replace('{name}', () => call.name);
+	}[kind].replace('{count}', count.toLocaleString()).replace('{name}', () => call.label ?? call.name);
 	return (
 		<ActivityDisclosure className="scribe-tool-group" label={label} expanded={expanded} onToggle={onToggle}
 			plain={count === 1} keepMounted preview={shellOutput && <ShellPreview output={shellOutput} />}>
@@ -82,15 +82,16 @@ export const ToolActivityRow = memo(function ToolActivityRow({
 		: result ? (result.isError ? text.phaseError : text.phaseDone) : statusLabel;
 	const outcome = reviewLabel ? `${reviewLabel} · ${label}` : label;
 	const target = toolHeadingTarget(call, (app.vault.adapter as FileSystemAdapter).getBasePath());
-	const title = [call.name, target, outcome].filter(Boolean).join(' · ');
+	const name = call.label ?? call.name;
+	const title = [name, target, outcome].filter(Boolean).join(' · ');
 	return (
-		<ActivityDisclosure className="scribe-tool-card" state={state} icon={toolIcons[kind]} label={call.name}
+		<ActivityDisclosure className="scribe-tool-card" state={state} icon={toolIcons[kind]} label={name}
 			labelContent={target && <span className="scribe-tool-heading">
-				<span>{call.name}</span><bdi>{target}</bdi>
+				<span>{name}</span><bdi>{target}</bdi>
 			</span>}
 			expanded={expanded} onToggle={onToggle} title={title} accessibilityLabel={title}
 			preview={state === 'running' && shellOutput && <ShellPreview output={shellOutput} />}
-			end={<span className="scribe-tool-status" aria-hidden="true" title={outcome}>
+			end={<span className="scribe-tool-status" aria-hidden="true">
 				<ChatIcon name={toolStatusIcons[state]} />{reviewLabel ? outcome : shellLabel}
 			</span>}>
 			<div className="scribe-tool-body">

@@ -1,12 +1,14 @@
 import { Notice } from 'obsidian';
 import type { App } from 'obsidian';
-import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import type { RunStep, SavedRun, SubagentSnapshot, TaskRequest } from '../../types';
+import type { RunStep, SavedRun, SkillRegistry, SubagentSnapshot, TaskRequest } from '../../types';
+import type { SkillReadReceipt } from '../../skills/readReceipt';
 import { abbreviatedNumber, completedMessages, messageTime, runUsage } from '../chatMetrics';
 import { chatTurnContent } from '../chatTurnContent';
 import type { NoticeRow, TimelineItem } from '../chatTimeline';
 import type { ChatExecution } from '../context';
+import { updateOverflowTitle } from '../overflowTitle';
 import { collaborationRows } from '../subagentTimeline';
 import { subagentUiText } from '../subagentUiText';
 import { actionTarget } from '../toolCardDetails';
@@ -18,10 +20,11 @@ import ChatMarkdown from './ChatMarkdown';
 import CollaborationActivity from './CollaborationActivity';
 import { chatDuration, UsagePopover } from './ChatMetrics';
 import type { InspectSubagent } from './SubagentsPanel';
+import { SkillActivityRow } from './SkillActivityRow';
 import { ToolActivityGroup, ToolActivityRow } from './ToolActivityRow';
 import WorkingRow from './WorkingRow';
 
-type SubmittedPrompt = Pick<TaskRequest, 'instruction' | 'refs' | 'selection' | 'chatQuotes' | 'skillMentions'>;
+type SubmittedPrompt = Pick<TaskRequest, 'instruction' | 'refs' | 'selection' | 'chatQuotes' | 'skillMentions' | 'skillScope'>;
 
 function Timestamp({ timestamp }: { timestamp?: number }) {
 	if (!timestamp) return null;
@@ -142,7 +145,8 @@ function TurnProcess({ summary, initiallyOpen, render }: { summary: string; init
 	const id = useId();
 	return <div className="scribe-turn-process">
 		<button type="button" className="scribe-process-summary" aria-expanded={open} aria-controls={open ? id : undefined}
-			onClick={() => setOpen(!open)} title={summary}>
+			onClick={() => setOpen(!open)}
+			onPointerEnter={({ currentTarget }) => updateOverflowTitle(currentTarget, currentTarget.querySelector('span:last-child'))}>
 			<ChatIcon name={open ? 'chevron-down' : 'chevron-right'} /><span>{summary}</span>
 		</button>
 		{open && <div id={id}>{render()}</div>}
@@ -187,10 +191,10 @@ function lastStepLabel(step: RunStep, items: readonly TimelineItem[]): string {
 }
 
 export default memo(function ChatTurn({
-	app, execution, live, request, step, model, editing, onEdit, onFork, expanded, toggleExpanded, readOnly, automaticReview,
+	app, skills, execution, live, request, step, model, editing, onEdit, onFork, expanded, toggleExpanded, readOnly, automaticReview,
 	completedActivity, subagentReport, submissions, inspectSubagent, subagentNames, childChat = false, parentAgentId = 'root',
 }: {
-	app: App; execution: ChatExecution; live?: boolean; request?: SubmittedPrompt; step?: RunStep;
+	app: App; skills: SkillRegistry; execution: ChatExecution; live?: boolean; request?: SubmittedPrompt; step?: RunStep;
 	model?: SavedRun['model']; editing?: boolean; onEdit?: () => void; onFork?: () => void; readOnly?: boolean; automaticReview?: boolean;
 	expanded: ReadonlySet<string>; toggleExpanded: (id: string) => void;
 	completedActivity?: ReactNode; childChat?: boolean; parentAgentId?: string;
@@ -200,6 +204,15 @@ export default memo(function ChatTurn({
 }) {
 	const text = uiText();
 	const { state, modelRetry } = execution;
+	const skillContext = useRef({ request, messages: state?.messages });
+	skillContext.current = { request, messages: state?.messages };
+	const loadSkill = useCallback((receipt: SkillReadReceipt) => {
+		const { request, messages } = skillContext.current;
+		const scope = request?.skillScope ?? skills.scope(request?.refs, '');
+		const folders = new Set([...scope, ...(messages ?? []).flatMap((message) =>
+			message.role === 'user' ? message.skillScope ?? [] : [])]);
+		return skills.readRecorded(receipt, [...folders]);
+	}, [skills]);
 	const content = useMemo(() => chatTurnContent(execution), [execution]);
 	const { user, answer, copyText, answerMessage } = content;
 	const rows = useMemo(() => collaborationRows(content.rows, submissions, childChat ? parentAgentId : undefined),
@@ -274,6 +287,9 @@ export default memo(function ChatTurn({
 				}
 				case 'tool':
 				case 'tool-group': {
+					if (row.kind === 'tool' && row.call.name === 'read_skill') return <SkillActivityRow key={row.id}
+						call={row.call} result={row.result} skipped={row.skipped} status={status}
+						load={loadSkill} expanded={expanded.has(row.id)} onToggle={() => toggleExpanded(row.id)} />;
 					const members = row.kind === 'tool' ? [row] as const : row.members;
 					const first = members[0];
 					const groupExpanded = expanded.has(row.id);
@@ -310,11 +326,11 @@ export default memo(function ChatTurn({
 					override={status === 'awaiting-approval' || modelRetry ? statusLabel : undefined} />}
 				{!running && (Boolean(copyText.trim()) || usage) && <div className="scribe-message-actions scribe-assistant-actions">
 					<Timestamp timestamp={messageTime(answerMessage) ?? answerMessage?.rawAssistant?.timestamp} />
-					{hasReply && !readOnly && <button type="button" className="scribe-message-action" aria-label={text.chatForkReply} title={text.chatForkReply}
+					{hasReply && !readOnly && <button type="button" className="scribe-message-action"
 						disabled={!onFork} onClick={onFork}><ChatIcon name="git-branch" /><span>{text.chatForkReply}</span></button>}
 					{usage && <UsagePopover usage={usage} model={model} turn />}
 					{Boolean(copyText.trim()) && <button type="button" className="scribe-message-action scribe-reply-copy"
-						aria-label={text.chatCopyReply} title={text.chatCopyReply}
+						aria-label={text.chatCopyReply}
 						onClick={() => void copyReply(copyText)}><ChatIcon name="copy" /></button>}
 				</div>}
 			</div>}
@@ -323,7 +339,7 @@ export default memo(function ChatTurn({
 				<AnswerContent app={app} content={subagentReport.content} />
 				<div className="scribe-message-actions scribe-assistant-actions">
 					<Timestamp timestamp={subagentReport.sentAt} />
-					<button type="button" className="scribe-message-action scribe-reply-copy" aria-label={text.chatCopyReply} title={text.chatCopyReply}
+					<button type="button" className="scribe-message-action scribe-reply-copy" aria-label={text.chatCopyReply}
 						onClick={() => void copyReply(subagentReport.content)}><ChatIcon name="copy" /></button>
 				</div>
 			</div>}

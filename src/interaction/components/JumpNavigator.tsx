@@ -2,31 +2,22 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import ChatIcon from './ChatIcon';
 
-export interface JumpEntry {
+interface JumpEntry {
 	id: string;
 	label: string;
-	detail?: string;
 }
 
 interface Props<Entry extends JumpEntry> {
 	entries: Entry[];
 	current?: string;
 	label: string;
-	side?: 'left' | 'right';
-	icon: string;
-	disabled?: boolean;
-	emptyLabel?: string;
 	onJump: (id: string) => void;
-	onInteract?: () => void;
 	renderPreview: (entry: Entry, onChoose: () => void) => ReactNode;
-	renderListLabel?: (entry: Entry) => ReactNode;
-	renderCompactEntry?: (entry: Entry, onChoose: () => void) => ReactNode;
-	renderEmpty?: () => ReactNode;
+	renderListLabel: (entry: Entry) => ReactNode;
 }
 
 export default function JumpNavigator<Entry extends JumpEntry>({
-	entries, current, label, side = 'left', icon, disabled, emptyLabel, onJump, onInteract,
-	renderPreview, renderListLabel, renderCompactEntry, renderEmpty,
+	entries, current, label, onJump, renderPreview, renderListLabel,
 }: Props<Entry>) {
 	const listId = useId();
 	const nav = useRef<HTMLElement>(null);
@@ -35,8 +26,7 @@ export default function JumpNavigator<Entry extends JumpEntry>({
 	const card = useRef<HTMLDivElement>(null);
 	const [compact, setCompact] = useState(false);
 	const [open, setOpen] = useState(false);
-	// undefined 收起预览；null 显示空列表提示。
-	const [anchor, setAnchor] = useState<string | null>();
+	const [anchor, setAnchor] = useState<string>();
 	const showing = !compact && anchor !== undefined;
 	const preview = showing ? entries.find(({ id }) => id === anchor) ?? entries[0] : undefined;
 	const expanded = compact && open;
@@ -46,7 +36,6 @@ export default function JumpNavigator<Entry extends JumpEntry>({
 		setAnchor(undefined);
 	}
 	function jump(id: string) {
-		if (disabled) return;
 		if (compact) toggle.current?.focus({ preventScroll: true });
 		close();
 		onJump(id);
@@ -106,81 +95,47 @@ export default function JumpNavigator<Entry extends JumpEntry>({
 		const element = nav.current;
 		if ((!expanded && !showing) || !element) return;
 		const dismiss = (event: PointerEvent) => {
-			if (!event.composedPath().includes(element) && !(event.target as Element | null)?.closest?.('.modal-container')) close();
+			if (!event.composedPath().includes(element)) close();
 		};
 		const doc = element.ownerDocument;
 		doc.addEventListener('pointerdown', dismiss);
 		return () => doc.removeEventListener('pointerdown', dismiss);
 	}, [expanded, showing]);
 
-	function reveal(id: string | null, hovering: boolean) {
-		if (compact || disabled) return;
-		if (hovering && card.current?.querySelector('input[type="text"]:focus')) return;
-		setAnchor(id);
+	function reveal(id: string) {
+		if (!compact) setAnchor(id);
 	}
 
-	function marker(entry?: Entry) {
-		const id = entry?.id ?? null;
-		return <button type="button" className="scribe-turn-marker" disabled={disabled}
-			aria-current={entry && current === id ? 'location' : undefined}
-			aria-label={entry?.label ?? emptyLabel ?? label}
-			onMouseEnter={() => reveal(id, true)} onFocus={() => reveal(id, false)}
-			onClick={() => entry ? jump(entry.id) : reveal(null, false)}>
-			<span className="scribe-turn-tick" aria-hidden="true" />
-			{compact && entry && <span className="scribe-turn-nav-label" aria-hidden="true">
-				{renderListLabel ? renderListLabel(entry) : <><span>{entry.label}</span>{entry.detail && <span>{entry.detail}</span>}</>}
-			</span>}
-		</button>;
-	}
-
-	return <nav className="scribe-turn-navigator" data-side={side} data-compact={compact || undefined} aria-label={label} ref={nav}
-		onMouseEnter={(event) => {
-			if (!compact && !event.currentTarget.contains(event.currentTarget.ownerDocument.activeElement)) onInteract?.();
-		}}
+	return <nav className="scribe-turn-navigator" data-compact={compact || undefined} aria-label={label} ref={nav}
 		onMouseLeave={(event) => {
-			const active = event.currentTarget.ownerDocument.activeElement;
-			if (!disabled && !card.current?.contains(active) && !active?.closest('.modal-container')) setAnchor(undefined);
-		}}
-		onFocus={(event) => {
-			if (!compact && !event.currentTarget.contains(event.relatedTarget) && !event.currentTarget.matches(':hover')) onInteract?.();
+			if (!card.current?.contains(event.currentTarget.ownerDocument.activeElement)) setAnchor(undefined);
 		}}
 		onBlur={(event) => {
-			const target = event.relatedTarget;
-			if (!disabled && target && !event.currentTarget.contains(target) && !target.closest('.modal-container')) close();
+			if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) close();
 		}}
 		onKeyDown={(event) => {
-			if (event.defaultPrevented || event.nativeEvent.isComposing) return;
+			if (event.defaultPrevented || event.nativeEvent.isComposing || event.key !== 'Escape' || (!expanded && !showing)) return;
+			event.preventDefault();
+			event.stopPropagation();
 			const activeMarker = list.current?.querySelector<HTMLButtonElement>('[data-previewed] > .scribe-turn-marker');
-			if (event.key === 'Escape' && (expanded || showing)) {
-				event.preventDefault();
-				event.stopPropagation();
-				(expanded ? toggle.current : activeMarker)?.focus({ preventScroll: true });
-				close();
-			} else if (event.key === 'Tab' && showing && activeMarker && card.current) {
-				// 预览卡在滚动列表外绘制，但键盘应先经过当前短线的操作。
-				const controls = Array.from(card.current.querySelectorAll<HTMLElement>('button, input, [tabindex]'))
-					.filter((item) => item.tabIndex >= 0 && !item.matches(':disabled') && item.getClientRects().length);
-				const first = controls[0];
-				const nextMarker = activeMarker.parentElement?.nextElementSibling?.querySelector<HTMLButtonElement>('.scribe-turn-marker');
-				const target = !event.shiftKey && event.target === activeMarker ? first
-					: event.shiftKey && event.target === first ? activeMarker
-					: !event.shiftKey && event.target === controls.at(-1) ? nextMarker : undefined;
-				if (target) { event.preventDefault(); target.focus(); }
-			}
+			(expanded ? toggle.current : activeMarker)?.focus({ preventScroll: true });
+			close();
 		}}>
 		{compact && <button type="button" className="scribe-turn-nav-toggle" ref={toggle} title={label}
-			disabled={disabled} aria-label={label} aria-expanded={expanded} aria-controls={expanded ? listId : undefined}
-			onClick={() => { if (!expanded) onInteract?.(); setOpen(!expanded); }}><ChatIcon name={icon} /></button>}
+			aria-label={label} aria-expanded={expanded} aria-controls={expanded ? listId : undefined}
+			onClick={() => setOpen(!expanded)}><ChatIcon name="list" /></button>}
 		{(!compact || expanded) && <ol className="scribe-turn-nav-items" id={listId} ref={list}>
 			{entries.map((entry) => <li key={entry.id} data-previewed={preview?.id === entry.id || undefined}>
-				{compact && renderCompactEntry ? renderCompactEntry(entry, () => jump(entry.id)) : marker(entry)}
+				<button type="button" className="scribe-turn-marker"
+					aria-current={current === entry.id ? 'location' : undefined} aria-label={entry.label}
+					onMouseEnter={() => reveal(entry.id)} onFocus={() => reveal(entry.id)} onClick={() => jump(entry.id)}>
+					<span className="scribe-turn-tick" aria-hidden="true" />
+					{compact && <span className="scribe-turn-nav-label" aria-hidden="true">{renderListLabel(entry)}</span>}
+				</button>
 			</li>)}
-			{!entries.length && emptyLabel && <li data-previewed={showing || undefined}>
-				{compact ? <p className="scribe-chat-loading" role="status">{emptyLabel}</p> : marker()}
-			</li>}
 		</ol>}
-		{showing && <div className="scribe-turn-preview" ref={card}>
-			{preview ? renderPreview(preview, () => jump(preview.id)) : renderEmpty?.()}
+		{preview && <div className="scribe-turn-preview" ref={card}>
+			{renderPreview(preview, () => jump(preview.id))}
 		</div>}
 	</nav>;
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import type { SavedShellJob, ShellJobs, ShellJobView } from '../../tools/external/shellJobs';
+import { updateOverflowTitle } from '../overflowTitle';
 import { uiText } from '../uiText';
 import type { UiText } from '../uiText';
 import ChatIcon from './ChatIcon';
@@ -121,17 +122,19 @@ function JobItem({ row, expanded, output, now, kill, copied, onToggle, onCopy }:
 		: kill.state === 'armed' ? text.chatBackgroundConfirm
 			: kill.state === 'failed' ? text.chatBackgroundStopFailed
 				: text.chatBackgroundStop.replace('{label}', () => label);
+	const jobName = <span className="scribe-job-label" onPointerEnter={({ currentTarget }) => updateOverflowTitle(currentTarget)}>{label}</span>;
+	const jobStatus = <span className="scribe-job-status" onPointerEnter={({ currentTarget }) => updateOverflowTitle(currentTarget)}>{detail}</span>;
 	const body = live
 		? (
 			<>
 				{dot}
 				<span className="scribe-job-main">
 					<span className="scribe-job-primary">
-						<span className="scribe-job-label" title={label}>{label}</span>
+						{jobName}
 					</span>
 					<span className="scribe-job-secondary">
 						<span className="scribe-job-kind">{job.name.toLowerCase()}</span>
-						<span className="scribe-job-status" title={detail}>{detail}</span>
+						{jobStatus}
 						{durationCell}
 					</span>
 				</span>
@@ -142,8 +145,8 @@ function JobItem({ row, expanded, output, now, kill, copied, onToggle, onCopy }:
 			<>
 				{dot}
 				<span className="scribe-job-kind">{job.name.toLowerCase()}</span>
-				<span className="scribe-job-label" title={label}>{label}</span>
-				<span className="scribe-job-status" title={detail}>{detail}</span>
+				{jobName}
+				{jobStatus}
 				{durationCell}
 				{chevron}
 			</>
@@ -516,10 +519,9 @@ export default function BackgroundShellJobs({ jobs, conversationId }: { jobs: Sh
 				aria-haspopup="dialog"
 				aria-expanded={open}
 				aria-controls={open ? menuId : undefined}
-				aria-label={countLabel}
 				aria-describedby={liveRows.length > 0 ? activityId : undefined}
-				title={countLabel}
 				data-live={liveRows.length > 0 ? true : undefined}
+				onPointerEnter={({ currentTarget }) => updateOverflowTitle(currentTarget, currentTarget.querySelector('.scribe-job-count'))}
 				onClick={() => {
 					if (!open) changeOpen(true);
 					else if (allowsHoverOpen() && mode !== 'pinned') changeOpen(true);

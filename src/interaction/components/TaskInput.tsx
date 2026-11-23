@@ -1,29 +1,29 @@
-import { TFile, TFolder } from 'obsidian';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SIDE_CHAT_ICON } from '../../constants';
-import type { ExecutionMode, SkillInfo, SkillMention, SkillRegistry } from '../../types';
+import type { ExecutionMode, SkillInfo, SkillMention, SkillRegistry, TaskTarget } from '../../types';
 import { composerShortcut, sideChatCommand } from '../composerKeyboard';
-import { parseSlashCommand, readSlashDraft, slashCommandAcceptsArgs, slashCommandAllowed } from '../slashCommands';
-import type { SlashCommand, SlashCommandName, SlashCommandSurface } from '../slashCommands';
+import { parseSlashCommand, readSlashDraft, slashCommandAcceptsArgs, slashCommandAllowed, slashTargetCommand, slashTargetMatches } from '../slashCommands';
+import type { SlashCommand, SlashCommandName, SlashCommandSurface, SlashSubcommand, SlashTargetChoice } from '../slashCommands';
 import type { SlashUi } from '../slashUi';
 import { slashCommandText } from '../slashCommandText';
+import { tr } from '../skills/dialog';
+import { readPresets } from '../slashPresets';
 import { uiText } from '../uiText';
 import type { ChatModelGroup } from '../useChatModel';
 import ChatIcon from './ChatIcon';
 import ChatModelPicker from './ChatModelPicker';
 import ExecutionModePicker from './ExecutionModePicker';
 import type { ThinkingSelection } from './ThinkingSlider';
-import { ContextActions, ContextChips, useVaultPicker } from './ContextPicker';
+import { ContextChips } from './ContextPicker';
 import type { ContextPickerProps } from './ContextPicker';
 import SkillTextArea, { skillMenuText } from './SkillTextArea';
 import SlashSkillPanel from './SlashSkillPanel';
-import { prepareSkillMentions } from './skillMentionText';
+import { composerTargetPrefix, editSkillText, insertSkill, prepareSkillMentions } from './skillMentionText';
 
 export interface SlashCommandUi {
 	openSkills: () => Promise<boolean>;
-	openMention: () => Promise<boolean>;
 	ui: SlashUi;
 }
 
@@ -39,6 +39,7 @@ interface TaskInputProps {
 		queuePending: boolean;
 		onChange: (mode: ExecutionMode, trigger: HTMLButtonElement) => void;
 	};
+	composerMode?: { kind: 'plan' | 'goal'; onClose: () => void };
 	vaultOnly?: boolean;
 	placeholder?: string;
 	modelGroups: ChatModelGroup[];
@@ -51,12 +52,13 @@ interface TaskInputProps {
 	skillMentions: SkillMention[];
 	skills: SkillRegistry;
 	skillScope?: string[];
+	target?: TaskTarget;
+	onRemoveTarget?: () => void;
 	onChange: (instruction: string, skillMentions: SkillMention[], scope?: string[]) => void;
 	onModelChange: (value: string) => Promise<boolean>;
 	onThinkingChange: (level: string) => void;
-	onSubmit: (instruction: string, mentions: SkillMention[], scope: string[]) => void;
+	onSubmit: (instruction: string, mentions: SkillMention[], scope: string[]) => void | Promise<void>;
 	onStop: () => void;
-	onNew?: () => void;
 	queueDuringRun?: boolean;
 	onContinueQueue?: () => void;
 	queueContinuingDisabled?: boolean;
@@ -64,19 +66,27 @@ interface TaskInputProps {
 	onResume?: () => void;
 	slashCommands?: {
 		surface: SlashCommandSurface;
+		goalActions?: boolean;
+		getSubcommands?: () => readonly SlashSubcommand[];
+		getTargets?: () => readonly SlashTargetChoice[];
+		subscribeTargets?: (listener: () => void) => (() => void) | undefined;
+		selectTarget?: (target: TaskTarget) => void;
 		unavailable?: (name: SlashCommandName, args: string) => string | undefined;
 		run: (command: SlashCommand, ui: SlashCommandUi) => Promise<boolean | void> | boolean | void;
 	};
 }
 
 export default function TaskInput({
-	inputRef, busy, disabled, conversationId, context, contextMetric, executionMode, vaultOnly, placeholder,
+	inputRef, busy, disabled, conversationId, context, contextMetric, executionMode, composerMode, vaultOnly, placeholder,
 	modelGroups, modelValue, modelSaving = false, modelSelecting = false, thinking, error, instruction, skills, skillScope, skillMentions,
-	onChange, onModelChange, onThinkingChange, onSubmit, onStop, queueDuringRun = false,
-	onContinueQueue, queueContinuingDisabled, onNew, onClose, onResume, slashCommands,
+	target, onRemoveTarget, onChange, onModelChange, onThinkingChange, onSubmit, onStop, queueDuringRun = false,
+	onContinueQueue, queueContinuingDisabled, onClose, onResume, slashCommands,
 }: TaskInputProps) {
 	const text = uiText();
 	const slashText = slashCommandText();
+	const modeKind = composerMode?.kind;
+	const inputPlaceholder = placeholder ?? (modeKind === 'goal' ? tr('描述目标，以及怎样算完成…', 'Describe the goal and what counts as done…')
+		: modeKind === 'plan' ? tr('描述要规划的任务…', 'Describe the task to plan…') : text.taskPlaceholder);
 	const provider = modelGroups.find(({ models }) => models.some(({ value }) => value === modelValue))?.label;
 	const disclosure = provider
 		? text.chatSubmitDisclosure.replace('{provider}', () => provider)
@@ -84,6 +94,10 @@ export default function TaskInput({
 	const locked = busy || disabled;
 	const [checking, setChecking] = useState(false);
 	const [commandRunning, setCommandRunning] = useState(false);
+	const [slashMenuOpen, setSlashMenuOpen] = useState(false);
+	const [referenceMenuOpen, setReferenceMenuOpen] = useState(false);
+	const referenceMenuId = useId();
+	const slashMenuId = useId();
 	const [skillError, setSkillError] = useState('');
 	const pending = useRef(false);
 	const runningCommand = useRef(false);
@@ -94,7 +108,14 @@ export default function TaskInput({
 	const busyWithoutQueue = busy && !queueDuringRun;
 	const draftLocked = checking || disabled || (busyWithoutQueue && !slashCommands);
 	const contextLocked = draftLocked || busyWithoutQueue;
+	const referencesDisabled = contextLocked || commandRunning;
+	useEffect(() => { if (referencesDisabled) setReferenceMenuOpen(false); }, [referencesDisabled]);
 	const slashDraft = slashCommands ? readSlashDraft(instruction) : undefined;
+	const subscribeTargets = slashCommands?.subscribeTargets;
+	const searchingTargets = Boolean(slashDraft);
+	const [, refreshTargets] = useState(0);
+	useEffect(() => searchingTargets ? subscribeTargets?.(() => refreshTargets((value) => value + 1)) : undefined,
+		[searchingTargets, subscribeTargets]);
 	const command = slashDraft && parseSlashCommand(instruction);
 	const isSideCommand = command?.name === 'side' || (!slashCommands && queueDuringRun && sideChatCommand(instruction) !== null);
 	const isSkillMenu = command?.name === 'skills' || (!slashCommands && instruction.trim() === '/skills');
@@ -109,7 +130,6 @@ export default function TaskInput({
 	const queueHint = busy && queueDuringRun && !slashDraft ? text.queueEnterHint : undefined;
 	const commandDescription = command ? slashText.describe(command.name) : slashDraft ? slashText.label : undefined;
 	const actionDescription = busy ? queueHint : commandDescription ?? (isSkillMenu ? undefined : disclosure);
-	const pick = useVaultPicker(context.app, context.onAdd);
 	const focusInput = () => inputRef.current?.focus({ preventScroll: true });
 
 	function commandUnavailable({ name, args }: SlashCommand): string | undefined {
@@ -119,7 +139,28 @@ export default function TaskInput({
 		return slashCommands.unavailable?.(name, args);
 	}
 
-	async function runSlash(command: SlashCommand, ui?: SlashUi) {
+	function selectSlashTarget(choice: TaskTarget, tokenEnd: number) {
+		if (!slashCommands?.selectTarget || draftLocked || pending.current || runningCommand.current) return;
+		const current = slashCommands.getTargets?.().find(({ target }) => target.kind === choice.kind && target.id === choice.id);
+		if (!current) { setSkillError(slashText.unknown(choice.label)); return; }
+		const unavailable = commandUnavailable({ name: slashTargetCommand(choice), args: '', argsStart: tokenEnd }) ?? current.reason;
+		if (unavailable) { setSkillError(unavailable); return; }
+		const remaining = instruction.slice(tokenEnd).trimStart();
+		const selection = inputRef.current ? inputRef.current.selectionStart - composerTargetPrefix(target).length : instruction.length;
+		const cursor = Math.max(0, selection - (instruction.length - remaining.length));
+		const next = editSkillText({ instruction, skillMentions }, remaining, cursor);
+		slashCommands.selectTarget(current.target);
+		setSkillError('');
+		onChange(next.instruction, next.skillMentions ?? [], skillScope);
+		focusInput();
+		inputRef.current?.ownerDocument.defaultView?.requestAnimationFrame(() => {
+			const prefix = composerTargetPrefix(current.target);
+			const field = inputRef.current;
+			if (field?.value === prefix + remaining) field.setSelectionRange(prefix.length + cursor, prefix.length + cursor);
+		});
+	}
+
+	async function runSlash(command: SlashCommand, ui?: SlashUi, preserveDraft = false) {
 		if (!slashCommands || draftLocked || pending.current || runningCommand.current) return;
 		const unavailable = commandUnavailable(command);
 		if (unavailable) { setSkillError(unavailable); return; }
@@ -139,22 +180,16 @@ export default function TaskInput({
 						return () => root.unmount();
 					});
 					if (!chosen) return false;
-					const token = `$${chosen.name}`;
-					onChange(token + ' ', [{ id: chosen.id, name: chosen.name, sourceLabel: chosen.sourceLabel, start: 0, end: token.length }], scope);
+					if (!mounted.current || draftRevision.current !== revision) return false;
+					const draft = preserveDraft ? { instruction, skillMentions } : { instruction: '' };
+					const next = insertSkill(draft, 0, 0, chosen);
+					onChange(next.instruction, next.skillMentions, scope);
 					closeMenu.current?.();
 					return false;
 				},
-				openMention: async () => {
-					const items = context.app.vault.getAllLoadedFiles()
-						.filter((item) => item.path !== '/' && (item instanceof TFile || item instanceof TFolder));
-					const chosen = await panel.choose(text.chatPickVaultItem, items, (item) => item.path, true);
-					if (!chosen) return false;
-					context.onAdd({ path: chosen.path, kind: chosen instanceof TFolder ? 'folder' : 'file' });
-					return true;
-				},
 				ui: panel,
 			});
-			if (result !== false && mounted.current && draftRevision.current === revision) onChange('', []);
+			if (!preserveDraft && result !== false && mounted.current && draftRevision.current === revision) onChange('', []);
 		} catch (cause) {
 			if (mounted.current && draftRevision.current === revision) setSkillError(cause instanceof Error ? cause.message : text.chatFailed);
 		} finally {
@@ -167,7 +202,14 @@ export default function TaskInput({
 		if (pending.current || runningCommand.current || blocked) return;
 		if (slashDraft) {
 			if (command) await runSlash(command, slashUi.current ?? undefined);
-			else setSkillError(slashText.unknown(slashDraft.token));
+			else {
+				const matches = slashTargetMatches(instruction, instruction.length, slashCommands?.getTargets?.() ?? [])
+					.filter(({ exact }) => exact);
+				if (matches.length === 1 && matches[0]) selectSlashTarget(matches[0].choice.target, matches[0].tokenEnd);
+				else setSkillError(matches.length > 1
+					? tr('有多个同名选项，请从候选列表中选择。', 'Choose from the matching suggestions.')
+					: slashText.unknown(slashDraft.token));
+			}
 			return;
 		}
 		if (isSkillMenu) { menu.current?.(); onChange('', []); return; }
@@ -177,7 +219,7 @@ export default function TaskInput({
 		try {
 			const scope = skillScope ?? skills.scope(context.refs);
 			const mentions = await prepareSkillMentions({ instruction, skillMentions }, skills, scope);
-			if (mounted.current) onSubmit(instruction, mentions, scope);
+			if (mounted.current) await onSubmit(instruction, mentions, scope);
 		} catch (cause) {
 			if (mounted.current) setSkillError(cause instanceof Error ? cause.message : text.chatFailed);
 		} finally {
@@ -192,13 +234,23 @@ export default function TaskInput({
 				event.preventDefault();
 				void submit();
 			}}>
-				<ContextChips refs={context.refs} quotes={context.quotes} disabled={contextLocked} onRemove={context.onRemove}
+				<ContextChips refs={context.refs} quotes={context.quotes}
+					disabled={contextLocked} onRemove={context.onRemove}
 					onRemoveQuotes={context.onRemoveQuotes} onFocusInput={focusInput} />
 				<SkillTextArea
 					inputRef={inputRef} menuRef={menu} closeMenuRef={closeMenu} registry={skills} refs={context.refs} scope={skillScope}
-					panelUiRef={slashUi}
+					panelUiRef={slashUi} target={target} onRemoveTarget={onRemoveTarget}
+					references={{ ...context, conversationId, disabled: referencesDisabled, vaultOnly }}
+					referenceLauncher={{ id: referenceMenuId, open: referenceMenuOpen, close: () => setReferenceMenuOpen(false) }}
+					slashLauncher={slashCommands?.surface === 'main' ? {
+						id: slashMenuId, open: slashMenuOpen, close: () => setSlashMenuOpen(false),
+					} : undefined}
 					slash={slashCommands && !commandRunning ? {
-						surface: slashCommands.surface, run: (value, ui) => void runSlash(value, ui), unavailable: commandUnavailable,
+						surface: slashCommands.surface, run: (value, ui, preserveDraft) => void runSlash(value, ui, preserveDraft),
+						unavailable: commandUnavailable,
+						getPresets: () => readPresets(context.app), goalActions: slashCommands.goalActions,
+						getSubcommands: slashCommands.getSubcommands,
+						getTargets: slashCommands.getTargets, selectTarget: selectSlashTarget,
 						focusInput,
 					} : undefined}
 					draft={{ instruction, skillMentions }} onDraftChange={(draft) => {
@@ -207,36 +259,51 @@ export default function TaskInput({
 						onChange(draft.instruction, draft.skillMentions ?? [], draft.skillScope);
 					}}
 					className="scribe-input"
-					placeholder={placeholder ?? text.taskPlaceholder}
-					aria-label={placeholder ?? text.taskPlaceholder}
+					placeholder={inputPlaceholder}
+					aria-label={inputPlaceholder}
 					aria-description={commandDescription ?? (isSkillMenu ? skillMenuText().title : queueHint ? `${queueHint} ${disclosure}` : disclosure)}
 					rows={3}
 					readOnly={draftLocked}
 					onKeyDown={(event) => {
 						if (event.defaultPrevented) return;
 						const input = event.currentTarget;
-						const shortcut = composerShortcut(event.nativeEvent, input.value, input.selectionStart, input.selectionEnd);
+						const shortcut = composerShortcut(event.nativeEvent);
 						if (shortcut === 'send' || shortcut === 'ignore') {
 							event.preventDefault();
 							if (shortcut === 'send' && !blocked) input.form?.requestSubmit();
-						} else if (shortcut === 'reference' && !contextLocked) {
-							event.preventDefault();
-							pick(focusInput);
 						}
 					}}
 				/>
 				{(skillError || error) && <div className="scribe-chat-error" role="alert">{skillError || error}</div>}
 				<div className="scribe-compose-toolbar">
-					{onNew && <button type="button" className="scribe-compose-action" disabled={disabled} onClick={onNew}
-						aria-label={text.chatNewConversation} title={text.chatNewConversation}>
-						<ChatIcon name="message-square-plus" />
+					<button type="button" className="scribe-compose-action scribe-compose-reference" disabled={referencesDisabled}
+						aria-label={text.chatAddContext} title={text.chatAddContext} aria-expanded={referenceMenuOpen}
+						aria-controls={referenceMenuOpen ? referenceMenuId : undefined} onMouseDown={(event) => event.preventDefault()}
+						onClick={() => {
+							closeMenu.current?.();
+							setReferenceMenuOpen(!referenceMenuOpen);
+							if (referenceMenuOpen) focusInput();
+						}}><ChatIcon name="plus" /></button>
+					{slashCommands?.surface === 'main' && <button type="button" className="scribe-compose-action scribe-compose-slash"
+						disabled={draftLocked || commandRunning} aria-label={slashText.label} aria-haspopup="listbox"
+						aria-expanded={slashMenuOpen} aria-controls={slashMenuOpen ? slashMenuId : undefined}
+						onMouseDown={(event) => event.preventDefault()} onClick={() => {
+							setReferenceMenuOpen(false);
+							setSlashMenuOpen((open) => !open);
+							focusInput();
+						}}>
+						<ChatIcon name="square-slash" />
 					</button>}
 					{executionMode && <ExecutionModePicker value={executionMode.value} onChange={executionMode.onChange}
 						triggerRef={permissionsTrigger}
 						disabled={locked || executionMode.queuePending}
 						description={busy || executionMode.queuePending ? text.chatModeLocked : undefined} />}
-					<ContextActions key={conversationId} disabled={contextLocked} vaultOnly={vaultOnly}
-						onPick={() => pick(focusInput)} onAdd={context.onAdd} onFocusInput={focusInput} />
+					{composerMode && <button type="button" className="scribe-compose-action scribe-compose-mode" disabled={draftLocked || commandRunning}
+						aria-label={modeKind === 'goal' ? tr('关闭目标输入', 'Close goal draft') : tr('退出计划模式', 'Exit plan mode')}
+						onClick={() => { composerMode.onClose(); focusInput(); }}>
+						<span className="scribe-compose-mode-icon"><ChatIcon name={modeKind === 'goal' ? 'target' : 'lightbulb'} /><ChatIcon name="x" /></span>
+						{modeKind === 'goal' ? tr('目标', 'Goal') : tr('计划', 'Plan')}
+					</button>}
 					<div className="scribe-compose-submit">
 						{onClose && <button type="button" className="scribe-compose-action" onClick={onClose}
 							aria-label={text.sideChatClose} title={text.sideChatClose}><ChatIcon name="x" /></button>}
@@ -245,8 +312,8 @@ export default function TaskInput({
 							<ChatIcon name="play" />
 						</button>}
 						{onContinueQueue && <button type="button" className="scribe-compose-action scribe-compose-queue-resume"
-							disabled={locked || modelSaving || queueContinuingDisabled} onClick={() => { focusInput(); onContinueQueue(); }}
-							title={text.queueResume}>{text.queueResume}</button>}
+								disabled={locked || modelSaving || queueContinuingDisabled} onClick={() => { focusInput(); onContinueQueue(); }}>
+								{text.queueResume}</button>}
 						{contextMetric && <div className="scribe-composer-context">{contextMetric}</div>}
 						<ChatModelPicker groups={modelGroups} value={modelValue} disabled={locked} saving={modelSaving}
 							triggerRef={modelTrigger}

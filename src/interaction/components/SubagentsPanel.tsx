@@ -1,6 +1,6 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Menu, type App } from 'obsidian';
-import type { ExecutionMode, SubagentController, SubagentSnapshot, SubagentView } from '../../types';
+import type { ExecutionMode, SkillRegistry, SubagentController, SubagentSnapshot, SubagentView } from '../../types';
 import { toggleTimelineExpansion } from '../chatTimeline';
 import { questionBody, subagentChatTurns } from '../subagentTranscript';
 import { subagentUiText } from '../subagentUiText';
@@ -10,6 +10,7 @@ import { chatDuration } from './ChatMetrics';
 import ChatTurn, { UserMessage } from './ChatTurn';
 import AnswerContent from './AnswerContent';
 import CollaborationActivity from './CollaborationActivity';
+import { usePopoverHover } from './usePopoverHover';
 
 export function subagentIsActive({ status }: SubagentView) {
 	return status === 'running' || status === 'awaiting-approval';
@@ -51,8 +52,8 @@ export function renderSubagentsActivity({ agents, taskId, onSelect, received }: 
 	</div>;
 }
 
-export function SubagentDetail({ agent, app, submissions, inspectSubagent, subagentNames, onCloseTab }: {
-	agent: SubagentView; app: App; submissions?: SubagentSnapshot['submissions'];
+export function SubagentDetail({ agent, app, skills, submissions, inspectSubagent, subagentNames, onCloseTab }: {
+	agent: SubagentView; app: App; skills: SkillRegistry; submissions?: SubagentSnapshot['submissions'];
 	inspectSubagent?: InspectSubagent; subagentNames?: ReadonlyMap<string, string>; onCloseTab: () => void;
 }) {
 	const text = subagentUiText();
@@ -79,7 +80,7 @@ export function SubagentDetail({ agent, app, submissions, inspectSubagent, subag
 				follow.current = element.scrollHeight - element.scrollTop - element.clientHeight < 32;
 			}}>
 			<div className="scribe-chat-column">
-				{turns.map(({ key, request, execution, model: turnModel }, index) => <ChatTurn key={key} app={app}
+				{turns.map(({ key, request, execution, model: turnModel }, index) => <ChatTurn key={key} app={app} skills={skills}
 					execution={execution} request={request} model={turnModel} readOnly childChat parentAgentId={agent.parentId ?? 'root'}
 					live={subagentIsActive(agent) && index === turns.length - 1} expanded={expanded}
 					toggleExpanded={(row) => setExpanded((previous) => toggleTimelineExpansion(previous, row))}
@@ -139,9 +140,10 @@ export default function SubagentsPanel({ controller, conversationId, snapshot, o
 	const text = subagentUiText();
 	const id = useId();
 	const panel = useRef<HTMLElement>(null);
+	const popover = useRef<HTMLDivElement>(null);
 	const trigger = useRef<HTMLButtonElement>(null);
 	const openMenu = useRef<Menu | null>(null);
-	const [expanded, setExpanded] = useState(false);
+	const [mode, setMode] = useState<'closed' | 'hover' | 'pinned'>('closed');
 	const [now, setNow] = useState(Date.now);
 	const [error, setError] = useState('');
 	const [writing, setWriting] = useState<string>();
@@ -149,6 +151,16 @@ export default function SubagentsPanel({ controller, conversationId, snapshot, o
 	const [sending, setSending] = useState(false);
 	const { agents } = snapshot;
 	const activeCount = agents.filter((agent) => badgeTone(agent) === 'active').length;
+	const available = Boolean(controller && (agents.length || snapshot.error));
+	const expanded = available && mode !== 'closed';
+	const dismissPreview = useCallback(() => setMode((current) => current === 'hover' ? 'closed' : current), []);
+	const preview = usePopoverHover(trigger, popover, available && mode === 'closed', expanded && mode === 'hover', () => {
+		setNow(Date.now());
+		setMode((current) => current === 'closed' ? 'hover' : current);
+	}, dismissPreview);
+	useEffect(() => {
+		if (!available) setMode('closed');
+	}, [available]);
 	useEffect(() => {
 		if (!expanded || !activeCount) return;
 		const win = panel.current?.ownerDocument.defaultView;
@@ -160,13 +172,13 @@ export default function SubagentsPanel({ controller, conversationId, snapshot, o
 		if (!expanded || !element) return;
 		const doc = element.ownerDocument;
 		const outside = (event: PointerEvent) => {
-			if (!openMenu.current && !event.composedPath().includes(element)) setExpanded(false);
+			if (!openMenu.current && !event.composedPath().includes(element)) setMode('closed');
 		};
 		function escape(event: KeyboardEvent) {
 			if (openMenu.current || event.key !== 'Escape' || event.defaultPrevented) return;
 			event.preventDefault();
 			event.stopPropagation();
-			setExpanded(false);
+			setMode('closed');
 			trigger.current?.focus({ preventScroll: true });
 		}
 		doc.addEventListener('pointerdown', outside, true);
@@ -179,6 +191,7 @@ export default function SubagentsPanel({ controller, conversationId, snapshot, o
 	}, [expanded]);
 	if (!controller || (!agents.length && !snapshot.error)) return null;
 	const summary = capsuleStatus(agents, activeCount);
+	const pinPreview = () => { if (mode === 'hover') setMode('pinned'); };
 
 	async function act(action: () => Promise<void>) {
 		setError('');
@@ -216,17 +229,19 @@ export default function SubagentsPanel({ controller, conversationId, snapshot, o
 		<span id={`${id}-label`} hidden>{text.title}</span>
 		<button type="button" ref={trigger} id={`${id}-toggle`} className="scribe-subagent-toggle" aria-expanded={expanded} aria-haspopup="dialog"
 			aria-labelledby={`${id}-label ${id}-toggle`} aria-controls={expanded ? id : undefined}
-			onClick={() => { setNow(Date.now()); setExpanded(!expanded); }}>
+			onPointerEnter={preview.enter} onPointerLeave={preview.cancel}
+			onClick={() => { preview.cancel(); setNow(Date.now()); setMode(mode === 'pinned' ? 'closed' : 'pinned'); }}>
 			<AgentBadge tone={summary.tone} /><span>{summary.label}</span>{summary.count && <span className="scribe-subagent-count">{summary.count}</span>}
 		</button>
-		{expanded && <div id={id} className="scribe-subagent-popover" role="dialog" aria-label={text.title}>
+		{expanded && <div ref={popover} id={id} className="scribe-subagent-popover" role="dialog" aria-label={text.title}
+			onPointerDownCapture={pinPreview} onFocusCapture={pinPreview}>
 		{(error || snapshot.error) && <p className="scribe-chat-error" role="alert">{error || snapshot.error}</p>}
 		<ul className="scribe-subagent-list">{agents.map((agent) => {
 			const tone = badgeTone(agent);
 			const parent = agent.parentId && agents.find(({ id }) => id === agent.parentId);
 			return <li key={agent.id} className="scribe-subagent-entry">
 				<button type="button" className="scribe-subagent-row" data-agent-id={agent.id}
-					onClick={(event) => { onSelect(agent.id, event.currentTarget); setExpanded(false); }}
+					onClick={(event) => { onSelect(agent.id, event.currentTarget); setMode('closed'); }}
 					onContextMenu={(event) => { event.preventDefault(); menu(agent, event.currentTarget); }}>
 					<AgentBadge tone={tone} />
 					<span className="scribe-subagent-copy"><bdi className="scribe-subagent-row-name">{agent.name}{parent && <small> · {parent.name}</small>}</bdi>

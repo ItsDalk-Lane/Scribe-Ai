@@ -59,7 +59,7 @@ export function applyTimelineChange(items: readonly TimelineItem[], change: Time
 }
 
 function groupKind({ id, call }: ToolRow): string {
-	if (subagentToolNames.has(call.name)) return `agent:${id}`;
+	if (call.name === 'read_skill' || subagentToolNames.has(call.name)) return `single:${id}`;
 	const kind = toolKind(call.name);
 	return kind === 'generic' ? 'tool:' + call.name : kind === 'notebook' ? 'edit' : kind;
 }

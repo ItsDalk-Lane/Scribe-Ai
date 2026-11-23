@@ -1,16 +1,19 @@
-import { createContext, useContext, useId, useLayoutEffect, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, Dispatch, ReactNode, SetStateAction } from 'react';
 import { createPortal } from 'react-dom';
+import { updateOverflowTitle } from '../overflowTitle';
 import ChatIcon from './ChatIcon';
+import { usePopoverHover } from './usePopoverHover';
 
-const ActiveMetric = createContext<[string | null, Dispatch<SetStateAction<string | null>>]>([null, () => {}]);
+type ActiveMetric = { id: string; pinned: boolean } | null;
+const ActiveMetric = createContext<[ActiveMetric, Dispatch<SetStateAction<ActiveMetric>>]>([null, () => {}]);
 
 export function MetricPopoverProvider({ children }: { children: ReactNode }) {
-	return <ActiveMetric.Provider value={useState<string | null>(null)}>{children}</ActiveMetric.Provider>;
+	return <ActiveMetric.Provider value={useState<ActiveMetric>(null)}>{children}</ActiveMetric.Provider>;
 }
 
-export default function MetricPopover({ label, icon, heading, value, children, wrapValues = false }: {
-	label: string; icon: string | ReactNode; heading: string; value?: string; children: ReactNode; wrapValues?: boolean;
+export default function MetricPopover({ label, icon, heading, value, children, wrapValues = false, hover = false }: {
+	label: string; icon: string | ReactNode; heading: string; value?: string; children: ReactNode; wrapValues?: boolean; hover?: boolean;
 }) {
 	const id = useId();
 	const [active, setActive] = useContext(ActiveMetric);
@@ -18,24 +21,34 @@ export default function MetricPopover({ label, icon, heading, value, children, w
 	const labelElement = useRef<HTMLSpanElement>(null);
 	const panel = useRef<HTMLElement>(null);
 	const closing = useRef(false);
-	const open = active === id;
+	const focusOnPin = useRef(false);
+	const open = active?.id === id;
+	const pinned = open && active.pinned;
 	const host = open ? trigger.current?.closest<HTMLElement>('.scribe-app') : undefined;
-	const inside = (target: EventTarget | null) => {
-		const owner = trigger.current?.ownerDocument.defaultView;
-		return owner && target instanceof owner.Node && (trigger.current?.contains(target) || panel.current?.contains(target));
-	};
+	const closePreview = useCallback(() => setActive((previous) => previous?.id === id && !previous.pinned ? null : previous), [id, setActive]);
+	const preview = usePopoverHover(trigger, panel, hover && !active?.pinned, open && !pinned,
+		() => setActive((previous) => previous?.pinned ? previous : { id, pinned: false }), closePreview);
 
-	function close() {
+	const close = useCallback((restoreFocus: boolean) => {
 		if (closing.current) return;
 		closing.current = true;
-		setActive((previous) => previous === id ? null : previous);
+		setActive((previous) => previous?.id === id ? null : previous);
+		if (!restoreFocus) return;
 		const button = trigger.current;
 		button?.ownerDocument.defaultView?.requestAnimationFrame(() => {
 			if (button.isConnected && !host?.querySelector('.scribe-metric-label[aria-expanded="true"]')) {
 				button.focus({ preventScroll: true });
 			}
 		});
+	}, [host, id, setActive]);
+
+	function pin(focus = false) {
+		preview.cancel();
+		focusOnPin.current = focus;
+		setActive({ id, pinned: true });
 	}
+
+	useEffect(() => () => setActive((previous) => previous?.id === id ? null : previous), [id, setActive]);
 
 	useLayoutEffect(() => {
 		const button = trigger.current;
@@ -58,7 +71,7 @@ export default function MetricPopover({ label, icon, heading, value, children, w
 			popup.style.width = `${width}px`;
 			const viewport = transcript?.getBoundingClientRect();
 			if (viewport && (anchor.bottom <= viewport.top || anchor.top >= viewport.bottom)) {
-				close();
+				close(pinned);
 				return;
 			}
 			const inputTop = composer?.getBoundingClientRect().top ?? bounds.bottom;
@@ -71,48 +84,58 @@ export default function MetricPopover({ label, icon, heading, value, children, w
 			popup.style.bottom = opensBelow ? '' : `${bounds.bottom - upperEdge + 4}px`;
 			popup.style.maxHeight = `${Math.max(0, opensBelow ? below : above)}px`;
 		};
-		const outside = (event: Event) => { if (!inside(event.target)) close(); };
+		const outside = (event: Event) => {
+			const path = event.composedPath();
+			if (!path.includes(button) && !path.includes(popup)) close(pinned);
+		};
+		const blur = () => close(pinned);
 		const resize = new win.ResizeObserver(position);
 		resize.observe(host);
 		resize.observe(button);
 		if (composer) resize.observe(composer);
 		resize.observe(popup);
 		position();
-		popup.focus({ preventScroll: true });
 		doc.addEventListener('click', outside, true);
 		doc.addEventListener('focusin', outside, true);
 		doc.addEventListener('scroll', position, true);
-		win.addEventListener('blur', close);
+		win.addEventListener('blur', blur);
 		return () => {
 			doc.removeEventListener('click', outside, true);
 			doc.removeEventListener('focusin', outside, true);
 			doc.removeEventListener('scroll', position, true);
-			win.removeEventListener('blur', close);
+			win.removeEventListener('blur', blur);
 			resize.disconnect();
-			setActive((previous) => previous === id ? null : previous);
 		};
-	}, [open, host, id, setActive]);
+	}, [open, pinned, host, close]);
+
+	useLayoutEffect(() => {
+		if (!pinned || !focusOnPin.current) return;
+		focusOnPin.current = false;
+		panel.current?.focus({ preventScroll: true });
+	}, [pinned]);
 
 	function updateTooltip() {
-		const span = labelElement.current;
-		if (trigger.current && span) trigger.current.title = span.scrollWidth > span.clientWidth ? label : '';
+		if (trigger.current) updateOverflowTitle(trigger.current, labelElement.current);
 	}
 
 	return <div className="scribe-metric-anchor" onKeyDown={(event) => {
 		if (open && (event.key === 'Escape' || event.key === 'Tab')) {
+			if (!pinned && event.key === 'Tab') { close(false); return; }
 			event.preventDefault();
 			event.stopPropagation();
-			close();
+			close(pinned);
 		}
 	}}>
 		<button type="button" ref={trigger} className="scribe-metric-label" aria-haspopup="dialog"
-			aria-expanded={open} aria-controls={open ? id : undefined} onPointerEnter={updateTooltip} onFocus={updateTooltip}
-			onClick={() => { if (open) close(); else setActive(id); }}>
+			aria-expanded={open} aria-controls={open ? id : undefined} onFocus={updateTooltip}
+			onPointerEnter={(event) => { updateTooltip(); preview.enter(event); }} onPointerLeave={preview.cancel}
+			onClick={() => { if (pinned) close(true); else pin(true); }}>
 			{typeof icon === 'string' ? <ChatIcon name={icon} /> : icon}
 			<span ref={labelElement}>{label}</span>
 		</button>
 		{host && createPortal(<section id={id} ref={panel} className="scribe-metric-panel" data-wrap-values={wrapValues || undefined}
-			role="dialog" aria-label={heading} tabIndex={-1}>
+			role="dialog" aria-label={heading} tabIndex={-1}
+			onPointerDownCapture={() => { if (!pinned) pin(); }} onFocusCapture={() => { if (!pinned) pin(); }}>
 			<header><strong>{typeof icon === 'string' && <ChatIcon name={icon} />}{heading}</strong>{value && <span>{value}</span>}</header>
 			{children}
 		</section>, host)}
@@ -120,8 +143,8 @@ export default function MetricPopover({ label, icon, heading, value, children, w
 }
 
 export function MetricRows({ rows }: { rows: readonly (readonly [string, string | undefined])[] }) {
-	return <dl>{rows.map(([label, value]) => value === undefined ? null : <div key={label} title={value}>
-		<dt>{label}</dt><dd>{value}</dd>
+	return <dl>{rows.map(([label, value]) => value === undefined ? null : <div key={label}>
+		<dt>{label}</dt><dd onPointerEnter={({ currentTarget }) => updateOverflowTitle(currentTarget)}>{value}</dd>
 	</div>)}</dl>;
 }
 

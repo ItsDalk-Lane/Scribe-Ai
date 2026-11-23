@@ -6,7 +6,7 @@ import { createTask } from '../../orchestration/taskManager';
 import { latestIncompleteReply } from '../../runtime/continuationText';
 import { conversationMetrics, messageTime, runUsage } from '../chatMetrics';
 import { chatTurnContent, chatTurnPreview } from '../chatTurnContent';
-import { conversationPreview, emptyExecution, restoreExecution, updateExecution } from '../context';
+import { emptyExecution, restoreExecution, updateExecution } from '../context';
 import { collaborationRows } from '../subagentTimeline';
 
 const read = { id: 'reused', name: 'Read', input: { file_path: '示例.md' } };
@@ -160,7 +160,11 @@ void test('round and conversation metrics use measured timings and provider toke
 	assert.equal(missing.usage?.total, undefined);
 	assert.equal(missing.usage?.cost, undefined);
 	assert.equal(missing.context, undefined);
-	assert.equal(missing.speed, undefined);
+	assert.equal(missing.speed, 12.5);
+	assert.equal(conversationMetrics([first, { ...second, messages: [
+		{ ...next, metrics: { ...next.metrics!, decodeMs: 0 } },
+	] }]).speed, 12.5);
+	assert.equal(conversationMetrics([state([noUsage])]).speed, undefined);
 	assert.equal(conversationMetrics([state([{ ...output, metrics: undefined }])]).speed, undefined);
 	const precise = conversationMetrics([state([{ role: 'assistant', content: 'Reply',
 		reportedUsage: { prompt: 4630 }, metrics: { endedAt: 8000, modelMs: 2500, contextWindow: 1_000_000 },
@@ -269,19 +273,6 @@ void test('turn navigation previews returned results while keeping the receipt i
 	assert.equal(chatTurnContent(execution).answer, receipt.content);
 	assert.equal(chatTurnContent(execution).copyText, receipt.content);
 	assert.deepEqual(chatTurnPreview(execution, '核对资料。', report), { prompt: '核对资料。', reply: '## 预算与报销 预算结果。' });
-});
-
-void test('history preview shows the latest main-chat exchange, excluding pending messages', () => {
-	const first = saved([{ role: 'assistant', content: '上一轮答复' }]);
-	const last = saved([{ role: 'assistant', content: '最新答复' }]);
-	last.request.instruction = '最新问题';
-	const queue = [{ id: 'pending', request: { ...last.request, instruction: '未发送的问题' } }];
-	const conversation = { id: 'conversation', runs: [first, last], queue };
-	assert.deepEqual(conversationPreview(conversation), { prompt: '最新问题', reply: '最新答复' });
-	assert.deepEqual(conversationPreview({ ...conversation, runs: [] }), { prompt: '', reply: '' });
-	const interrupted = { ...saved([], 'interrupted'), partial: '中断前的部分回复' };
-	assert.deepEqual(conversationPreview({ ...conversation, runs: [first, interrupted] }),
-		{ prompt: interrupted.request.instruction, reply: interrupted.partial });
 });
 
 void test('restores ordered legacy replies and tools while pairing reused call ids by message', () => {

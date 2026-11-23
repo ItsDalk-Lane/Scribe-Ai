@@ -1,6 +1,7 @@
 import { Menu } from 'obsidian';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
+import { updateOverflowTitle } from '../overflowTitle';
 import { uiText } from '../uiText';
 import ChatIcon from './ChatIcon';
 
@@ -14,17 +15,15 @@ interface Props {
 	tabs: readonly Tab[];
 	activeId: string;
 	onActivate: (id: string) => void;
-	onNew: () => void;
 	onClose: (id: string) => void;
 	onRename: (id: string, title: string) => Promise<boolean>;
 }
 
 const statusIcons = { running: 'loader-circle', attention: 'bell-dot', error: 'circle-alert' };
 
-export default function ChatTabBar({ tabs, activeId, onActivate, onNew, onClose, onRename }: Props) {
+export default function ChatTabBar({ tabs, activeId, onActivate, onClose, onRename }: Props) {
 	const text = uiText();
 	const strip = useRef<HTMLDivElement>(null);
-	const newButton = useRef<HTMLButtonElement>(null);
 	const activeButton = useRef<HTMLButtonElement>(null);
 	const renameInput = useRef<HTMLInputElement>(null);
 	const editingSave = useRef(false);
@@ -41,17 +40,17 @@ export default function ChatTabBar({ tabs, activeId, onActivate, onNew, onClose,
 
 	useLayoutEffect(() => {
 		const element = strip.current;
-		const button = newButton.current;
 		const win = element?.ownerDocument.defaultView;
-		if (!element || !button || !win) return;
+		if (!element || !win) return;
 		const measure = () => {
 			const style = win.getComputedStyle(element);
 			const tabWidth = Number.parseFloat(style.getPropertyValue('--scribe-tab-width')) || 144;
+			const overflowWidth = Number.parseFloat(style.getPropertyValue('--scribe-tab-action-width')) || 28;
 			const gap = Number.parseFloat(style.columnGap) || 0;
 			const width = element.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
-			const control = button.getBoundingClientRect().width + gap;
 			const fit = (reserved: number) => Math.floor((width - reserved + gap) / (tabWidth + gap));
-			setVisibleCount(Math.max(1, fit(control) < tabs.length ? fit(control * 2) : fit(control)));
+			const withoutOverflow = fit(0);
+			setVisibleCount(Math.max(1, withoutOverflow < tabs.length ? fit(overflowWidth + gap) : withoutOverflow));
 		};
 		measure();
 		const resize = new win.ResizeObserver(measure);
@@ -78,7 +77,7 @@ export default function ChatTabBar({ tabs, activeId, onActivate, onNew, onClose,
 		const element = target === activeId ? activeButton.current : strip.current?.querySelector<HTMLButtonElement>(
 			`#${CSS.escape(`scribe-tab-${target}`)}`,
 		);
-		(element ?? activeButton.current ?? newButton.current)?.focus({ preventScroll: true });
+		(element ?? activeButton.current)?.focus({ preventScroll: true });
 	}, [activeId, editing?.id, tabs.length, visibleCount]);
 
 	function showMenu(next: Menu, anchor: HTMLElement, point?: { x: number; y: number }) {
@@ -175,7 +174,8 @@ export default function ChatTabBar({ tabs, activeId, onActivate, onNew, onClose,
 							<button type="button" className="scribe-chat-tab-select" role="tab" id={`scribe-tab-${tab.id}`}
 								aria-controls={`scribe-tab-panel-${tab.id}`} aria-selected={selected} tabIndex={selected ? 0 : -1}
 								ref={selected ? activeButton : undefined} aria-description={description}
-								title={description ? `${title} · ${description}` : title} onClick={() => onActivate(tab.id)}
+								title={description ? `${title} · ${description}` : undefined} onClick={() => onActivate(tab.id)}
+								onPointerEnter={description ? undefined : ({ currentTarget }) => updateOverflowTitle(currentTarget, currentTarget.querySelector('span:last-child'))}
 								onKeyDown={(event) => navigate(event, tab)}
 								onMouseDown={(event) => { if (event.button === 1) event.preventDefault(); }}
 								onAuxClick={(event) => { if (event.button === 1) close(tab.id); }}
@@ -207,7 +207,5 @@ export default function ChatTabBar({ tabs, activeId, onActivate, onNew, onClose,
 				}
 				showMenu(next, event.currentTarget);
 			}}><ChatIcon name="ellipsis" /></button>}
-		<button type="button" ref={newButton} className="scribe-chat-tab-action" aria-label={text.chatNewTab}
-			title={text.chatNewTab} onClick={onNew}><ChatIcon name="plus" /></button>
 	</div>;
 }

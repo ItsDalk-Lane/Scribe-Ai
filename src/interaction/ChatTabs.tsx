@@ -6,7 +6,9 @@ import { MissingConversationError } from '../types';
 import type { ConversationSnapshot, ConversationSummary, ExecutionMode } from '../types';
 import App from './App';
 import { executionModeKey, loadExecutionMode, replaceActiveTabPane } from './chatTabWorkspace';
+import type { HistoryTrigger } from './components/ChatNavigation';
 import ChatTabBar from './components/ChatTabBar';
+import { subagentIsActive } from './components/SubagentsPanel';
 import { uiText } from './uiText';
 import type { SkillDraft } from './components/skillMentionText';
 import { clearChatGoal } from './useChatGoal';
@@ -37,9 +39,10 @@ function newPane(executionMode: ExecutionMode, conversation: ConversationSnapsho
 	return { conversation, executionMode, open: true, hasDraft: false, openedAt: Date.now() };
 }
 
-export default function ChatTabs({ plugin, registerDraftTarget }: {
+export default function ChatTabs({ plugin, registerTabOpener, historyTrigger }: {
 	plugin: ScribeAiPlugin;
-	registerDraftTarget: (target?: (draft: SkillDraft) => void) => void;
+	registerTabOpener: (open?: (draft?: SkillDraft) => void) => void;
+	historyTrigger: HistoryTrigger;
 }) {
 	const text = uiText();
 	const app = plugin.app;
@@ -47,11 +50,12 @@ export default function ChatTabs({ plugin, registerDraftTarget }: {
 	const [workspace, setWorkspace] = useState<Workspace>();
 	const [index, setIndex] = useState<ConversationSummary[]>([]);
 	const mounted = useRef(false);
-	const activePane = useRef<string>(undefined);
+	const latestWorkspace = useRef<Workspace>(undefined);
 	const unopenedPane = useRef<string>(undefined);
 	const selection = useRef(0);
 	const refreshVersion = useRef(0);
 	const pendingTitles = useRef(new Map<string, string>());
+	const archiveChanges = useRef(new Set<string>());
 
 	useEffect(() => {
 		mounted.current = true;
@@ -62,7 +66,7 @@ export default function ChatTabs({ plugin, registerDraftTarget }: {
 			const recent = last.status === 'fulfilled' ? last.value ?? undefined : undefined;
 			const conversation = history.status === 'fulfilled' && history.value.some(({ id, archived }) => id === recent?.id && archived)
 				? undefined : recent;
-			const savedId = conversation && (conversation.runs.length || conversation.queue?.length) ? conversation.id : undefined;
+			const savedId = conversation && (conversation.runs.length || conversation.queue?.length || conversation.hasGoal) ? conversation.id : undefined;
 			const pane = newPane(loadExecutionMode(app, savedId), conversation);
 			if (history.status === 'rejected' || last.status === 'rejected') pane.initialError = text.chatHistoryError;
 			if (!conversation) unopenedPane.current = pane.conversation.id;
@@ -72,22 +76,24 @@ export default function ChatTabs({ plugin, registerDraftTarget }: {
 	}, [app, sessions, text.chatHistoryError]);
 
 	const activeId = workspace?.activeId;
-	useLayoutEffect(() => { activePane.current = activeId; }, [activeId]);
+	useLayoutEffect(() => { latestWorkspace.current = workspace; }, [workspace]);
 	const active = workspace?.panes.find(({ conversation }) => conversation.id === activeId);
 	const activeMode = active?.executionMode;
 	useLayoutEffect(() => {
 		if (!activeMode) return;
-		registerDraftTarget((draft) => {
+		registerTabOpener((draft) => {
 			const pane = newPane(activeMode);
-			pane.initialDraft = draft;
-			pane.hasDraft = true;
+			if (draft) {
+				pane.initialDraft = draft;
+				pane.hasDraft = true;
+				unopenedPane.current = pane.conversation.id;
+			}
 			selection.current++;
-			unopenedPane.current = pane.conversation.id;
 			setWorkspace((current) => current && { activeId: pane.conversation.id, panes: [...current.panes, pane] });
 		});
-		return () => registerDraftTarget();
-	}, [activeMode, registerDraftTarget]);
-	const hasSavedConversation = Boolean(active && (active.title || active.conversation.runs.length || active.conversation.queue?.length));
+		return () => registerTabOpener();
+	}, [activeMode, registerTabOpener]);
+	const hasSavedConversation = Boolean(active && (active.title || active.conversation.runs.length || active.conversation.queue?.length || active.conversation.hasGoal));
 	useLayoutEffect(() => {
 		if (!activeId || !activeMode) return;
 		try {
@@ -149,8 +155,8 @@ export default function ChatTabs({ plugin, registerDraftTarget }: {
 	}
 
 	async function openHistory(id: string) {
-		if (index.some((row) => row.id === id && row.archived)) await setArchived(id, false);
-		const existing = workspace?.panes.find(({ conversation }) => conversation.id === id);
+		if (archiveChanges.current.has(id)) return;
+		const existing = latestWorkspace.current?.panes.find(({ conversation }) => conversation.id === id);
 		if (existing) {
 			show(existing);
 			return;
@@ -158,7 +164,7 @@ export default function ChatTabs({ plugin, registerDraftTarget }: {
 		const version = ++selection.current;
 		const snapshot = await conversations.load(id);
 		if (!mounted.current || version !== selection.current) return;
-		if (!snapshot.runs.length && !snapshot.queue?.length) {
+		if (!snapshot.runs.length && !snapshot.queue?.length && !snapshot.hasGoal) {
 			setIndex((previous) => previous.filter((row) => row.id !== id));
 			throw new MissingConversationError(text.chatHistoryError);
 		}
@@ -175,7 +181,7 @@ export default function ChatTabs({ plugin, registerDraftTarget }: {
 			const next = open[index + 1] ?? open[index - 1];
 			let panes = current.panes.flatMap((pane) => pane.conversation.id !== id ? [pane]
 				: remove || (!pane.hasDraft && !pane.status && !pane.title && !pane.customTitle && !pane.conversation.runs.length
-					&& !pane.conversation.queue?.length) ? [] : [{ ...pane, open: false }]);
+					&& !pane.conversation.queue?.length && !pane.conversation.hasGoal) ? [] : [{ ...pane, open: false }]);
 			let selected = current.activeId;
 			if (selected === id) {
 				selected = (next ?? fallback).conversation.id;
@@ -211,7 +217,7 @@ export default function ChatTabs({ plugin, registerDraftTarget }: {
 		if (!name || name.length > 120) return false;
 		try {
 			const snapshot = await conversations.load(id);
-			if (snapshot.runs.length || snapshot.queue?.length) {
+			if (snapshot.runs.length || snapshot.queue?.length || snapshot.hasGoal) {
 				await sessions.renameConversation(id, name);
 				pendingTitles.current.delete(id);
 			} else if (workspace?.panes.some(({ conversation }) => conversation.id === id)) {
@@ -244,10 +250,27 @@ export default function ChatTabs({ plugin, registerDraftTarget }: {
 	}
 
 	async function setArchived(id: string, archived: boolean) {
-		await conversations.setArchived(id, archived);
-		refreshVersion.current++;
-		setIndex((rows) => rows.map((row) => row.id === id ? { ...row, archived: archived ? true : undefined } : row));
-		if (archived) close(id);
+		const pending = archiveChanges.current;
+		if (pending.has(id)) throw new Error(text.chatArchiveError);
+		pending.add(id);
+		try {
+			if (archived) {
+				const queued = await conversations.getQueued(id).catch(() => { throw new Error(text.chatArchiveError); });
+				const target = latestWorkspace.current?.panes.find(({ conversation }) => conversation.id === id);
+				if (queued.length || target?.status === 'running' || target?.status === 'attention'
+					|| sessions.subagents?.snapshot(id).agents.some(subagentIsActive)) throw new Error(text.chatArchiveBusy);
+			}
+			try {
+				await conversations.setArchived(id, archived);
+			} catch (cause) {
+				throw new Error(archived && cause instanceof MissingConversationError ? text.chatArchiveUnsaved : text.chatArchiveError);
+			}
+			refreshVersion.current++;
+			setIndex((rows) => rows.map((row) => row.id === id ? { ...row, archived: archived ? true : undefined } : row));
+			if (archived) close(id);
+		} finally {
+			pending.delete(id);
+		}
 	}
 
 	if (!workspace) return <div className="scribe-chat-workspace"><p className="scribe-chat-loading" role="status">{text.chatLoadingHistory}</p></div>;
@@ -265,21 +288,21 @@ export default function ChatTabs({ plugin, registerDraftTarget }: {
 	}));
 
 	return <div className="scribe-chat-workspace">
-		<ChatTabBar tabs={tabs} activeId={workspace.activeId} onNew={() => show(newPane(activeMode ?? loadExecutionMode(app)))}
-			onActivate={(id) => { const pane = workspace.panes.find(({ conversation }) => conversation.id === id); if (pane) show(pane); }}
+		<ChatTabBar tabs={tabs} activeId={workspace.activeId}
+			onActivate={(id) => { const pane = workspace.panes.find(({ conversation }) => conversation.id === id); if (pane && !archiveChanges.current.has(id)) show(pane); }}
 			onClose={close} onRename={rename} />
 		{workspace.panes.map(({ conversation, initialError, executionMode, initialDraft, open }) => {
 			const selected = conversation.id === workspace.activeId;
 			return <div key={conversation.id} className="scribe-chat-tab-panel" id={`scribe-tab-panel-${conversation.id}`}
 				role="tabpanel" aria-labelledby={`scribe-tab-${conversation.id}`} hidden={!selected}>
-				<App plugin={plugin} conversation={conversation} mode={executionMode} selected={selected} open={open} conversations={all} initialError={initialError ?? ''} initialDraft={initialDraft}
+				<App plugin={plugin} historyTrigger={historyTrigger} conversation={conversation} mode={executionMode} selected={selected}
+					open={open} conversations={all} initialError={initialError ?? ''} initialDraft={initialDraft}
 					onModeChange={(mode) => setWorkspace((current) => current && { ...current, panes: current.panes.map((pane) =>
 						pane.conversation.id === conversation.id ? { ...pane, executionMode: mode } : pane) })}
-					onNew={newConversationInActiveTab} onNewTab={(title) => show(titledPane(title))}
-					onClose={() => close(conversation.id)} onArchive={setArchived}
+					onNew={newConversationInActiveTab} onArchive={setArchived}
 					onOpen={openHistory} onRename={rename} onDelete={remove} onRefresh={refresh}
-					onFork={(snapshot, title) => show({ ...newPane(executionMode, snapshot), customTitle: title },
-						activePane.current === conversation.id)} onActivity={updateActivity} />
+					onFork={(snapshot) => show(newPane(executionMode, snapshot),
+						latestWorkspace.current?.activeId === conversation.id)} onActivity={updateActivity} />
 			</div>;
 		})}
 	</div>;

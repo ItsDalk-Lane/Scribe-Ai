@@ -9,7 +9,7 @@ import type ScribeAiPlugin from '../main';
 import { chatModelKey } from '../orchestration/settings/thinking';
 import type { NoteRef, RunContext, SavedRun, SideChat, SkillMention } from '../types';
 import { composerShortcut } from './composerKeyboard';
-import { copySlash, exportSlash, showSlashWarnings } from './slashActions';
+import { exportSlash, showSlashMcp, showSlashWarnings } from './slashActions';
 import { tr } from './skills/dialog';
 import ExecutionView from './components/ExecutionView';
 import { MetricPopoverProvider } from './components/MetricPopover';
@@ -133,23 +133,16 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 			event.stopPropagation();
 			chat.stop();
 		}}>
-			<ExecutionView app={plugin.app} conversationId={chat.id} loading={false} history={history}
+			<ExecutionView app={plugin.app} skills={skills} conversationId={chat.id} loading={false} history={history}
 				execution={execution} liveRequest={live?.request} liveModel={live?.model} temporary />
 			<TaskInput inputRef={input} busy={Boolean(live)} disabled={false} conversationId={chat.id}
-				slashCommands={{ surface: 'side', unavailable: (name) => running.current && ['export', 'mention', 'skills'].includes(name)
+				slashCommands={{ surface: 'side', unavailable: (name) => running.current && ['export', 'skills'].includes(name)
 					? tr('侧聊回答结束后可用。', 'Available after the side conversation finishes.') : undefined,
 					run: async ({ name, args }, controls) => {
 						switch (name) {
-							case 'mention': return controls.openMention();
-							case 'skills': controls.openSkills(); return true;
-							case 'copy': return copySlash(history, execution.state, controls.ui);
+							case 'skills': return controls.openSkills();
+							case 'mcp': return showSlashMcp(plugin, controls.ui);
 							case 'export': return exportSlash(plugin.app, history, args, text.sideChatTitle, controls.ui);
-							case 'status':
-								return controls.ui.show(text.sideChatTitle, [
-									model?.model ?? text.chatModelMissing,
-									tr('临时聊天 · 只读', 'Temporary conversation · Read only'),
-									running.current ? tr('正在回答', 'Replying') : tr('空闲', 'Idle'),
-								]);
 							case 'warnings': return showSlashWarnings(plugin, controls.ui);
 							default: return false;
 						}
@@ -158,13 +151,16 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 				skills={skills} skillScope={draftScope} skillMentions={skillMentions}
 				vaultOnly placeholder={text.sideChatPlaceholder} modelGroups={modelOptions.groups} modelValue={value} thinking={thinking}
 				context={{
-					app: plugin.app, refs, quotes,
+					app: plugin.app, refs, quotes, conversationStore: plugin.services.orchestration.conversations,
 					onAdd: (ref) => {
 						if (running.current) return;
 						setRefs((previous) => previous.some(({ path }) => path === ref.path) ? previous : [...previous, ref]);
 					},
+					onAddQuote: (quote) => {
+						if (!running.current) setQuotes((previous) => previous.includes(quote) ? previous : [...previous, quote]);
+					},
 					onRemove: (path) => setRefs((previous) => previous.filter((ref) => ref.path !== path)),
-					onRemoveQuotes: () => setQuotes([]),
+					onRemoveQuotes: (removed) => setQuotes((previous) => previous.filter((quote) => !removed.includes(quote))),
 				}}
 				onModelChange={(next) => {
 					if (next !== value) {

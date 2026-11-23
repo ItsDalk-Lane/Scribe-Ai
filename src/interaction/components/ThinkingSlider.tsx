@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef } from 'react';
 import type { CSSProperties, PointerEvent } from 'react';
+import { updateOverflowTitle } from '../overflowTitle';
 import { thinkingLabel, uiText } from '../uiText';
 
 export interface ThinkingSelection {
@@ -36,7 +37,9 @@ export default function ThinkingSlider({ levels, level, disabled, onChange }:
 	}
 
 	return <section className="scribe-thinking-card-slider" aria-label={text.thinkingLevel}>
-		<div className="scribe-thinking-caption"><span>{text.thinkingLevel}</span><strong title={label}>{label}</strong></div>
+		<div className="scribe-thinking-caption"><span>{text.thinkingLevel}</span>
+			<strong onPointerEnter={({ currentTarget }) => updateOverflowTitle(currentTarget)}>{label}</strong>
+		</div>
 		<div className="scribe-thinking-track" role="slider" tabIndex={locked ? -1 : 0} aria-disabled={locked || undefined}
 			aria-label={text.thinkingLevel} aria-valuemin={1} aria-valuemax={levels.length} aria-valuenow={index + 1} aria-valuetext={label}
 			style={{ '--scribe-level-progress': last ? index / last : 0.5 } as CSSProperties}

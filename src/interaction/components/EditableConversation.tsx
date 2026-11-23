@@ -8,13 +8,15 @@ export interface EditableConversationProps {
 	conversation: ConversationSummary;
 	disabled: boolean;
 	onRename: (id: string, title: string) => Promise<boolean>;
+	onArchive: (conversation: ConversationSummary, trigger: HTMLButtonElement) => void;
 	onDelete: (conversation: ConversationSummary, trigger: HTMLButtonElement) => void;
 }
 
-export default function EditableConversation({ conversation, disabled, onRename, onDelete, children }: PropsWithChildren<EditableConversationProps>) {
+export default function EditableConversation({ conversation, disabled, onRename, onArchive, onDelete, children }: PropsWithChildren<EditableConversationProps>) {
 	const text = uiText();
-	const { id, title } = conversation;
+	const { id, title, archived } = conversation;
 	const label = title || text.chatUntitled;
+	const archiveLabel = archived ? text.chatUnarchiveConversation : text.chatArchiveConversation;
 	const [draft, setDraft] = useState<string | null>(null);
 	const edit = useRef<HTMLButtonElement>(null);
 	const field = useRef<HTMLInputElement>(null);
@@ -57,6 +59,9 @@ export default function EditableConversation({ conversation, disabled, onRename,
 					restoreFocus.current = true;
 					setDraft(title);
 				}}><ChatIcon name="pencil" /></button>
+			<button type="button" className="scribe-chat-icon-button" disabled={disabled}
+				aria-label={`${archiveLabel} ${label}`} title={archiveLabel}
+				onClick={(event) => onArchive(conversation, event.currentTarget)}><ChatIcon name={archived ? 'archive-restore' : 'archive'} /></button>
 			<button type="button" className="scribe-chat-icon-button scribe-conversation-delete" disabled={disabled}
 				aria-label={`${text.chatDeleteConversation} ${label}`} title={text.chatDeleteConversation}
 				onClick={(event) => onDelete(conversation, event.currentTarget)}><ChatIcon name="trash-2" /></button>

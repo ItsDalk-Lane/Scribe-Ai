@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { App } from 'obsidian';
-import type { SavedRun, SubagentSnapshot, TaskRequest } from '../../types';
+import type { SavedRun, SkillRegistry, SubagentSnapshot, TaskRequest } from '../../types';
 import { chatTurnPreview } from '../chatTurnContent';
 import { restoredTimelineExpansion, toggleTimelineExpansion } from '../chatTimeline';
 import { restoreExecution } from '../context';
@@ -29,12 +29,11 @@ function turnAtScroll(column: HTMLDivElement | null, top: number) {
 }
 
 export default function ExecutionView({
-	app, execution, history, reports, loading, conversationId, liveRequest, liveModel, editingId, onEdit, onFork,
+	app, skills, execution, history, reports, loading, conversationId, liveRequest, liveModel, editingId, onEdit, onFork,
 	onQuoteSelection, onSideChatSelection, temporary = false, automaticReview = false, renderActivity,
-	submissions, inspectSubagent, subagentNames, historyNavigation,
+	submissions, inspectSubagent, subagentNames,
 }: {
-	historyNavigation?: ReactNode;
-	app: App; execution: ChatExecution; history: DisplayedRun[]; loading: boolean; conversationId: string | null;
+	app: App; skills: SkillRegistry; execution: ChatExecution; history: DisplayedRun[]; loading: boolean; conversationId: string | null;
 	liveRequest?: TaskRequest; liveModel?: SavedRun['model']; editingId?: string;
 	reports?: SubagentSnapshot['reports'];
 	onEdit?: (taskId: string) => void; onFork?: (taskId: string) => void;
@@ -94,12 +93,12 @@ export default function ExecutionView({
 	}, []);
 
 	const turns = restored.map(({ id, subagentReport, ...run }) =>
-		<ChatTurn key={id} app={app} expanded={expanded} toggleExpanded={toggleExpanded} editing={editingId === id}
+		<ChatTurn key={id} app={app} skills={skills} expanded={expanded} toggleExpanded={toggleExpanded} editing={editingId === id}
 			completedActivity={renderActivity?.(id)}
 			subagentReport={reports?.[id] ?? subagentReport}
 			submissions={submissions} inspectSubagent={inspectSubagent} subagentNames={subagentNames}
 			onEdit={onEdit && (() => onEdit(id))} onFork={onFork && (() => onFork(id))} readOnly={temporary} {...run} />);
-	if (liveId) turns.push(<ChatTurn key={liveId} app={app} execution={execution}
+	if (liveId) turns.push(<ChatTurn key={liveId} app={app} skills={skills} execution={execution}
 		completedActivity={renderActivity?.(liveId)} subagentReport={liveReport}
 		submissions={submissions} inspectSubagent={inspectSubagent} subagentNames={subagentNames}
 		request={liveRequest} model={liveModel} expanded={expanded} toggleExpanded={toggleExpanded} readOnly={temporary} automaticReview={automaticReview} live />);
@@ -139,8 +138,7 @@ export default function ExecutionView({
 			</div>
 			{!loading && (onQuoteSelection || onSideChatSelection) && <TranscriptSelection key={conversationId} scroll={scroll}
 				content={content} onQuote={onQuoteSelection} onSideChat={onSideChatSelection} />}
-			{!loading && entries.length > 1 && <TurnNavigator key={conversationId} entries={entries} current={current} onJump={jumpTo} />}
-			{historyNavigation}
+			{!loading && entries.length > 1 && <TurnNavigator key={`${conversationId}:turns`} entries={entries} current={current} onJump={jumpTo} />}
 			{!loading && away && (
 				<button type="button" className="scribe-chat-jump" aria-label={text.chatLatest} title={text.chatLatest} onClick={() => {
 					const element = scroll.current;

@@ -121,10 +121,16 @@ export function conversationMetrics(runs: readonly RunState[], subagentRuns: rea
 	const messages = completedMessages(all);
 	const usage = usageBreakdown(messages, allRuns.flatMap(({ auxiliaryUsage }) => auxiliaryUsage ?? []));
 	const lags = messages.flatMap(({ metrics }) => nonNegative(metrics?.firstDeltaMs) ? [metrics.firstDeltaMs] : []);
-	const decode = messages.map(({ metrics }) => metrics?.decodeMs);
-	const decodeMs = decode.every(nonNegative) ? sum(decode) : undefined;
-	const output = messages.map((message) => messageUsage(message).output);
-	const outputTokens = output.every(nonNegative) ? sum(output) : undefined;
+	let decodeMs = 0;
+	let outputTokens = 0;
+	for (const message of messages) {
+		const duration = message.metrics?.decodeMs;
+		if (!nonNegative(duration) || duration === 0) continue;
+		const { output } = messageUsage(message);
+		if (!nonNegative(output)) continue;
+		decodeMs += duration;
+		outputTokens += output;
+	}
 	const latest = (subagentRuns.length ? completedMessages(runs.flatMap(({ messages }) => messages)) : messages).at(-1);
 	const prompt = latest && messageUsage(latest).prompt;
 	const capacity = latest?.metrics?.contextWindow;
@@ -134,7 +140,7 @@ export function conversationMetrics(runs: readonly RunState[], subagentRuns: rea
 		modelMs: sum(messages.map(({ metrics, rawAssistant }) => metrics?.modelMs ?? rawAssistant?.durationMs)),
 		toolMs: sum(all.map(({ toolDurationMs }) => toolDurationMs)),
 		lagMs: lags.length ? lags.reduce((total, value) => total + value, 0) / lags.length : undefined,
-		speed: outputTokens !== undefined && decodeMs && decodeMs > 0 ? outputTokens * 1000 / decodeMs : undefined,
+		speed: decodeMs > 0 ? outputTokens * 1000 / decodeMs : undefined,
 		usage,
 		context: prompt !== undefined && capacity && capacity > 0
 			? { prompt, capacity, remaining: Math.max(0, capacity - prompt), percent: Math.ceil(prompt * 10_000 / capacity) / 100 } : undefined,

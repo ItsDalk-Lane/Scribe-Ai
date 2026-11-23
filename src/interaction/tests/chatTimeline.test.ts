@@ -33,6 +33,12 @@ void test('only a continuous series of tools of the same kind forms a group', ()
 	]);
 });
 
+void test('each skill read has an individual row, including consecutive reads', () => {
+	const first = { ...read('skill-1'), call: { id: 'skill-1', name: 'read_skill', input: { id: 'one' } } };
+	const second = { ...read('skill-2'), call: { id: 'skill-2', name: 'read_skill', input: { id: 'one', file: 'notes.md' } } };
+	assert.deepEqual(timelineRows([first, second]), [first, second]);
+});
+
 void test('thinking deltas grow one row with a stable key before the following reply', () => {
 	const delta = { type: 'delta' as const, kind: 'thinking' as const, messageId, contentIndex: 0, text: '先' };
 	const original = project(delta);
