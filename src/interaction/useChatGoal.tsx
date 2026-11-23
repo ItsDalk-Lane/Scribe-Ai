@@ -1,9 +1,10 @@
 import { getLanguage, Modal, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
-import type { RunState } from '../types';
-import { DEFAULT_GOAL_ROUNDS, finishGoalRound, MAX_GOAL_LENGTH, MAX_GOAL_ROUNDS, restoreChatGoal, validGoalRounds } from './chatGoal';
-import type { ChatGoal, GoalPause } from './chatGoal';
+import type { ConversationStore, RunState } from '../types';
+import { DEFAULT_GOAL_ROUNDS, finishGoalRound, MAX_GOAL_CRITERIA, MAX_GOAL_LENGTH, MAX_GOAL_ROUNDS, parseChatGoal,
+	restoreChatGoal, setGoalWorkClock, validGoalCriteria, validGoalRounds } from './chatGoal';
+import type { ChatGoal, GoalPause, GoalWorkClock } from './chatGoal';
 import { confirmAction } from './ConfirmModal';
 import type { SlashUi } from './slashUi';
 
@@ -13,195 +14,297 @@ export function clearChatGoal(app: App, conversationId: string): void {
 	app.saveLocalStorage(goalKey(conversationId), null);
 }
 
-function goalText() {
+export function goalText() {
 	const chinese = getLanguage().toLowerCase().startsWith('zh');
 	return chinese ? {
-		title: '聊天目标', objective: '目标内容', limit: '每次最多自动执行的轮数', create: '启动目标',
+		title: '聊天目标', objective: '目标内容', criteria: '验收条件（每行一项）', limit: '每次最多自动执行的轮数', create: '启动目标',
 		edit: '编辑', resume: '继续', pause: '暂停', clear: '清除', cancel: '取消', save: '保存',
-		replace: '保存并启动后会替换现有目标。', confirmClear: '清除这个目标？聊天记录会保留。',
-		invalid: `请输入目标，并将自动执行轮数设为 1 至 ${MAX_GOAL_ROUNDS} 的整数。`,
+		replace: '启动新目标会替换当前目标，聊天记录会保留。', confirmClear: '清除这个目标？聊天记录会保留。',
+		invalidObjective: `请输入不超过 ${MAX_GOAL_LENGTH} 个字符的目标。`, invalidContext: '目标包含无效的资料或技能，请重新选择。',
+		invalid: `请输入目标，填写最多 ${MAX_GOAL_CRITERIA} 项验收条件，并将自动执行轮数设为 1 至 ${MAX_GOAL_ROUNDS} 的整数。`,
 		missing: '请先输入 /goal 和目标内容。', saveFailed: '目标进度保存失败，自动续做已停止。',
-		changed: '目标已更改，请重新打开。', waiting: '等待本聊天空闲后继续',
+		loadFailed: '无法读取目标记录，请重新打开聊天。', checked: '已核对', remaining: '待处理', working: '正在执行本轮', changed: '目标已更改，请重新打开。', waiting: '等待本聊天空闲后继续',
 		active: '进行中', paused: '已暂停', complete: '已完成', current: '本次', total: '累计轮数',
 		proof: '完成依据', reasons: {
-			manual: '已手动停止。', closed: '聊天已关闭，请手动继续。', limit: '已达到本次上限。', failed: '上一轮未成功结束，请查看聊天记录。',
+			manual: '已手动暂停。', plan: '已切换到计划模式。', closed: '聊天已关闭或重开，请手动继续。', limit: '已达到本次上限。', failed: '上一轮未成功结束，请查看聊天记录。',
 			blocked: '需要你处理上一轮的问题。处理后可手动继续。',
 		},
 	} : {
-		title: 'Chat goal', objective: 'Objective', limit: 'Automatic rounds per start', create: 'Start goal',
+		title: 'Chat goal', objective: 'Objective', criteria: 'Acceptance criteria (one per line)', limit: 'Automatic rounds per start', create: 'Start goal',
 		edit: 'Edit', resume: 'Resume', pause: 'Pause', clear: 'Clear', cancel: 'Cancel', save: 'Save',
-		replace: 'Starting this goal replaces the current goal.', confirmClear: 'Clear this goal? Chat history will be kept.',
-		invalid: `Enter a goal and a whole number from 1 to ${MAX_GOAL_ROUNDS} for the round limit.`,
+		replace: 'Starting a new goal replaces the current goal. Chat history will be kept.', confirmClear: 'Clear this goal? Chat history will be kept.',
+		invalidObjective: `Enter an objective of up to ${MAX_GOAL_LENGTH} characters.`, invalidContext: 'Select the goal’s attachments or skills again.',
+		invalid: `Enter a goal, up to ${MAX_GOAL_CRITERIA} acceptance criteria, and a whole number from 1 to ${MAX_GOAL_ROUNDS} for the round limit.`,
 		missing: 'Enter /goal followed by your objective first.', saveFailed: 'The goal could not be saved. Automatic work has stopped.',
-		changed: 'The goal changed. Open the editor again.', waiting: 'Waiting for this chat to become idle',
+		loadFailed: 'The goal could not be loaded. Reopen the chat.', checked: 'Checked', remaining: 'Remaining', working: 'Working on this round', changed: 'The goal changed. Open the editor again.', waiting: 'Waiting for this chat to become idle',
 		active: 'In progress', paused: 'Paused', complete: 'Complete', current: 'This start', total: 'Total rounds',
 		proof: 'Completion evidence', reasons: {
-			manual: 'Stopped manually.', closed: 'The chat closed. Resume to continue.', limit: 'This start reached its limit.', failed: 'The last round ended early. See chat history.',
+			manual: 'Paused manually.', plan: 'Switched to Plan mode.', closed: 'The chat was closed or reopened. Resume to continue.', limit: 'This start reached its limit.', failed: 'The last round ended early. See chat history.',
 			blocked: 'The last round needs your attention. Resume when ready.',
 		},
 	};
 }
 
-function editGoal(app: App, objective: string, maxRounds: number, action: 'create' | 'edit', replace: boolean) {
+type GoalContext = Pick<ChatGoal, 'refs' | 'chatQuotes' | 'skillMentions' | 'skillScope'>;
+type GoalDraft = Pick<ChatGoal, 'objective' | 'criteria' | 'maxRounds'>;
+
+function editGoal(app: App, draft: GoalDraft, ui?: SlashUi) {
 	const text = goalText();
-	return new Promise<{ objective: string; maxRounds: number } | undefined>((resolve) => {
-		const modal = new Modal(app);
-		let result: { objective: string; maxRounds: number } | undefined;
-		modal.setTitle(text.title);
-		if (replace) modal.contentEl.createEl('p', { text: text.replace });
-		let goalField: HTMLTextAreaElement | undefined;
-		let limitField: HTMLInputElement | undefined;
-		new Setting(modal.contentEl).setName(text.objective).addTextArea((field) => {
-			goalField = field.setValue(objective).inputEl;
-			goalField.rows = 4;
-			goalField.maxLength = MAX_GOAL_LENGTH;
-			goalField.setAttribute('aria-label', text.objective);
+	function render(host: HTMLElement, done: (value?: GoalDraft) => void) {
+		let objective: HTMLTextAreaElement | undefined;
+		let criteria: HTMLTextAreaElement | undefined;
+		let limit: HTMLInputElement | undefined;
+		new Setting(host).setName(text.objective).addTextArea((field) => {
+			objective = field.setValue(draft.objective).inputEl;
+			objective.rows = 4;
+			objective.maxLength = MAX_GOAL_LENGTH;
+			objective.setAttribute('aria-label', text.objective);
 		});
-		new Setting(modal.contentEl).setName(text.limit).addText((field) => {
-			limitField = field.setValue(String(maxRounds)).inputEl;
-			limitField.type = 'number';
-			limitField.min = '1';
-			limitField.max = String(MAX_GOAL_ROUNDS);
-			limitField.setAttribute('aria-label', text.limit);
+		new Setting(host).setName(text.criteria).addTextArea((field) => {
+			criteria = field.setValue(draft.criteria?.join('\n') ?? '').inputEl;
+			criteria.rows = 3;
+			criteria.setAttribute('aria-label', text.criteria);
 		});
-		const error = modal.contentEl.createDiv({ cls: 'scribe-chat-error', attr: { role: 'alert' } });
-		new Setting(modal.contentEl).addButton((button) => button.setButtonText(text.cancel).onClick(() => modal.close()))
-			.addButton((button) => button.setButtonText(action === 'create' ? text.create : text.save).setCta().onClick(() => {
-				const value = goalField?.value.trim();
-				const rounds = limitField?.valueAsNumber;
-				if (!value || value.length > MAX_GOAL_LENGTH || !validGoalRounds(rounds)) {
+		new Setting(host).setName(text.limit).addText((field) => {
+			limit = field.setValue(String(draft.maxRounds)).inputEl;
+			limit.type = 'number';
+			limit.min = '1';
+			limit.max = String(MAX_GOAL_ROUNDS);
+			limit.setAttribute('aria-label', text.limit);
+		});
+		const error = host.createDiv({ cls: 'scribe-chat-error', attr: { role: 'alert' } });
+		new Setting(host).addButton((button) => button.setButtonText(text.cancel).onClick(() => done()))
+			.addButton((button) => button.setButtonText(text.save).setCta().onClick(() => {
+				const value = objective?.value.trim();
+				const rounds = limit?.valueAsNumber;
+				const checks = [...new Set(criteria?.value.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean))];
+				const conditions = checks.length ? checks : [value];
+				if (!value || value.length > MAX_GOAL_LENGTH || !validGoalRounds(rounds) || !validGoalCriteria(conditions)) {
 					error.setText(text.invalid);
 					return;
 				}
-				result = { objective: value, maxRounds: rounds };
-				modal.close();
+				done({ objective: value, criteria: conditions, maxRounds: rounds });
 			}));
-		modal.onOpen = () => goalField?.focus();
+		queueMicrotask(() => objective?.focus());
+	}
+	if (ui) return ui.custom<GoalDraft>(text.title, render);
+	return new Promise<GoalDraft | undefined>((resolve) => {
+		const modal = new Modal(app);
+		modal.modalEl.addClass('scribe-goal-modal');
+		let result: GoalDraft | undefined;
+		modal.setTitle(text.title);
+		modal.onOpen = () => render(modal.contentEl, (value) => { result = value; modal.close(); });
 		modal.onClose = () => resolve(result);
 		modal.open();
 	});
 }
 
-function editGoalPanel(ui: SlashUi, objective: string, maxRounds: number, action: 'create' | 'edit', replace: boolean) {
+function confirmGoal(app: App, message: string, confirmText: string, ui?: SlashUi): Promise<boolean> {
 	const text = goalText();
-	return ui.custom<{ objective: string; maxRounds: number }>(text.title, (host, done) => {
-		if (replace) host.createEl('p', { text: text.replace });
-		let goalField: HTMLTextAreaElement | undefined;
-		let limitField: HTMLInputElement | undefined;
-		new Setting(host).setName(text.objective).addTextArea((field) => {
-			goalField = field.setValue(objective).inputEl;
-			goalField.rows = 4;
-			goalField.maxLength = MAX_GOAL_LENGTH;
-			goalField.setAttribute('aria-label', text.objective);
-		});
-		new Setting(host).setName(text.limit).addText((field) => {
-			limitField = field.setValue(String(maxRounds)).inputEl;
-			limitField.type = 'number';
-			limitField.min = '1';
-			limitField.max = String(MAX_GOAL_ROUNDS);
-			limitField.setAttribute('aria-label', text.limit);
-		});
-		const error = host.createDiv({ cls: 'scribe-chat-error', attr: { role: 'alert' } });
-		new Setting(host).addButton((button) => button.setButtonText(text.cancel).onClick(() => done(undefined)))
-			.addButton((button) => button.setButtonText(action === 'create' ? text.create : text.save).setCta().onClick(() => {
-				const value = goalField?.value.trim();
-				const rounds = limitField?.valueAsNumber;
-				if (!value || value.length > MAX_GOAL_LENGTH || !validGoalRounds(rounds)) {
-					error.setText(text.invalid);
-					return;
-				}
-				done({ objective: value, maxRounds: rounds });
-			}));
-		queueMicrotask(() => goalField?.focus());
+	if (ui) return ui.confirm(text.title, message, confirmText);
+	return new Promise((resolve) => {
+		let accepted = false;
+		confirmAction(app, { title: text.title, message, confirmText, cancelText: text.cancel,
+			onConfirm: () => { accepted = true; }, onClose: () => resolve(accepted) });
 	});
 }
 
 interface GoalOptions {
 	app: App;
+	store: Pick<ConversationStore, 'loadGoal' | 'saveGoal'>;
 	conversationId: string;
 	isOpen: boolean;
 	canContinue: boolean;
-	start: (objective: string) => Promise<RunState | undefined>;
+	start: (goal: ChatGoal) => Promise<RunState | undefined>;
 	stopRunning: () => void;
+	onDefinitionChange: () => void;
 }
 
-export function useChatGoal({ app, conversationId, isOpen, canContinue, start, stopRunning }: GoalOptions) {
-	const [goal, setGoal] = useState(() => {
-		try { return restoreChatGoal(app.loadLocalStorage(goalKey(conversationId))); } catch { return undefined; }
-	});
+export function useChatGoal({ app, store, conversationId, isOpen, canContinue, start, stopRunning, onDefinitionChange }: GoalOptions) {
+	const [goal, setGoal] = useState<ChatGoal>();
+	const [ready, setReady] = useState(false);
 	const [opened, setOpened] = useState(false);
 	const [error, setError] = useState('');
 	const [working, setWorking] = useState(false);
-	const current = useRef(goal);
+	const [workClock, setWorkClock] = useState<GoalWorkClock>({ workedMs: 0 });
+	const clock = useRef(workClock);
+	const workOwner = useRef<ChatGoal>(undefined);
+	const current = useRef<ChatGoal>(undefined);
+	const saved = useRef<ChatGoal>(undefined);
+	const writes = useRef(Promise.resolve());
+	const revision = useRef(0);
 	const mounted = useRef(false);
 	const running = useRef(false);
-	const blocked = useRef(false);
+	const writeFailed = useRef(false);
 	const open = useRef(isOpen);
 	const changing = useRef(false);
 
-	useEffect(() => {
-		mounted.current = true;
-		return () => { mounted.current = false; };
-	}, []);
-
-	function save(next: ChatGoal | undefined): boolean {
-		try {
-			if (next) app.saveLocalStorage(goalKey(conversationId), next);
-			else clearChatGoal(app, conversationId);
-		} catch {
-			blocked.current = true;
-			setError(goalText().saveFailed);
-			return false;
-		}
-		blocked.current = false;
-		current.current = next;
-		setGoal(next);
-		setError('');
-		return true;
+	function updateClock(value: GoalWorkClock) {
+		if (clock.current.workedMs === value.workedMs && clock.current.startedAt === value.startedAt) return;
+		clock.current = value;
+		if (mounted.current) setWorkClock(value);
 	}
 
-	function pause(reason: GoalPause): boolean {
+	function setWorkActive(active: boolean) {
+		if (active && (!workOwner.current || current.current !== workOwner.current || writeFailed.current)) return;
+		updateClock(setGoalWorkClock(clock.current, active, performance.now()));
+	}
+
+	function sealWork(value: ChatGoal): ChatGoal {
+		setWorkActive(false);
+		return { ...value, workedMs: clock.current.workedMs };
+	}
+
+	const refreshIndex = useEffectEvent(onDefinitionChange);
+	const onDispose = useEffectEvent(() => { void pause('closed'); });
+	useEffect(() => {
+		mounted.current = true;
+		let disposed = false;
+		void (async () => {
+			try {
+				const recorded = await store.loadGoal(conversationId);
+				if (disposed) return;
+				const value = restoreChatGoal(recorded === undefined ? app.loadLocalStorage(goalKey(conversationId)) : recorded);
+				if (recorded === undefined && value) {
+					await store.saveGoal(conversationId, value);
+					if (disposed) return;
+					try { clearChatGoal(app, conversationId); } catch { /* 新记录优先。 */ }
+					refreshIndex();
+				}
+				current.current = saved.current = value;
+				updateClock({ workedMs: value?.workedMs ?? 0 });
+				setGoal(value);
+				setReady(true);
+			} catch {
+				if (!disposed) setError(goalText().loadFailed);
+			}
+		})();
+		return () => { disposed = true; mounted.current = false; onDispose(); };
+	}, [app, conversationId, store]);
+
+	async function save(next: ChatGoal | undefined): Promise<boolean> {
+		const version = ++revision.current;
+		current.current = next;
+		updateClock({ workedMs: next?.workedMs ?? 0 });
+		const write = writes.current.then(() => store.saveGoal(conversationId, next ?? null));
+		writes.current = write.then(() => { saved.current = next; }, () => {});
+		try {
+			await write;
+			if (revision.current === version) {
+				writeFailed.current = false;
+				if (mounted.current) {
+					setGoal(next);
+					setError('');
+				}
+			}
+			return true;
+		} catch {
+			if (revision.current === version) {
+				writeFailed.current = true;
+				current.current = saved.current;
+				updateClock({ workedMs: saved.current?.workedMs ?? 0 });
+				if (mounted.current) {
+					setGoal(saved.current);
+					setError(goalText().saveFailed);
+				}
+			}
+			return false;
+		}
+	}
+
+	function pause(reason: GoalPause): Promise<boolean> {
 		const value = current.current;
-		if (!value || value.status !== 'active') return true;
-		const saved = save({ ...value, status: 'paused', reason });
+		if (!value || value.status !== 'active') return writes.current.then(() => current.current?.status !== 'active');
+		const write = save({ ...sealWork(value), status: 'paused', reason });
 		if (running.current) stopRunning();
-		return saved;
+		return write;
 	}
 
 	const onOpenChange = useEffectEvent(() => {
 		open.current = isOpen;
-		if (!isOpen) pause('closed');
+		if (!isOpen) void pause('closed');
 	});
 	useEffect(() => onOpenChange(), [isOpen]);
 
 	const runNext = useEffectEvent(async () => {
 		const value = current.current;
-		if (!isOpen || !canContinue || !value || value.status !== 'active' || blocked.current || running.current) return;
+		if (!isOpen || !canContinue || !value || value !== goal || value.status !== 'active'
+			|| writeFailed.current || running.current) return;
 		if (value.usedRounds >= value.maxRounds) {
-			pause('limit');
+			await pause('limit');
 			return;
 		}
-		const started = { ...value, usedRounds: value.usedRounds + 1, totalRounds: value.totalRounds + 1 };
-		if (!save(started)) return;
 		running.current = true;
+		workOwner.current = value;
 		setWorking(true);
+		const started = { ...value, usedRounds: value.usedRounds + 1, totalRounds: value.totalRounds + 1 };
 		let result: RunState | undefined;
 		try {
-			result = await start(started.objective);
+			result = await start(started);
 		} catch {
 			// 任务出错时暂停，详细信息由原有聊天记录显示。
 		} finally {
+			// 聊天先保存本轮结果，验收状态保存完成后才能开始下一轮。
+			if (mounted.current && current.current === value) await save(finishGoalRound(sealWork(result ? started : value), result));
+			workOwner.current = undefined;
 			running.current = false;
-			if (mounted.current) {
-				setWorking(false);
-				if (current.current === started && !blocked.current) save(finishGoalRound(started, result));
-			}
+			if (mounted.current) setWorking(false);
 		}
 	});
 	useEffect(() => { void runNext(); }, [canContinue, goal, isOpen, working]);
 
+	async function create(description: string, context?: GoalContext, ui?: SlashUi): Promise<boolean> {
+		if (!ready || !mounted.current || !open.current || changing.current) return false;
+		const text = goalText();
+		const objective = description.trim();
+		if (!objective || objective.length > MAX_GOAL_LENGTH) throw new Error(text.invalidObjective);
+		const next = parseChatGoal({ ...context, objective, criteria: [objective], status: 'active', maxRounds: DEFAULT_GOAL_ROUNDS,
+			usedRounds: 0, totalRounds: 0, workedMs: 0 });
+		if (!next) throw new Error(text.invalidContext);
+		const existing = current.current;
+		changing.current = true;
+		try {
+			if (existing && !await confirmGoal(app, text.replace, text.create, ui)) return false;
+			if (!mounted.current || !open.current || current.current?.objective !== existing?.objective) return false;
+			setWorkActive(false);
+			const savedGoal = save(next);
+			if (running.current) stopRunning();
+			if (!await savedGoal) return false;
+			if (mounted.current) {
+				setOpened(false);
+				onDefinitionChange();
+			}
+			return true;
+		} finally {
+			changing.current = false;
+		}
+	}
+
+	async function edit(existing: ChatGoal, ui?: SlashUi): Promise<boolean> {
+		changing.current = true;
+		try {
+			const next = await editGoal(app, existing, ui);
+			if (!next || !mounted.current || !open.current) return false;
+			const latest = current.current;
+			if (!latest || latest.objective !== existing.objective) throw new Error(goalText().changed);
+			const sameObjective = latest.objective === next.objective;
+			const sameCriteria = JSON.stringify(latest.criteria ?? [latest.objective]) === JSON.stringify(next.criteria);
+			const savedGoal = save({
+				...sealWork(latest), ...next, status: 'paused', reason: 'manual',
+				...(!sameObjective && { skillMentions: undefined }),
+				...((!sameObjective || !sameCriteria) && { evidence: undefined, progress: undefined, plan: undefined }),
+			});
+			if (running.current) stopRunning();
+			if (!await savedGoal) return false;
+			if (mounted.current) onDefinitionChange();
+			return true;
+		} finally {
+			changing.current = false;
+		}
+	}
+
 	async function command(argument: string, ui?: SlashUi): Promise<boolean> {
-		if (!mounted.current || !isOpen || changing.current) return false;
+		if (!ready || !mounted.current || !open.current || changing.current) return false;
 		const text = goalText();
 		const value = current.current;
 		const objective = argument.trim();
@@ -215,66 +318,28 @@ export function useChatGoal({ app, conversationId, isOpen, canContinue, start, s
 			if (action === 'pause') return pause('manual');
 			if (action === 'resume') {
 				if (value.status !== 'paused') return true;
-				return save({ ...value, status: 'active', usedRounds: 0, reason: undefined });
+				return save({ ...value, criteria: value.criteria ?? [value.objective], status: 'active', usedRounds: 0, reason: undefined });
 			}
-		}
-		changing.current = true;
-		try {
-			const stillHere = () => mounted.current && open.current && current.current?.objective === value?.objective;
-			if (action === 'clear') {
-				const confirmed = ui ? await ui.confirm(text.title, text.confirmClear, text.clear)
-					: await new Promise<boolean>((resolve) => {
-						let accepted = false;
-						confirmAction(app, { title: text.title, message: text.confirmClear, confirmText: text.clear, cancelText: text.cancel,
-							onConfirm: () => { accepted = true; }, onClose: () => resolve(accepted) });
-					});
-				if (!confirmed || !stillHere() || !save(undefined)) return false;
+			if (action === 'edit') return edit(value, ui);
+			changing.current = true;
+			try {
+				const confirmed = await confirmGoal(app, text.confirmClear, text.clear, ui);
+				if (!confirmed || !mounted.current || !open.current || current.current?.objective !== value.objective) return false;
+				setWorkActive(false);
+				const cleared = save(undefined);
 				if (running.current) stopRunning();
+				if (!await cleared) return false;
+				if (mounted.current) onDefinitionChange();
 				return true;
+			} finally {
+				changing.current = false;
 			}
-			const editing = action === 'edit' && value;
-			const editArguments = [editing ? value.objective : objective, editing ? value.maxRounds : DEFAULT_GOAL_ROUNDS,
-				editing ? 'edit' : 'create', Boolean(!editing && value && value.status !== 'complete')] as const;
-			const next = ui ? await editGoalPanel(ui, ...editArguments) : await editGoal(app, ...editArguments);
-			if (!next) return false;
-			if (!stillHere()) throw new Error(text.changed);
-			const latest = current.current;
-			const updated: ChatGoal = editing && latest ? {
-				...latest, ...next, status: 'paused', reason: 'manual', evidence: undefined,
-			} : { ...next, status: 'active', usedRounds: 0, totalRounds: 0 };
-			if (!save(updated)) return false;
-			if (running.current) stopRunning();
-			setOpened(true);
-			return true;
-		} finally {
-			changing.current = false;
 		}
+		return create(objective, undefined, ui);
 	}
 
-	return { value: goal, opened, setOpened, working, error, command, setError };
-}
-
-export function ChatGoalStatus({ goal }: { goal: ReturnType<typeof useChatGoal> }) {
-	const text = goalText();
-	const value = goal.value;
-	function control(action: string) {
-		void goal.command(action).catch((cause: unknown) => goal.setError(cause instanceof Error ? cause.message : text.saveFailed));
-	}
-	return <>
-		{goal.error && <div role="alert" className="scribe-chat-error">{goal.error}</div>}
-		{value && <details className="scribe-chat-goal" open={goal.opened} onToggle={(event) => goal.setOpened(event.currentTarget.open)}>
-			<summary>{text.title} · {text[value.status]} · {value.usedRounds}/{value.maxRounds}</summary>
-			<p>{value.objective}</p>
-			<p>{text.current} {value.usedRounds}/{value.maxRounds} · {text.total} {value.totalRounds}</p>
-			{value.status === 'paused' && value.reason && <p>{text.reasons[value.reason]}</p>}
-			{value.status === 'active' && !goal.working && !goal.error && <p>{text.waiting}</p>}
-			{value.evidence && <p><strong>{text.proof}</strong> · {value.evidence}</p>}
-			<div className="scribe-modal-actions">
-				{value.status === 'active' && <button type="button" onClick={() => control('pause')}>{text.pause}</button>}
-				{value.status === 'paused' && <button type="button" onClick={() => control('resume')}>{text.resume}</button>}
-				<button type="button" onClick={() => control('edit')}>{text.edit}</button>
-				<button type="button" onClick={() => control('clear')}>{text.clear}</button>
-			</div>
-		</details>}
-	</>;
+	return {
+		value: goal, ready, opened, setOpened, working, error, command, setError, pause, create, setWorkActive,
+		elapsedMs: workClock.workedMs, workStartedAt: workClock.startedAt,
+	};
 }
