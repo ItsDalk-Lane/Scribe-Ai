@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { listSkillFiles, skillDirectory } from '../../skills/discovery';
 import type { DiscoveredSkill } from '../../skills/discovery';
+import { parseSkillReadReceipt, skillReadDigest as fingerprint } from '../../skills/readReceipt';
 import type { Message, SkillMention, SkillSettings, TaskRequest } from '../../types';
 import type { SkillRegistry } from './skills';
 import { compilePathGlob } from '../../tools/support/pathGlob';
@@ -54,19 +55,8 @@ function listItems(items: DiscoveredSkill[], offset: number, reference: (skill: 
 		items: items.slice(offset, offset + 50).map((skill) => ({ name: skill.name, description: skill.description, id: reference(skill) })) });
 }
 
-interface Receipt { id: string; file: string; offset: number; digest: string }
-function parseReceipt(message: Message): Receipt | undefined {
-	if (message.role !== 'tool' || message.toolName !== 'read_skill' || message.isError) return;
-	try {
-		const data = JSON.parse(message.content.split('\n').at(-1) ?? '') as Partial<Receipt>;
-		if (typeof data.id === 'string' && typeof data.file === 'string' && Number.isSafeInteger(data.offset)
-			&& data.offset! >= 0 && typeof data.digest === 'string') return data as Receipt;
-	} catch { /* 中断或旧版本的结果不带读取凭据。 */ }
-	return;
-}
-const fingerprint = (value: string) => createHash('sha256').update(value).digest('hex');
-
-export function createSkillRun(registry: SkillRegistry, request: TaskRequest, window: number | undefined, signal: AbortSignal, taskId: string = randomUUID()) {
+export function createSkillRun(registry: SkillRegistry, request: TaskRequest, window: number | undefined, signal: AbortSignal,
+	taskId: string = randomUUID(), work?: (active: boolean) => void) {
 	const delivered = new Set<string>();
 	const committed = new Map<string, SkillMention[]>();
 	let bindings = new Map<string, SkillMention[]>();
@@ -224,7 +214,7 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 					outgoing.push({ ...m, content });
 					continue;
 				}
-				const receipt = parseReceipt(m);
+				const receipt = m.role === 'tool' && m.toolName === 'read_skill' && !m.isError ? parseSkillReadReceipt(m.content) : undefined;
 				if (!receipt) {
 					outgoing.push(m.role === 'tool' && m.toolName === 'read_skill' && !m.isError
 						? { ...m, content: '请按当前权限重新读取这个技能文件。' } : m);
@@ -306,18 +296,20 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 		async files(id: string) { return files(await accessible(id)); },
 		async read(id: string, file: string, offset: number, digest?: string) {
 			const skill = await accessible(id);
-			const value = await registry.read(skill, file);
-			const hash = fingerprint(value);
-			if (offset > value.length || (offset > 0 && digest !== hash)) throw new Error('技能文件已变化或页码无效，请从头读取。');
-			return `读取技能 ${skill.name}（${skill.sourceLabel}） · ${file}\n${JSON.stringify({ id: skill.id, file, offset, digest: hash })}`;
+			const { source, text } = await registry.readForCall(skill, file);
+			const hash = fingerprint(text);
+			if (offset > text.length || (offset > 0 && digest !== hash)) throw new Error('技能文件已变化或页码无效，请从头读取。');
+			return `读取技能 ${skill.name}（${skill.sourceLabel}） · ${file}\n${JSON.stringify({
+				id: skill.id, file, offset, digest: hash, name: skill.name, fileDigest: source === text ? hash : fingerprint(source),
+			})}`;
 		},
 		async propose(content: string) {
 			if (!creatorId || !explicit.has(creatorId) || !registry.isCreator(await accessible(creatorId))) throw new Error('请先选择内置创建技能。');
-			return registry.propose(content, signal);
+			return registry.propose(content, signal, work);
 		},
 		async install(source: string) {
 			if (!explicit.has(installer)) throw new Error('请先选择聊天安装入口。');
-			return registry.install(source, signal);
+			return registry.install(source, signal, work);
 		},
 	};
 }

@@ -1,10 +1,19 @@
-import type { SkillMention, SkillRegistry } from '../../types';
+import type { SkillMention, SkillRegistry, TaskTarget } from '../../types';
 import { bindSkillMentions, isSkillMentionAt, skillNameTokens } from '../../skills/mentions';
 
 export interface SkillDraft {
 	instruction: string;
 	skillMentions?: SkillMention[];
 	skillScope?: string[];
+}
+
+export function composerTargetPrefix(target?: TaskTarget): string {
+	return target ? target.label + '  ' : '';
+}
+
+export function composerBodyEdit(value: string, caret: number, prefix: string) {
+	const retained = value.startsWith(prefix) ? prefix.length : 0;
+	return { instruction: value.slice(retained), caret: Math.max(0, caret - retained), removedTarget: retained !== prefix.length };
 }
 
 export async function prepareSkillMentions(draft: SkillDraft, registry: SkillRegistry, scope: string[]): Promise<SkillMention[]> {
@@ -44,6 +53,17 @@ export function editSkillText(draft: SkillDraft, instruction: string, cursor: nu
 	let start = 0;
 	while (start < oldEnd && start < nextEnd && previous[start] === instruction[start]) start++;
 	return { instruction, skillMentions: afterEdit(mentions, instruction, start, oldEnd, difference) };
+}
+
+export function deleteSkillAtCaret({ instruction, skillMentions }: SkillDraft, caret: number) {
+	const mention = skillMentions?.find((item) => item.start < caret
+		&& (caret <= item.end || (caret === item.end + 1 && instruction[item.end] === ' '))
+		&& isSkillMentionAt(instruction, item));
+	if (!mention) return;
+	return {
+		instruction: instruction.slice(0, mention.start) + instruction.slice(Math.max(mention.end, caret)),
+		cursor: mention.start,
+	};
 }
 
 export function insertSkill(draft: SkillDraft, start: number, end: number, skill: { id: string; name: string; sourceLabel?: string }) {

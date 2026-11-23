@@ -1,26 +1,34 @@
 import { getLanguage } from 'obsidian';
 import { useEffect, useId, useImperativeHandle, useRef, useState } from 'react';
 import type { RefObject, TextareaHTMLAttributes } from 'react';
-import type { NoteRef, SkillInfo, SkillRegistry } from '../../types';
+import type { NoteRef, SkillInfo, SkillRegistry, TaskTarget } from '../../types';
 import type { SkillScanIssue } from '../../skills/discovery';
 import type { SlashUi } from '../slashUi';
+import { slashCommandQuery } from '../slashCommands';
 import { INSTALLER_ID } from '../../orchestration/context/skills';
 import { isImeComposing } from '../composerKeyboard';
-import { editSkillText, insertSkill, skillMentionParts, skillQuery } from './skillMentionText';
+import { composerBodyEdit, composerTargetPrefix, deleteSkillAtCaret, editSkillText, insertSkill, skillMentionParts, skillQuery } from './skillMentionText';
 import type { SkillDraft } from './skillMentionText';
 import ChatIcon from './ChatIcon';
 import { useSlashSuggestions } from './SlashSuggestions';
-import type { SlashSuggestionOptions } from './SlashSuggestions';
+import type { SlashLauncher, SlashSuggestionOptions } from './SlashSuggestions';
+import { useReferenceSuggestions } from './ContextPicker';
+import type { ReferenceLauncher, ReferenceSuggestionOptions } from './ContextPicker';
 
 interface Props extends Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'onChange' | 'value'> {
 	inputRef: RefObject<HTMLTextAreaElement | null>;
 	menuRef?: RefObject<(() => void) | null>;
 	closeMenuRef?: RefObject<(() => void) | null>;
 	draft: SkillDraft;
+	target?: TaskTarget;
+	onRemoveTarget?: () => void;
 	registry: SkillRegistry;
 	refs: NoteRef[];
 	scope?: string[];
 	slash?: SlashSuggestionOptions;
+	slashLauncher?: SlashLauncher;
+	references?: ReferenceSuggestionOptions;
+	referenceLauncher?: ReferenceLauncher;
 	panelUiRef?: { current: SlashUi | null };
 	onDraftChange: (draft: SkillDraft) => void;
 }
@@ -52,14 +60,15 @@ export function SkillMenuRow({ item, text, id, selected, toggle, choosing, onCho
 	</div>;
 }
 
-export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registry, refs, scope, slash, panelUiRef, draft, onDraftChange, readOnly, onKeyDown, ...input }: Props) {
+export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registry, refs, scope, slash, slashLauncher,
+	references, referenceLauncher, panelUiRef, draft, target, onRemoveTarget, onDraftChange, readOnly, onKeyDown, ...input }: Props) {
 	const text = skillMenuText();
 	const id = useId();
 	const [caret, setCaret] = useState<number | null>(null);
 	const [manage, setManage] = useState(false);
 	const [search, setSearch] = useState('');
 	const [active, setActive] = useState(-1);
-	const [items, setItems] = useState<SkillInfo[]>();
+	const [catalog, setCatalog] = useState<{ scopeKey: string; items: SkillInfo[] }>();
 	const [issues, setIssues] = useState<SkillScanIssue[]>([]);
 	const [error, setError] = useState('');
 	const [changing, setChanging] = useState(false);
@@ -68,36 +77,68 @@ export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registr
 	const options = useRef<HTMLDivElement>(null);
 	const layer = useRef<HTMLDivElement>(null);
 	const chipped = Boolean(input.className?.includes('scribe-input'));
+	const prefix = composerTargetPrefix(target);
+	const bodyOffset = (position: number) => Math.max(0, position - prefix.length);
+
+	function restoreCaret(value: string, position: number) {
+		inputRef.current?.ownerDocument.defaultView?.requestAnimationFrame(() => {
+			const field = inputRef.current;
+			if (field?.value === value) field.setSelectionRange(position, position);
+		});
+	}
+
+	function trackCaret(field: HTMLTextAreaElement) {
+		const { selectionStart, selectionEnd, selectionDirection } = field;
+		if (selectionStart === selectionEnd) {
+			if (selectionStart < prefix.length) field.setSelectionRange(prefix.length, prefix.length);
+			setCaret(bodyOffset(selectionStart));
+			return;
+		}
+		// 跨过标签的选区必须包含整个标签，确保粘贴或删除时同步取消目标。
+		if (selectionStart < prefix.length && (selectionStart !== 0 || selectionEnd < prefix.length)) {
+			field.setSelectionRange(0, Math.max(selectionEnd, prefix.length), selectionDirection);
+		}
+		setCaret(null);
+	}
+
+	function completeText(instruction: string, cursor: number) {
+		onDraftChange(editSkillText(draft, instruction, cursor));
+		setCaret(cursor);
+		restoreCaret(prefix + instruction, prefix.length + cursor);
+	}
+	const context = useReferenceSuggestions({
+		inputRef, instruction: draft.instruction, caret, launcher: referenceLauncher,
+		options: manage || readOnly || slashLauncher?.open ? undefined : references, onComplete: completeText,
+	});
+	const mentionQuery = caret === null || manage || readOnly || context.visible ? undefined : skillQuery(draft.instruction, caret);
+	const slashQuery = caret === null || manage || readOnly || context.visible || !slash || slashLauncher?.open
+		? undefined : slashCommandQuery(draft.instruction, caret);
+	const scopeKey = !readOnly && (manage || mentionQuery || slashQuery?.prefix)
+		? JSON.stringify(scope ?? registry.scope(refs)) : '';
+	const items = catalog?.scopeKey === scopeKey ? catalog.items : undefined;
 	const commands = useSlashSuggestions({
-		instruction: draft.instruction, caret, options: manage || readOnly ? undefined : slash,
-		onComplete: (instruction, cursor) => {
-			onDraftChange(editSkillText(draft, instruction, cursor));
-			setCaret(cursor);
-			inputRef.current?.ownerDocument.defaultView?.requestAnimationFrame(() => {
-				const field = inputRef.current;
-				if (field?.value === instruction) field.setSelectionRange(cursor, cursor);
-			});
-		},
+		instruction: draft.instruction, caret, options: manage || readOnly || context.visible ? undefined : slash, launcher: slashLauncher,
+		skills: items ?? [], onChooseSkill: (item, tokenEnd) => applySkill(item, 0, tokenEnd),
+		onComplete: completeText,
 	});
 	if (panelUiRef) panelUiRef.current = commands.ui;
-	const query = caret === null || manage || readOnly || commands.id ? undefined : skillQuery(draft.instruction, caret);
+	const query = commands.id ? undefined : mentionQuery;
 	const visible = !readOnly && Boolean(manage || query);
-	const scopeKey = visible ? JSON.stringify(scope ?? registry.scope(refs)) : '';
 	const term = (manage ? search : query?.query ?? '').toLowerCase();
 	const matches = items?.filter((item) => (manage || (item.enabled && item.manual))
 		&& [item.name, item.displayName, item.description, item.sourceLabel].some((part) => part?.toLowerCase().includes(term))) ?? [];
 	const chosen = matches[active];
 
 	useEffect(() => {
-		if (!visible) return;
+		if (!scopeKey) return;
 		let version = 0;
 		const load = () => {
 			const current = ++version;
 			setError('');
-			setItems(undefined);
+			setCatalog(undefined);
 			setIssues([]);
 			void registry.inspect([], '', JSON.parse(scopeKey) as string[]).then((report) => {
-				if (version === current) { setItems(report.items); setIssues(report.issues); }
+				if (version === current) { setCatalog({ scopeKey, items: report.items }); setIssues(report.issues); }
 			}, (cause: unknown) => {
 				if (version === current) setError(cause instanceof Error ? cause.message : text.fail);
 			});
@@ -105,7 +146,7 @@ export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registr
 		const unsubscribe = registry.subscribe(load);
 		load();
 		return () => { version++; unsubscribe(); };
-	}, [visible, scopeKey, refresh, registry, text.fail]);
+	}, [scopeKey, refresh, registry, text.fail]);
 
 	useEffect(() => {
 		if (manage) filter.current?.focus();
@@ -115,6 +156,8 @@ export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registr
 	}, [active, manage]);
 
 	function close(focus: boolean) {
+		if (context.visible) context.dismiss();
+		slashLauncher?.close();
 		setManage(false);
 		setCaret(null);
 		setActive(-1);
@@ -131,15 +174,18 @@ export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registr
 	useImperativeHandle(closeMenuRef, () => () => close(false));
 
 	function choose(item: SkillInfo) {
-		if (!item.enabled || !item.manual) return;
-		const start = query?.start ?? inputRef.current?.selectionStart ?? draft.instruction.length;
-		const end = query?.end ?? inputRef.current?.selectionEnd ?? start;
+		const field = inputRef.current;
+		const start = query?.start ?? (field ? bodyOffset(field.selectionStart) : draft.instruction.length);
+		const end = query?.end ?? (field ? bodyOffset(field.selectionEnd) : start);
+		applySkill(item, start, end);
+	}
+
+	function applySkill(item: SkillInfo, start: number, end: number) {
+		if (!scopeKey || !item.enabled || !item.manual) return;
 		const next = insertSkill(draft, start, end, item);
 		onDraftChange({ ...next, skillScope: JSON.parse(scopeKey) as string[] });
 		close(true);
-		inputRef.current?.ownerDocument.defaultView?.requestAnimationFrame(() => {
-			inputRef.current?.setSelectionRange(next.cursor, next.cursor);
-		});
+		restoreCaret(prefix + next.instruction, prefix.length + next.cursor);
 	}
 
 	async function toggle(item: SkillInfo) {
@@ -151,9 +197,10 @@ export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registr
 		finally { setChanging(false); }
 	}
 
-	return <div className="scribe-composer-skill-field" onBlur={(event) => {
-		if (!event.currentTarget.contains(event.relatedTarget)) close(false);
+	return <div className="scribe-composer-skill-field" data-target={target?.kind} onBlur={(event) => {
+		if (!event.currentTarget.contains(event.relatedTarget) && !context.keepOnBlur()) close(false);
 	}} onKeyDown={(event) => {
+		if (context.onKeyDown(event)) return;
 		if (event.defaultPrevented || (!visible && !commands.id) || isImeComposing(event.nativeEvent) || event.key !== 'Escape') return;
 		event.preventDefault();
 		event.stopPropagation();
@@ -163,30 +210,50 @@ export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registr
 		} else close(true);
 	}}>
 		{chipped && <div ref={layer} className="scribe-skill-mention-layer" aria-hidden="true">
+			{target && <><span className="scribe-skill-mention-chip scribe-target-mention-chip">
+				<ChatIcon name={target.kind === 'mcp' ? 'plug' : 'bot'} />{target.label}
+			</span>{prefix.slice(target.label.length)}</>}
 			{skillMentionParts(draft.instruction, draft.skillMentions).map((part, index) => typeof part === 'string' ? part
 				: <span key={index} className="scribe-skill-mention-chip">{part.text}</span>)}{'\u200b'}
 		</div>}
-		<textarea {...input} ref={inputRef} value={draft.instruction} readOnly={readOnly} spellCheck={false}
-			aria-autocomplete="list" aria-controls={commands.id ?? (visible ? id : undefined)}
-			aria-activedescendant={commands.activeId ?? (visible && chosen ? `${id}-${active}` : undefined)}
+		<textarea {...input} ref={inputRef} value={prefix + draft.instruction} readOnly={readOnly} spellCheck={false}
+			aria-autocomplete="list" aria-controls={context.optionsId ?? commands.id ?? (visible ? id : undefined)}
+			aria-activedescendant={context.activeId ?? commands.activeId ?? (visible && chosen ? `${id}-${active}` : undefined)}
 			onScroll={(event) => { if (layer.current) layer.current.scrollTop = event.currentTarget.scrollTop; }}
 			onFocus={(event) => {
-				const field = event.currentTarget;
-				setCaret(field.selectionStart === field.selectionEnd ? field.selectionStart : null);
+				trackCaret(event.currentTarget);
 				input.onFocus?.(event);
 			}}
 			onChange={(event) => {
 				const field = event.currentTarget;
-				onDraftChange(editSkillText(draft, field.value, field.selectionStart));
-				setCaret(field.selectionStart === field.selectionEnd ? field.selectionStart : null);
+				slashLauncher?.close();
+				const edit = composerBodyEdit(field.value, field.selectionStart, prefix);
+				if (edit.removedTarget) onRemoveTarget?.();
+				onDraftChange(editSkillText(draft, edit.instruction, edit.caret));
+				setCaret(field.selectionStart === field.selectionEnd ? edit.caret : null);
 				setActive(-1);
 			}}
-			onSelect={(event) => {
-				const field = event.currentTarget;
-				setCaret(field.selectionStart === field.selectionEnd ? field.selectionStart : null);
-			}}
+			onSelect={(event) => trackCaret(event.currentTarget)}
 			onKeyDown={(event) => {
-				if (isImeComposing(event.nativeEvent) || commands.onKeyDown(event)) return;
+				if (isImeComposing(event.nativeEvent)) return;
+				const { selectionStart, selectionEnd } = event.currentTarget;
+				if (!readOnly && prefix && event.key === 'Backspace' && selectionStart === selectionEnd && selectionStart <= prefix.length) {
+					event.preventDefault();
+					onRemoveTarget?.();
+					setCaret(0);
+					restoreCaret(draft.instruction, 0);
+					return;
+				}
+				if (chipped && !readOnly && event.key === 'Backspace' && selectionStart === selectionEnd
+					&& !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+					const deletion = deleteSkillAtCaret(draft, bodyOffset(selectionStart));
+					if (deletion) {
+						event.preventDefault();
+						completeText(deletion.instruction, deletion.cursor);
+						return;
+					}
+				}
+				if (context.onKeyDown(event) || commands.onKeyDown(event)) return;
 				if (visible && !manage && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
 					if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(true); return; }
 					if (matches.length && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
@@ -203,6 +270,7 @@ export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registr
 				}
 				onKeyDown?.(event);
 			}} />
+		{context.menu}
 		{commands.menu}
 		{visible && <div ref={options} className="scribe-skill-suggestions scribe-context-popover" aria-label={text.title}>
 			{manage && <div className="scribe-skill-menu-header">

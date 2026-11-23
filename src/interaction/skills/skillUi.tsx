@@ -5,6 +5,7 @@ import { createRoot } from 'react-dom/client';
 import type ScribeAiPlugin from '../../main';
 import type { ImportPreview, LibrarySkill } from '../../skills/library/contracts';
 import ChatIcon from '../components/ChatIcon';
+import { updateOverflowTitle } from '../overflowTitle';
 import { confirmSkill, errorText, IconButton, openSkillDialog, SaveReview, tr } from './dialog';
 import { LocalImport, openPackageReview, RestoreBuiltins, SystemImport } from './importDialogs';
 import { SkillDetails, SkillIcon, SkillSwitch, sourceLabel } from './skillDetails';
@@ -191,8 +192,14 @@ function SkillPage({ plugin, leave, warning }: { plugin: ScribeAiPlugin; leave: 
 			}</p>}
 			<section className="scribe-skill-list" aria-label={tr('您的技能', 'Your skills')}>{filtered.map((skill) => <div key={skill.path} className="scribe-skill-card">
 				<button type="button" className="scribe-skill-summary" onClick={() => setSelected(skill.name)}>
-					<span className="scribe-skill-inline"><SkillIcon skill={skill} library={library} /><strong title={skill.displayName || skill.name}>{skill.displayName || skill.name}</strong><span className="scribe-skill-badge">{sourceLabel(skill.source.kind)}</span></span>
-					<span className="scribe-skill-description" title={skill.error || skill.shortDescription || skill.description}>{skill.error ? tr('无法加载此技能', 'Could not load this skill') : skill.shortDescription || skill.description}</span>
+					<span className="scribe-skill-inline"><SkillIcon skill={skill} library={library} />
+						<strong onPointerEnter={({ currentTarget }) => updateOverflowTitle(currentTarget)}>{skill.displayName || skill.name}</strong>
+						<span className="scribe-skill-badge">{sourceLabel(skill.source.kind)}</span>
+					</span>
+					<span className="scribe-skill-description" title={skill.error || undefined}
+						onPointerEnter={skill.error ? undefined : ({ currentTarget }) => updateOverflowTitle(currentTarget)}>
+						{skill.error ? tr('无法加载此技能', 'Could not load this skill') : skill.shortDescription || skill.description}
+					</span>
 					{skill.usage.count > 0 && <small>{usageNote(skill)}</small>}</button>
 				<div className="scribe-skill-inline"><IconButton label={tr('立即使用 ', 'Use now: ') + skill.name} name="play" disabled={busy || Boolean(skill.error) || !skill.userInvocable} onClick={() => void perform(() => launch(skill, 'use'))} />
 					<SkillSwitch skill={skill} busy={busy} onToggle={(enabled) => void toggle(skill, enabled)} /><IconButton label={tr('卸载 ', 'Uninstall ') + skill.name} name="trash-2" disabled={busy} onClick={() => void perform(() => uninstall(skill))} /></div>

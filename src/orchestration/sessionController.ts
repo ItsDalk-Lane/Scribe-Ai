@@ -22,7 +22,7 @@ import { subagentToolNames } from '../tools/subagentTools';
 import type { ShellJobs } from '../tools/external/shellJobs';
 import { MissingConversationError } from '../types';
 import type {
-	AuxiliaryUsage, ConversationSnapshot, ConversationStore, ExecutionMode, ModelService, ModelUsageReceipt, QueuedMessage, RunContext, RunObserver, RunState, RuntimeLayer, SavedRun, ScribeSettings, SessionController, Task, TaskRequest,
+	AuxiliaryUsage, ConversationSnapshot, ConversationStore, ExecutionMode, ModelService, ModelUsageReceipt, QueuedMessage, RunContext, RunObserver, RunState, RuntimeLayer, SavedRun, ScribeSettings, SessionController, SkillMention, Task, TaskRequest,
 } from '../types';
 
 type RunModels = Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin'>;
@@ -42,6 +42,7 @@ function rejectSteering(steering: Steering, ids: Iterable<string>, reason = '当
 
 function mainTask(request: TaskRequest): Task {
 	if (!request.instruction.trim()) throw new Error('请输入任务。');
+	if (request.intent && request.target) throw new Error('请在普通聊天中指定工具或子 Agent。');
 	const task = createTask({ ...request, approvalSource: undefined, subagentCallerTaskId: undefined, inheritedSkillIds: undefined, inheritedSkills: undefined });
 	for (const ref of task.request.refs) {
 		if (isAbsolute(ref.path)) ref.addedExternal = true;
@@ -117,6 +118,8 @@ async function runTask(
 	const toolsEnabled = () => settings.modelOverrides[providerId]?.[model]?.capabilities?.tools !== false;
 	const toolsEnabledAtStart = toolsEnabled();
 	const { intent } = task.request;
+	const target = task.request.target;
+	const directAgent = !restored && !child && !sideRuns && !intent && target?.kind === 'agent' ? target : undefined;
 	if (skills && intent !== 'review') {
 		const { refs } = task.request;
 		const activeNote = child || sideRuns ? '' : undefined;
@@ -187,14 +190,15 @@ async function runTask(
 		if (!child && !sideRuns && rememberConversation) await conversations.setLastOpened(conversationId);
 		const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
 		let ctx: RunContext | undefined;
+		let directSkills: SkillMention[] = [];
 		try {
 			const { refs } = task.request;
-			if (skills && (queued || replaceFromTaskId !== undefined) && task.request.instruction.includes('$')) {
-				bindSkillMentions(task.request.instruction, task.request.skillMentions ?? [],
+			if (directAgent && !toolsEnabledAtStart) throw new Error('当前模型已停用工具，无法启动选定的子 Agent。');
+			if (skills && (directAgent || queued || replaceFromTaskId !== undefined) && task.request.instruction.includes('$')) {
+				directSkills = bindSkillMentions(task.request.instruction, task.request.skillMentions ?? [],
 					await skills.list(refs, '', task.request.skillScope));
 			}
-			const writingRules = intent === 'review' ? undefined : await buildWritingRulesPrompt(app.vault, refs,
-				!child && !sideRuns && !refs.length ? app.workspace?.getActiveFile()?.path : undefined);
+			const writingRules = intent === 'review' ? undefined : await buildWritingRulesPrompt(app.vault);
 			ctx = await createRunContext(task, {
 				cwd, model: selection, signal: runSignal, checkModel, observer: transcript.observed, writingRules,
 				reviewTool: reviewModels ? async (operation) => {
@@ -210,7 +214,8 @@ async function runTask(
 				} : {}),
 				...(intent !== 'review' && conversationHistory(saved)),
 			}, app.vault.configDir, () => toolsEnabledAtStart && toolsEnabled(), Boolean(sideRuns), executionMode);
-			if (skills && intent !== 'review') ctx.skillRun = createSkillRun(skills, task.request, models?.contextLimits?.(selection)?.contextWindow, runSignal, task.id);
+			if (skills && intent !== 'review') ctx.skillRun = createSkillRun(skills, task.request,
+				models?.contextLimits?.(selection)?.contextWindow, runSignal, task.id, observer.onWork && ((active) => observer.onWork?.(task.id, active)));
 			if (child) {
 				ctx.subagentId = child.agentId;
 				ctx.history = [...child.baseHistory ?? [], ...ctx.history ?? []];
@@ -248,7 +253,11 @@ async function runTask(
 		if (ctx && subagents && !sideRuns && !intent) {
 			if (replaceFromTaskId) await subagents.reload(conversationId);
 			else await subagents.controls.load(conversationId);
-			subagents.connect(ctx, () => current, child?.agentId, child?.readOnly);
+			if (directAgent) {
+				runSignal.throwIfAborted();
+				checkModel();
+			}
+			await subagents.connect(ctx, () => current, child?.agentId, child?.readOnly, directAgent && { role: directAgent.id, skills: directSkills });
 			if (child?.instructions) ctx.subagentPrompt = [ctx.subagentPrompt, child.instructions].filter(Boolean).join('\n');
 		}
 		const agent = runtime.createAgent(ctx, restored?.run.state);
@@ -344,7 +353,7 @@ export function createSessionController(
 			if (!selected) return null;
 			const saved = await conversations.load(selected);
 			if (id) {
-				if (!saved.runs.length && !saved.queue?.length) throw new MissingConversationError('对话不存在。');
+				if (!saved.runs.length && !saved.queue?.length && !saved.hasGoal) throw new MissingConversationError('对话不存在。');
 				await conversations.setLastOpened(id);
 			}
 			return saved;
@@ -395,9 +404,11 @@ export function createSessionController(
 			closeSideChats.add(close);
 			return {
 				id,
-				submit({ instruction, refs = [], chatQuotes, skillScope, skillMentions, model: choice }, observer = {}) {
+				submit(draft, observer = {}) {
+					const { instruction, refs = [], chatQuotes, skillScope, skillMentions, model: choice } = draft;
 					if (closed) throw new Error('侧聊已关闭。');
 					if (running) throw new Error('侧聊正在回答。');
+					if ('target' in draft && draft.target) throw new Error('请在普通聊天中指定工具或子 Agent。');
 					if (!instruction.trim()) throw new Error('请输入问题。');
 					const model = selectedModel(choice);
 				const allowedRefs = refs.filter(({ path, kind, addedExternal }) => !isAbsolute(path) || (kind === 'file' && addedExternal === true));
@@ -441,6 +452,7 @@ export function createSessionController(
 		},
 		steer(taskId, message) {
 			if (message.request.selection) return Promise.reject(new Error('选区问答已停用，请新建普通提问。'));
+			if (message.request.target) return Promise.reject(new Error('指定了工具或子 Agent 的消息需要单独发送。'));
 			const running = active.get(taskId);
 			if (!running || running.conversationId !== message.request.conversationId.toLowerCase()
 				|| !running.steering.accepting || running.controller.signal.aborted || running.steering.pending.has(message.id)) {

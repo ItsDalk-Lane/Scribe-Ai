@@ -51,7 +51,7 @@ function FileTree({ files, selected, busy, choose, prefix = '' }: { files: strin
 		const folder = files.some((path) => path.startsWith(file + '/'));
 		return <li role="none" key={file}>{folder ? <details><summary><ChatIcon name="folder" />{name}</summary>
 			<FileTree files={files} selected={selected} busy={busy} choose={choose} prefix={file + '/'} /></details>
-			: <button type="button" role="treeitem" aria-label={file} aria-selected={selected === file} disabled={busy} onClick={() => choose(file)}><ChatIcon name="file-text" />{name}</button>}</li>;
+			: <button type="button" role="treeitem" aria-label={prefix ? file : undefined} aria-selected={selected === file} disabled={busy} onClick={() => choose(file)}><ChatIcon name="file-text" />{name}</button>}</li>;
 	})}</ul>;
 }
 const fields = {

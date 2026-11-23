@@ -13,6 +13,7 @@ import { createTask } from '../taskManager';
 import { createToolRegistry } from '../../tools';
 import { skillTools } from '../../tools/skillTools';
 import { installSharedPackage } from '../../skills/installTarget';
+import { parseSkillReadReceipt, skillReadName } from '../../skills/readReceipt';
 import type { Message, TaskRequest } from '../../types';
 
 void test('技能从真实文件发现，点名首次投递，自动加载按页重验并服从当前权限', async (t) => {
@@ -28,7 +29,8 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 		await mkdir(join(skill, 'agents'), { recursive: true });
 		await writeFile(join(skill, 'SKILL.md'), `---\nname: outline\ndescription: 整理章节提纲\n---\n${label} ${body}`);
 		await writeFile(join(skill, 'example.md'), label + '资源内容' + 'a'.repeat(21000));
-		await writeFile(join(skill, 'agents/openai.yaml'), `interface:\n  display_name: "${label}提纲"\npolicy:\n  allow_implicit_invocation: ${label === '个人'}\n`);
+		await writeFile(join(skill, 'agents/openai.yaml'), `interface:\n  display_name: "${label}提纲"\npolicy:\n  allow_implicit_invocation: ${label === '个人'}\n`
+			+ 'dependencies:\n  tools:\n    - type: mcp\n      value: example\n');
 	}
 	const app = { vault: { adapter: { getBasePath: () => vault }, configDir: '.test-settings' },
 		workspace: { getActiveFile: () => ({ path: '小说/第一章.md' }) } } as unknown as App;
@@ -69,6 +71,17 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 	assert.equal((JSON.parse(localReceipt.split('\n').at(-1)!) as { id: string }).id, local.id);
 	assert.match(await runtime.files(localReference), /example\.md/u);
 	const localText = await readFile(local.id, 'utf8');
+	const skillResult = await runtime.read(localReference, 'SKILL.md', 0);
+	const skillReceipt = parseSkillReadReceipt(skillResult)!;
+	assert.equal(skillReadName(skillResult, skillReceipt), 'outline');
+	const { name: _name, fileDigest, ...oldReceipt } = skillReceipt;
+	assert.notEqual(fileDigest, skillReceipt.digest);
+	assert.equal(skillReadName(skillResult, oldReceipt), 'outline');
+	assert.equal(await registry.readRecorded(oldReceipt, request.skillScope!), localText);
+	assert.equal(await registry.readRecorded(skillReceipt, request.skillScope!), localText);
+	await assert.rejects(registry.readRecorded(skillReceipt, []), /不在当前授权范围/u);
+	await writeFile(local.id, localText + '\n修改后的内容');
+	await assert.rejects(registry.readRecorded(skillReceipt, request.skillScope!), /文件已变化/u);
 	await writeFile(local.id, localText.replace('name: outline', 'name: renamed'));
 	await assert.rejects(runtime.read(local.id, 'example.md', 0), /需要用户点名/);
 	assert.doesNotMatch(await runtime.list(0), /"renamed"/);
@@ -92,6 +105,7 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 	config.skillSettings!.sharedDirectories = [];
 	await assert.rejects(runtime.read(personalReference, 'SKILL.md', 0), /不在本轮/);
 	await registry.setEnabled(local.id, false);
+	await assert.rejects(registry.readRecorded(skillReceipt, request.skillScope!), /技能已停用/u);
 	await assert.rejects(builder.build(ctx, [initial], 100_000), /已停用/);
 	const tiny = renderSkillCatalog(list, { ...config.skillSettings!, catalogBudgetMaxTokens: 1 });
 	assert.ok(tiny.omitted.length && tiny.list === '');

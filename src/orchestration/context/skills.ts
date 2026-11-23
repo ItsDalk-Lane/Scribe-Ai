@@ -6,6 +6,8 @@ import type { ImportPreview } from '../../skills/library/contracts';
 import { createLiveSkillCache, discoverLiveSkills, skillDirectory, skillNotePaths, skillScope, skillText } from '../../skills/discovery';
 import type { DiscoveredSkill, SkillScanIssue } from '../../skills/discovery';
 import { installSharedPackage } from '../../skills/installTarget';
+import { skillReadDigest } from '../../skills/readReceipt';
+import type { SkillReadReceipt } from '../../skills/readReceipt';
 import type { NoteRef, ScribeSettings } from '../../types';
 import { normalizeSkillSettings } from '../settings/defaults';
 import { isWithinPath } from '../../tools/support/pathUtils';
@@ -15,6 +17,15 @@ const installerGuide = '帮助用户列出官方精选技能，或安装官方�
 export interface SkillReviewActions {
 	draft(content: string, save: (text: string, target?: string) => Promise<void>, signal: AbortSignal, roots: string[]): Promise<boolean>;
 	install(preview: ImportPreview, save: (target?: string) => Promise<void>, signal: AbortSignal, roots: string[]): Promise<boolean>;
+}
+
+async function waitForSkillReview(work: ((active: boolean) => void) | undefined, signal: AbortSignal, review: () => Promise<boolean>) {
+	work?.(false);
+	try {
+		return await review();
+	} finally {
+		if (!signal.aborted) work?.(true);
+	}
 }
 
 export function createSkillRegistry(app: App, settings: ScribeSettings, save: () => Promise<void>, review: SkillReviewActions) {
@@ -60,6 +71,19 @@ export function createSkillRegistry(app: App, settings: ScribeSettings, save: ()
 	async function list(refs?: NoteRef[], activeNote?: string, folders?: string[]) {
 		return (await inspect(refs, activeNote, folders)).items;
 	}
+	async function readSource(skill: DiscoveredSkill, file: string): Promise<string> {
+		if (skill.id === INSTALLER_ID) {
+			if (file !== 'SKILL.md') throw new Error('安装入口没有配套文件。');
+			return installerGuide;
+		}
+		return skill.managed ? library.readFile(skill.managed, file) : skillText(skillDirectory(skill), file);
+	}
+	async function modelText(skill: DiscoveredSkill, file: string, source: string): Promise<string> {
+		if (file !== 'SKILL.md' || skill.id === INSTALLER_ID) return source;
+		const missing = skill.dependencies?.map((service) => `外部工具服务 ${service} 尚未连接。`) ?? [];
+		if (skill.managed) for (const dep of await library.checkDependencies(skill.managed)) missing.push(`${dep.name}：${dep.detail}`);
+		return [source, missing.length ? '当前依赖状态\n' + missing.join('\n') : ''].filter(Boolean).join('\n\n');
+	}
 	async function sharedDirectory(path: string) {
 		const actual = await realpath(path);
 		const config = join(await realpath(cwd), app.vault.configDir);
@@ -104,32 +128,38 @@ export function createSkillRegistry(app: App, settings: ScribeSettings, save: ()
 			return skill.managed === 'skill-creator' && skill.sourceLabel === '内置';
 		},
 		async read(skill: DiscoveredSkill, file = 'SKILL.md'): Promise<string> {
-			if (skill.id === INSTALLER_ID) {
-				if (file !== 'SKILL.md') throw new Error('安装入口没有配套文件。');
-				return installerGuide;
-			}
-			const value = skill.managed ? await library.readFile(skill.managed, file) : await skillText(skillDirectory(skill), file);
-			if (file !== 'SKILL.md') return value;
-			const missing = skill.dependencies?.map((service) => `外部工具服务 ${service} 尚未连接。`) ?? [];
-			if (skill.managed) for (const dep of await library.checkDependencies(skill.managed)) missing.push(`${dep.name}：${dep.detail}`);
-			return [value, missing.length ? '当前依赖状态\n' + missing.join('\n') : ''].filter(Boolean).join('\n\n');
+			return modelText(skill, file, await readSource(skill, file));
 		},
-		async propose(content: string, signal: AbortSignal) {
-			const saved = await review.draft(content, async (text, target) => {
+		async readForCall(skill: DiscoveredSkill, file: string) {
+			const source = await readSource(skill, file);
+			return { source, text: await modelText(skill, file, source) };
+		},
+		async readRecorded(receipt: SkillReadReceipt, folders: string[]): Promise<string> {
+			const skill = (await list([], '', folders)).find((s) => s.enabled && s.id === receipt.id && (!receipt.name || s.name === receipt.name));
+			if (!skill) throw new Error('技能已停用或不在当前授权范围内。');
+			const source = await readSource(skill, receipt.file);
+			// 老记录的摘要包含依赖提示。新记录按原文件核对，不受之后依赖状态变化影响。
+			const checked = receipt.fileDigest === undefined ? await modelText(skill, receipt.file, source) : source;
+			if (skillReadDigest(checked) !== (receipt.fileDigest ?? receipt.digest)) throw new Error('技能文件已变化。');
+			return source;
+		},
+		async propose(content: string, signal: AbortSignal, work?: (active: boolean) => void) {
+			const saved = await waitForSkillReview(work, signal, () => review.draft(content, async (text, target) => {
 				const preview = await library.previewDraft(text);
 				try {
 					if (!target && preview.status !== 'new') throw new Error('已有同名技能，请更改草稿名称后保存。');
 					await commit(preview, signal, target);
 				} finally { library.discard(preview); }
-			}, signal, [...options().sharedDirectories]);
+			}, signal, [...options().sharedDirectories]));
 			return saved ? '技能草稿已保存。' : '用户已取消，草稿未安装。';
 		},
-		async install(source: string, signal: AbortSignal) {
+		async install(source: string, signal: AbortSignal, work?: (active: boolean) => void) {
 			const url = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(source)
 				? 'https://github.com/openai/skills/tree/main/skills/.curated/' + source : source;
 			const preview = await library.previewGithub(url, signal);
 			try {
-				const saved = await review.install(preview, (target) => commit(preview, signal, target), signal, [...options().sharedDirectories]);
+				const saved = await waitForSkillReview(work, signal,
+					() => review.install(preview, (target) => commit(preview, signal, target), signal, [...options().sharedDirectories]));
 				return saved ? `已安装 ${preview.name}。` : '用户已取消安装。';
 			} finally { library.discard(preview); }
 		},

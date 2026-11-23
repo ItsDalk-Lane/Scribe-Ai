@@ -13,6 +13,9 @@ import { createRunState } from '../../runtime/runState';
 import { createToolCoordinator } from '../../runtime/toolCoordinator';
 import { createToolRegistry } from '../../tools';
 import { createToolExecutor } from '../../tools/executor';
+import { createMcpManager } from '../../tools/external/mcp';
+import { normalizeMcpSettings } from '../../tools/external/mcpConfig';
+import { createMcpTools } from '../../tools/external/mcpTools';
 import { skillTools } from '../../tools/skillTools';
 import { subagentTools } from '../../tools/subagentTools';
 import { createContextBuilder } from '../context/contextBuilder';
@@ -55,6 +58,8 @@ interface Scenario {
 	child: string;
 	readOnly?: boolean;
 	pick?: boolean;
+	direct?: boolean;
+	mcp?: boolean;
 	afterParentReceives?: (directory: string) => Promise<void>;
 	childCalls(skillId: string): ToolCall[];
 }
@@ -68,20 +73,40 @@ async function delegate(t: TestContext, scenario: Scenario) {
 	await writeFile(join(dir,'example.md'),'样本编号 S407。');
 	const app = { vault:{configDir:'fixture-config', adapter:{getBasePath:() => root},getFileByPath:() => null},
 		workspace:{getActiveFile:() => null} } as unknown as App;
-	const settings = normalizeSettings({providerId:'test', model:'local', subagents:{mode:'auto',maxDepth:1,maxConcurrent:4,roles:[
-		{name:'proofreader', description:'核对出处', instructions:'核对任务涉及的材料。', readOnly:true},
+	const settings = normalizeSettings({providerId:'test', model:'local', providerModels:{test:['local','review-model']},
+		subagents:{mode:scenario.direct ? 'explicit' : 'auto',maxDepth:1,maxConcurrent:4,roles:[
+		{name:'proofreader', description:'核对出处', instructions:'核对任务涉及的材料。', readOnly:true,
+			...(scenario.direct && {model:{providerId:'test',model:'review-model'}})},
 	]}});
 	const dialogs: string[] = [];
 	const skills = createSkillRegistry(app, settings, async () => {}, {
 		draft: async () => { dialogs.push('draft'); return false; }, install: async () => { dialogs.push('install'); return false; },
 	});
-	const registry = createToolRegistry([subagentTools, skillTools]);
+	const mcpConfig = normalizeMcpSettings({servers: ['example', 'other'].map((id) => ({id, name:id, enabled:true, type:'stdio', command:'fixture'}))});
+	const mcp = scenario.mcp ? createMcpManager({settings:() => mcpConfig, commit:() => Promise.resolve(), cwd:root,
+		clientInfo:{name:'fixture',version:'1'}, openBrowser:() => {}, storage:{getSecret:() => null,setSecret:() => {}},
+		connect({server}) {
+			const tools = [{name:`${server.id}_tool`,description:`${server.id} helper`,inputSchema:{type:'object'}}];
+			const catalog = () => Promise.resolve({tools,resources:false});
+			const empty = () => Promise.resolve({content:'',isError:false});
+			return {start:catalog,login:catalog,listTools:() => Promise.resolve(tools), callTool:empty,listResources:empty,
+				readResource:empty,close:() => Promise.resolve(),redact:(text) => text};
+		},
+	}) : undefined;
+	mcp?.reconcile();
+	const registry = createToolRegistry([subagentTools, skillTools, () => mcp ? createMcpTools(mcp) : []]);
 	const toolCoordinator = createToolCoordinator(app, createToolExecutor(registry));
 	const parentRequests: ModelRequest[] = [], childRequests: ModelRequest[] = [];
 	let id: string;
 	const skillId = join(dir,'SKILL.md');
 	const models = createModelCoordinator({contextLimits: () => ({contextWindow: 200000, maxTokens: 8000}), stream(request) {
 		if (request.sessionId === id) {
+			if (scenario.direct) {
+				assert.equal(sessions.subagents?.snapshot(id).agents[0]?.role, 'proofreader');
+				assert.ok(!request.tools.some(({ name }) => name === 'spawn_agent'));
+				parentRequests.push(request);
+				return respond(reviewResults(request));
+			}
 			parentRequests.push(request);
 			return respond(parentRequests.length === 1 ? [{id:'spawn',name:'spawn_agent',input:{message:scenario.child,
 				agent_type:scenario.readOnly ? 'proofreader' : 'worker',fork_turns:'none'}}] : reviewResults(request),
@@ -90,23 +115,49 @@ async function delegate(t: TestContext, scenario: Scenario) {
 		childRequests.push(request);
 		return respond(childRequests.length === 1 ? scenario.childCalls(skillId) : []);
 	}}, createContextBuilder(registry));
-	const runtime = { newState:createRunState, createAgent:bindAgent(createAgentLoop(models,toolCoordinator)),models,tools:toolCoordinator };
+	const runtime = { newState:createRunState, createAgent:bindAgent(createAgentLoop(models,toolCoordinator,mcp)),models,tools:toolCoordinator };
 	const sessions = createSessionController(app,settings,runtime,createConversationStore(join(root,'history')),undefined,undefined,undefined,skills);
-	t.after(async () => { sessions.dispose(); await rm(root,{recursive:true,force:true}); });
+	t.after(async () => { sessions.dispose(); mcp?.dispose(); await rm(root,{recursive:true,force:true}); });
 	id = await sessions.createConversation();
 	const all = await skills.list();
 	const skillMentions: SkillMention[] = scenario.pick ? all.flatMap((skill) => {
 		const start = scenario.parent.indexOf('$'+skill.name);
 		return start < 0 ? [] : [{name:skill.name,id:skill.id,start,end:start + skill.name.length + 1}];
 	}) : [];
-	const result = await sessions.submit({conversationId:id,instruction:scenario.parent,refs:[],skillMentions}, {}, undefined,{executionMode:'ask'}).result;
+	const result = await sessions.submit({conversationId:id,instruction:scenario.parent,refs:[],skillMentions,
+		...(scenario.direct && {target:{kind:'agent', id:'proofreader',label:'proofreader'} as const}),
+		...(scenario.mcp && {target:{kind:'mcp', id:'example',label:'示例服务'} as const}),
+	}, {}, undefined,{executionMode:'ask'}).result;
 	assert.equal(result.status,'done', result.error);
-	const child = sessions.subagents!.snapshot(id).agents[0];
+	const agents = sessions.subagents!.snapshot(id).agents;
+	const child = agents[0];
 	assert.ok(child?.runs.length);
-	return {parentRequests, childRequests, dialogs, state:child.runs.at(-1)!.state};
+	return {parentRequests, childRequests, dialogs, state:child.runs.at(-1)!.state, agents};
 }
 
 const readExample = (id: string): ToolCall[] => [{id:'sample',name:'read_skill',input:{id,file:'example.md'}}];
+
+void test('用户直接选择的子 Agent 立即使用角色模型和点选技能，主聊天收取同一份结果', {timeout:10000}, async (t) => {
+	const result = await delegate(t, {direct:true, parent:'请用 $manual-guide 核对样本。', child:'', pick:true, childCalls:readExample});
+	assert.equal(result.agents.length, 1);
+	assert.equal(result.agents[0]?.role, 'proofreader');
+	assert.equal(result.childRequests[0]?.model, 'review-model');
+	assert.match(result.childRequests[0]?.system ?? '', /核对任务涉及的材料/);
+	assert.ok(result.childRequests[0]?.messages.some(({ content }) => content.includes('核稿时先检查来源')));
+	assert.ok(result.parentRequests.some(({ messages }) => messages.some(({ toolName }) => toolName === 'review_subagent_result')));
+	assert.equal(result.state.status, 'done', result.state.error);
+});
+
+void test('分派时 MCP 范围随任务交给可调用的子 Agent', {timeout:10000}, async (t) => {
+	const scenario: Scenario = {mcp:true, parent:'请分派核对资料。', child:'核对资料。', childCalls:() => []};
+	const writable = await delegate(t, scenario);
+	assert.deepEqual(writable.agents[0]?.runs[0]?.request.target, {kind:'mcp', id:'example',label:'示例服务'});
+	assert.ok(writable.childRequests[0]?.tools.some(({ description }) => description.includes('example helper')));
+	assert.ok(!writable.childRequests[0]?.tools.some(({ description }) => description.includes('other helper')));
+	const readOnly = await delegate(t, {...scenario, readOnly:true});
+	assert.equal(readOnly.agents[0]?.runs[0]?.request.target, undefined);
+	assert.ok(!readOnly.childRequests[0]?.tools.some(({ name }) => name.startsWith('mcp_')));
+});
 
 for (const pick of [true,false]) {
 	void test((pick ? '菜单点选' : '直接键入') + '的手动技能可随分派继承并读取附件', {timeout:10000}, async (t) => {
