@@ -2,21 +2,24 @@ import { App, PluginSettingTab, Setting } from 'obsidian';
 import type ScribeAiPlugin from '../main';
 import type { ChatLocation } from '../types';
 import { renderModelSettings } from './ModelSettings';
+import { renderMcpSettings } from './McpSettings';
 import { renderSubagentSettings } from './SubagentSettings';
-import { renderWritingRulesSettings } from './WritingRulesSettings';
+import { CustomInstructionsEditor, renderWritingRulesSettings } from './WritingRulesSettings';
 import { subagentSettingsText } from './subagentSettingsText';
 import { uiText } from './uiText';
 import { tr } from './skills/dialog';
 import { renderSkillSettings } from './skills/skillUi';
 import type { SkillPageHandle } from './skills/skillUi';
 
-type SettingsSection = 'general' | 'models' | 'skills' | 'subagents' | 'advanced';
-const SECTIONS: readonly SettingsSection[] = ['general', 'models', 'skills', 'subagents', 'advanced'];
+type SettingsSection = 'general' | 'personalization' | 'models' | 'skills' | 'subagents' | 'mcp' | 'advanced';
+const SECTIONS: readonly SettingsSection[] = ['general', 'personalization', 'models', 'skills', 'subagents', 'mcp', 'advanced'];
 
 /** 设置界面：通用、模型配置与高级网络/诊断分开，避免主配置页过载 */
 export class ScribeAiSettingTab extends PluginSettingTab {
 	private activeSection: SettingsSection = 'general';
 	private skillPage?: SkillPageHandle;
+	private instructionsEditor?: CustomInstructionsEditor;
+	private mcpDispose?: () => void;
 	private diagnosticsDispose?: () => void;
 
 	constructor(
@@ -24,15 +27,15 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		private plugin: ScribeAiPlugin,
 	) {
 		super(app, plugin);
+		plugin.register(() => this.instructionsEditor?.dispose());
 	}
 
 	display(): void {
-		this.renderInto(this.containerEl);
-	}
-
-	renderInto(containerEl: HTMLElement): void {
+		const { containerEl } = this;
 		this.skillPage?.dispose();
 		this.skillPage = undefined;
+		this.mcpDispose?.();
+		this.mcpDispose = undefined;
 		this.diagnosticsDispose?.();
 		this.diagnosticsDispose = undefined;
 		containerEl.empty();
@@ -53,12 +56,16 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 
 		const tabList = containerEl.createDiv({
 			cls: 'scribe-settings-tabs',
-			attr: { role: 'tablist', 'aria-label': `${text.generalTab} / ${text.modelsTab} / ${skillsTab} / ${subagentsTab} / ${text.advancedTab}` },
+			attr: { role: 'tablist', 'aria-label': `${text.generalTab} / ${text.personalizationTab} / ${text.modelsTab} / ${skillsTab} / ${subagentsTab} / MCP / ${text.advancedTab}` },
 		});
 		const panels: Record<SettingsSection, HTMLDivElement> = {
 			general: containerEl.createDiv({
 				cls: 'scribe-settings-panel',
 				attr: { role: 'tabpanel', id: 'scribe-ai-settings-general' },
+			}),
+			personalization: containerEl.createDiv({
+				cls: 'scribe-settings-panel',
+				attr: { role: 'tabpanel', id: 'scribe-ai-settings-personalization', 'aria-labelledby': 'scribe-ai-settings-tab-personalization' },
 			}),
 			models: containerEl.createDiv({
 				cls: 'scribe-settings-panel',
@@ -72,6 +79,10 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 				cls: 'scribe-settings-panel',
 				attr: { role: 'tabpanel', id: 'scribe-ai-settings-subagents' },
 			}),
+			mcp: containerEl.createDiv({
+				cls: 'scribe-settings-panel',
+				attr: { role: 'tabpanel', id: 'scribe-ai-settings-mcp', 'aria-labelledby': 'scribe-ai-settings-tab-mcp' },
+			}),
 			advanced: containerEl.createDiv({
 				cls: 'scribe-settings-panel',
 				attr: { role: 'tabpanel', id: 'scribe-ai-settings-advanced' },
@@ -82,6 +93,11 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 				cls: 'scribe-settings-tab',
 				text: text.generalTab,
 				attr: { role: 'tab', id: 'scribe-ai-settings-tab-general', 'aria-controls': 'scribe-ai-settings-general' },
+			}),
+			personalization: tabList.createDiv({
+				cls: 'scribe-settings-tab',
+				text: text.personalizationTab,
+				attr: { role: 'tab', id: 'scribe-ai-settings-tab-personalization', 'aria-controls': 'scribe-ai-settings-personalization' },
 			}),
 			models: tabList.createDiv({
 				cls: 'scribe-settings-tab',
@@ -97,6 +113,11 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 				cls: 'scribe-settings-tab',
 				text: subagentsTab,
 				attr: { role: 'tab', id: 'scribe-ai-settings-tab-subagents', 'aria-controls': 'scribe-ai-settings-subagents' },
+			}),
+			mcp: tabList.createDiv({
+				cls: 'scribe-settings-tab',
+				text: 'MCP',
+				attr: { role: 'tab', id: 'scribe-ai-settings-tab-mcp', 'aria-controls': 'scribe-ai-settings-mcp' },
 			}),
 			advanced: tabList.createDiv({
 				cls: 'scribe-settings-tab',
@@ -141,11 +162,15 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 							await this.plugin.saveSettings();
 						}),
 				);
-			renderWritingRulesSettings(this.app, panels.general, text);
 		};
 
 		const renderModels = () => {
 			renderModelSettings(this.app, panels.models, this.plugin, text);
+		};
+		const editInstructions = () => {
+			if (this.instructionsEditor) return;
+			this.instructionsEditor = new CustomInstructionsEditor(this.app, text, () => { this.instructionsEditor = undefined; });
+			this.instructionsEditor.open();
 		};
 
 		const renderAdvanced = () => {
@@ -201,9 +226,11 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 			this.activeSection = section;
 			if (!rendered.has(section)) {
 				if (section === 'general') renderGeneral();
+				else if (section === 'personalization') renderWritingRulesSettings(panels.personalization, text, editInstructions);
 				else if (section === 'models') renderModels();
 				else if (section === 'skills') this.skillPage = renderSkillSettings(this.plugin, panels.skills, updateSkillWarning);
 				else if (section === 'subagents') renderSubagentSettings(panels.subagents, this.plugin, text);
+				else if (section === 'mcp') this.mcpDispose = renderMcpSettings(panels.mcp, this.plugin);
 				else renderAdvanced();
 				rendered.add(section);
 			}
@@ -254,6 +281,8 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 	hide(): void {
 		this.skillPage?.dispose();
 		this.skillPage = undefined;
+		this.mcpDispose?.();
+		this.mcpDispose = undefined;
 		this.diagnosticsDispose?.();
 		this.diagnosticsDispose = undefined;
 		super.hide();

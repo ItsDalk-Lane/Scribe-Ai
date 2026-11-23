@@ -1,5 +1,6 @@
 import { join, resolve } from 'node:path';
 import type { App, FileSystemAdapter, PluginManifest } from 'obsidian';
+import { nodeRequire } from './communication/nodeRequire';
 import { createCredentialStore } from './communication/credentials';
 import { createModelService } from './communication/providers';
 import { createTransport } from './communication/transport';
@@ -14,6 +15,9 @@ import { createModelCoordinator } from './runtime/modelCoordinator';
 import { createRunState } from './runtime/runState';
 import { createToolCoordinator } from './runtime/toolCoordinator';
 import { createToolLayer } from './tools';
+import { createMcpManager } from './tools/external/mcp';
+import { normalizeMcpSettings } from './tools/external/mcpConfig';
+import type { McpSettings } from './tools/external/mcpConfig';
 import type {
 	CommunicationLayer,
 	OrchestrationLayer,
@@ -24,12 +28,26 @@ import type {
 
 /** 根级依赖组装：只负责按层创建服务并把它们连起来，业务留在各层 */
 export function createServices(app: App, settings: ScribeSettings, manifest: PluginManifest,
-	saveSettings: () => Promise<void>, skillReview: SkillReviewActions): ScribeServices {
+	saveSettings: () => Promise<void>, skillReview: SkillReviewActions, saveMcp: (settings: McpSettings) => Promise<void>): ScribeServices {
 	const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
 	const pluginDirectory = manifest.dir ?? join(app.vault.configDir, 'plugins', manifest.id);
 	const conversations = createConversationStore(resolve(cwd, pluginDirectory, 'conversations'));
 	// 第四层：工具层（模型通信之外的执行能力）
-	const tools = createToolLayer(conversations.shellJobHistory);
+	const mcp = createMcpManager({
+		settings: () => settings.mcp ?? normalizeMcpSettings(undefined), commit: saveMcp,
+		storage: app.secretStorage, cwd, clientInfo: { name: manifest.id, version: manifest.version },
+		openBrowser: (url) => {
+			try {
+				const { shell } = nodeRequire('electron') as { shell?: { openExternal(url: string): Promise<void> } };
+				if (shell) {
+					void shell.openExternal(url).catch(() => { activeWindow.open(url, '_blank', 'noopener'); });
+					return;
+				}
+			} catch { /* 使用 Obsidian 窗口的外部链接行为。 */ }
+			activeWindow.open(url, '_blank', 'noopener');
+		},
+	});
+	const tools = createToolLayer(conversations.shellJobHistory, mcp);
 
 	// 第五层：通信层（仅负责模型服务接入）
 	const credentials = createCredentialStore(app, settings.communication);
@@ -56,7 +74,7 @@ export function createServices(app: App, settings: ScribeSettings, manifest: Plu
 	const models = createModelCoordinator(communication.models, context);
 	const toolCoordinator = createToolCoordinator(app, tools.executor);
 	const runtime: RuntimeLayer = {
-		createAgent: bindAgent(createAgentLoop(models, toolCoordinator)),
+		createAgent: bindAgent(createAgentLoop(models, toolCoordinator, mcp)),
 		newState: createRunState,
 		models,
 		tools: toolCoordinator,

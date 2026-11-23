@@ -3,6 +3,8 @@ import { relative, resolve } from 'node:path';
 import { canUseToolWhileAnswering, taskMessage } from '../orchestration/context/contextBuilder';
 import { pauseRun } from '../orchestration/runResume';
 import { SkillSteeringError } from '../skills/mentions';
+import type { McpManager } from '../tools/external/mcp';
+import { createMcpRun } from '../tools/external/mcpTools';
 import { isWithinPath, toolAbsolutePath } from '../tools/support/pathUtils';
 import { toolSignature } from '../tools/support/toolSignature';
 import type { AgentLoop, Message, ModelCoordinator, ModelResponse, NoteRef, RunContext, RunEvent, RunState, SubagentNote, ToolApproval, ToolCall, ToolCoordinator, ToolResult } from '../types';
@@ -109,9 +111,11 @@ async function canSteerWithRefs(ctx: RunContext, refs: NoteRef[]): Promise<boole
 	return readable.every(Boolean);
 }
 
-export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator): AgentLoop {
+export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator, mcp?: McpManager): AgentLoop {
 	return {
-		async run(ctx, initialState) {
+		async run(context, initialState) {
+			const { target } = context.task.request;
+			const ctx = mcp ? { ...context, mcpRun: createMcpRun(mcp, target?.kind === 'mcp' ? target.id : undefined) } : context;
 			let state = initialState;
 			const { signal, observer, task, collaboration } = ctx;
 			const resuming = initialState.status === 'interrupted';
@@ -151,6 +155,8 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 				signal.throwIfAborted();
 				const decide = ctx.permissions.executionMode === 'auto-review' ? ctx.reviewTool : observer.approve;
 				if (!decide) return false;
+				const userDecides = decide === observer.approve;
+				if (userDecides) observer.onWork?.(task.id, false);
 				await update({ status: 'awaiting-approval' });
 				let stop: () => void = () => {};
 				const cancelled = new Promise<false>((resolve) => {
@@ -161,7 +167,10 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					return !signal.aborted && await Promise.race([decide(approval, signal), cancelled]);
 				} finally {
 					signal.removeEventListener('abort', stop);
-					if (!signal.aborted) await update({ status: 'running' });
+					if (!signal.aborted) {
+						await update({ status: 'running' });
+						if (userDecides) observer.onWork?.(task.id, true);
+					}
 				}
 			};
 
@@ -197,7 +206,7 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					canRequestPath: canRequestPath && ((path: string, operation: 'read' | 'write') =>
 						(operation === 'read' || mayWrite(path)) && canRequestPath(path, operation)),
 					canCallTool: (tool: Parameters<typeof ctx.permissions.canCallTool>[0]) =>
-						ctx.permissions.canCallTool(tool) && resumeTools.has(tool.name),
+						ctx.permissions.canCallTool(tool) && (resumeTools.has(tool.name) || Boolean(tool.mcp)),
 				} } : ctx;
 				const skipContinuation = async (call: ToolCall) => {
 					if (!fileChangeTools.has(call.name)) return;
@@ -329,7 +338,10 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 						signal.throwIfAborted();
 					}
 					const truncated = response.stopReason === 'limit';
-					const calls = truncated ? [] : response.toolCalls;
+					const calls = truncated ? [] : response.toolCalls.map((call) => {
+						const label = ctx.mcpRun?.label(call.name);
+						return label ? { ...call, label } : call;
+					});
 					const finished = response.stopReason === 'end' && calls.length === 0;
 					const held = finished && collaboration?.pending().blocking === true;
 					awaitingCollaboration = held;
