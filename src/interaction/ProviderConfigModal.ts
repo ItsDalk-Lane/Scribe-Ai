@@ -10,13 +10,14 @@ import {
 import { createCredentialStore, credentialIdForProvider } from '../communication/credentials';
 import { createModelService } from '../communication/providers';
 import type ScribeAiPlugin from '../main';
-import type { ModelOverride, ModelProviderInfo } from '../types';
+import type { ModelCatalogResult, ModelOverride, ModelProviderInfo } from '../types';
 import { confirmAction } from './ConfirmModal';
 import { applyModelDraft } from './modelDraft';
 import { createOAuthInteraction } from './oauthInteraction';
 import { ScribeModelConfigModal } from './ModelConfigModal';
+import { updateOverflowTitle } from './overflowTitle';
 import { removeProviderSettings } from './providerSettings';
-import type { UiText } from './uiText';
+import { thinkingLabel, type UiText } from './uiText';
 
 // 三个常见本地服务的 OpenAI 兼容地址
 const LOCAL_PRESETS = [
@@ -41,8 +42,9 @@ function clampName(value: string): string {
 /** 上下文长度按 K/M 显示，未知时留短横线 */
 function formatContext(tokens: number): string {
 	if (!tokens) return '—';
+	if (tokens < 1000) return String(tokens);
 	if (tokens >= 1_000_000) return `${Math.round(tokens / 100_000) / 10}M`;
-	return `${Math.round(tokens / 1000)}K`;
+	return `${Math.round(tokens / 100) / 10}K`;
 }
 
 interface ConfigureOptions {
@@ -82,9 +84,10 @@ export class ConfigureProviderModal extends Modal {
 	private variantDrafts = new Map<string, ProviderDraft>();
 	private customIds = new Set<string>();
 	private panelOpen = false;
-	private showAll = false;
-	/** 自建/本地服务商从 /models 扫回来的模型 ID */
-	private remoteModels: string[] = [];
+	private modelCatalog: ModelCatalogResult | null = null;
+	private catalogLoadFailed = false;
+	private fetchController: AbortController | null = null;
+	private fetchButton: ButtonComponent | null = null;
 	private panel: HTMLElement | null = null;
 	private triggerEl: HTMLButtonElement | null = null;
 	private pickerEl: HTMLElement | null = null;
@@ -93,6 +96,7 @@ export class ConfigureProviderModal extends Modal {
 	private onOutside: ((event: MouseEvent) => void) | null = null;
 	private panelList: HTMLDivElement | null = null;
 	private panelEmpty: HTMLDivElement | null = null;
+	private panelStatus: HTMLDivElement | null = null;
 	private panelSearch?: HTMLInputElement;
 	private loginController: AbortController | null = null;
 	private loginButton: ButtonComponent | null = null;
@@ -142,6 +146,11 @@ export class ConfigureProviderModal extends Modal {
 	}
 
 	onClose(): void {
+		this.fetchController?.abort();
+		this.fetchController = null;
+		this.modelCatalog = null;
+		this.catalogLoadFailed = false;
+		this.panelOpen = false;
 		this.loginController?.abort();
 		this.loginController = null;
 		const linked = new Set(Object.values(this.plugin.services.settings.communication.credentialIds));
@@ -186,7 +195,23 @@ export class ConfigureProviderModal extends Modal {
 	}
 
 	private contextOf(modelId: string): number {
-		return this.provider.models.find((entry) => entry.id === modelId)?.contextWindow ?? 0;
+		const { details, bundled, override } = this.modelDetails(modelId);
+		return override?.contextWindow ?? details?.contextWindow ?? bundled?.contextWindow ?? 0;
+	}
+
+	private usesCustomAddress(baseUrl = this.draftBaseUrl.trim()): boolean {
+		return this.isCustomProvider() || Boolean(baseUrl && baseUrl.replace(/\/+$/, '') !== this.provider.baseUrl.replace(/\/+$/, ''));
+	}
+
+	private modelDetails(modelId: string) {
+		const override = Object.prototype.hasOwnProperty.call(this.draftOverrides, modelId) ? this.draftOverrides[modelId] : undefined;
+		const bundled = this.usesCustomAddress() ? undefined : this.provider.models.find((entry) => entry.id === modelId);
+		const address = this.draftBaseUrl.trim() || bundled?.baseUrl || this.provider.baseUrl;
+		const protocol = this.draftProtocol || bundled?.api || this.provider.protocol;
+		// 单模型有独立连接时，这份服务商目录无法确认该连接的能力。
+		if ((override?.baseUrl && override.baseUrl.replace(/\/+$/, '') !== address.replace(/\/+$/, ''))
+			|| (override?.protocol && override.protocol !== protocol)) return { override };
+		return { override, bundled, details: this.modelCatalog?.details?.get(modelId) };
 	}
 
 	private isCustomProvider(): boolean {
@@ -216,6 +241,7 @@ export class ConfigureProviderModal extends Modal {
 	/** 切回原端点时恢复正在编辑的内容，仍只保存当前端点。 */
 	private switchTo(next: ModelProviderInfo): void {
 		this.loginController?.abort();
+		this.resetModelCatalog();
 		this.variantDrafts.set(this.provider.id, {
 			models: this.draftModels,
 			overrides: this.draftOverrides,
@@ -227,8 +253,6 @@ export class ConfigureProviderModal extends Modal {
 		});
 		this.provider = next;
 		this.loadDraft(next);
-		this.remoteModels = [];
-		this.showAll = false;
 		this.panelOpen = false;
 		this.renderForm();
 	}
@@ -238,8 +262,9 @@ export class ConfigureProviderModal extends Modal {
 		// 重绘时旧引用全部失效，避免叠加上一轮的按钮和面板
 		this.saveButtons = [];
 		this.loginButton = null;
+		this.fetchButton = null;
 		this.panel = this.triggerEl = this.pickerEl = null;
-		this.addedListEl = this.panelList = this.panelEmpty = null;
+		this.addedListEl = this.panelList = this.panelEmpty = this.panelStatus = null;
 		const headerTitle = this.renderHeader(`${this.text.configureProvider} ${this.draftName}`, this.text.configureProviderDescription);
 		const scroll = this.contentEl.createDiv({ cls: 'scribe-dialog-scroll' });
 		const fields = scroll.createDiv({ cls: 'scribe-dialog-fields' });
@@ -304,12 +329,14 @@ export class ConfigureProviderModal extends Modal {
 		unlinkButton.addEventListener('click', () => {
 			this.loginController?.abort();
 			this.draftCredentialId = '';
+			this.resetModelCatalog();
 			credential.setValue('');
 			renderSecret();
 		});
 		credential.onChange((value) => {
 			this.loginController?.abort();
 			this.draftCredentialId = value ?? '';
+			this.resetModelCatalog();
 			renderSecret();
 		});
 		renderSecret();
@@ -340,13 +367,12 @@ export class ConfigureProviderModal extends Modal {
 		applyPreset = (url) => {
 			this.draftBaseUrl = url;
 			baseUrlInput.value = url;
-			this.remoteModels = [];
-			if (this.showAll) this.renderPanelRows();
+			this.resetModelCatalog();
 		};
 		baseUrlInput.addEventListener('input', () => {
 			this.draftBaseUrl = baseUrlInput.value;
 			// 地址一改，旧的扫描结果就作废
-			this.remoteModels = [];
+			this.resetModelCatalog();
 			if (presetSelect) {
 				const matched = LOCAL_PRESETS.find((preset) => preset.url === baseUrlInput.value.trim());
 				presetSelect.setValue(matched?.url ?? '');
@@ -362,6 +388,7 @@ export class ConfigureProviderModal extends Modal {
 		protocolDropdown.setValue(this.draftProtocol);
 		protocolDropdown.onChange((value) => {
 			this.draftProtocol = value;
+			this.resetModelCatalog();
 		});
 
 		this.renderModelBar(baseUrlInput);
@@ -410,6 +437,7 @@ export class ConfigureProviderModal extends Modal {
 			});
 			if (!controller.signal.aborted && this.provider.id === providerId) {
 				this.draftCredentialId = credentialId;
+				this.resetModelCatalog();
 				this.renderForm();
 				new Notice(this.text.oauthLoginSucceeded);
 			}
@@ -436,9 +464,55 @@ export class ConfigureProviderModal extends Modal {
 		if (open) this.renderPanelRows();
 	}
 
+	private resetModelCatalog(): void {
+		this.fetchController?.abort();
+		this.fetchController = null;
+		this.modelCatalog = null;
+		this.catalogLoadFailed = false;
+		this.renderPanelRows();
+		this.renderAddedList();
+	}
+
+	private async requestModelCatalog(baseUrlInput: HTMLInputElement, manual: boolean): Promise<void> {
+		if (this.fetchController || (!manual && this.modelCatalog)) return;
+		const baseUrl = this.draftBaseUrl.trim();
+		const customAddress = this.usesCustomAddress(baseUrl);
+		if (customAddress && !baseUrl) {
+			if (manual) new Notice(this.text.baseUrlRequired);
+			return;
+		}
+		const controller = this.fetchController = new AbortController();
+		const isCurrent = () => this.fetchController === controller && !controller.signal.aborted;
+		this.catalogLoadFailed = false;
+		this.renderPanelRows();
+		try {
+			const service = this.createDraftService();
+			if (customAddress) {
+				const found = await service.listCustomModels(this.provider.id, baseUrl, controller.signal);
+				if (!isCurrent()) return;
+				this.draftBaseUrl = baseUrlInput.value = found.baseUrl;
+				this.modelCatalog = { models: found.models, details: found.details, source: 'provider' };
+			} else {
+				const found = await service.listProviderModels(this.provider.id, controller.signal);
+				if (!isCurrent()) return;
+				this.modelCatalog = found;
+				this.provider = service.providers().find((entry) => entry.id === this.provider.id) ?? this.provider;
+			}
+			this.renderAddedList();
+		} catch (error) {
+			if (!isCurrent()) return;
+			this.catalogLoadFailed = true;
+			if (manual) new Notice(`${this.text.refreshModelsFailed}: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			if (isCurrent()) {
+				this.fetchController = null;
+				this.renderPanelRows();
+			}
+		}
+	}
+
 	private renderModelBar(baseUrlInput: HTMLInputElement): void {
 		const bar = this.contentEl.createDiv({ cls: 'scribe-model-bar' });
-		// 触发按钮铺满到「获取模型」左侧，面板宽度跟随它
 		const picker = bar.createDiv({ cls: 'scribe-model-picker' });
 		this.pickerEl = picker;
 		const trigger = picker.createEl('button', { cls: 'scribe-model-trigger', attr: { type: 'button' } });
@@ -452,7 +526,7 @@ export class ConfigureProviderModal extends Modal {
 		this.panel = panel;
 		panel.toggleClass('scribe-hidden', !this.panelOpen);
 
-		panel.createDiv({ cls: 'scribe-model-panel-title', text: this.text.selectedModels });
+		panel.createDiv({ cls: 'scribe-model-panel-title', text: this.text.models });
 		const search = this.panelSearch = panel.createEl('input', {
 			cls: 'scribe-provider-search',
 			attr: { type: 'search', placeholder: this.text.searchAvailableModels, 'aria-label': this.text.searchAvailableModels },
@@ -483,61 +557,25 @@ export class ConfigureProviderModal extends Modal {
 			addCustom();
 		});
 		addButton.onClick(addCustom);
+		this.panelStatus = panel.createDiv({ cls: 'scribe-dialog-muted', attr: { role: 'status' } });
 		this.panelList = panel.createDiv({ cls: 'scribe-model-checklist', attr: { role: 'list' } });
 		this.panelEmpty = panel.createDiv({ cls: 'scribe-models-empty' });
 		search.addEventListener('input', () => this.renderPanelRows());
 
-		trigger.addEventListener('click', () => this.setPanelOpen(!this.panelOpen));
-
-		const fetchButton = new ButtonComponent(bar).setButtonText(this.text.fetchModels);
-		const setFetching = (busy: boolean) => {
-			fetchButton.setDisabled(busy).setButtonText(busy ? this.text.refreshing : this.text.fetchModels);
-		};
-		fetchButton.onClick(async () => {
-			const provider = this.provider;
-			const baseUrl = this.draftBaseUrl.trim();
-			const credentialId = this.draftCredentialId;
-			const isCurrent = () => panel.isConnected && this.panel === panel && this.provider.id === provider.id
-				&& this.draftBaseUrl.trim() === baseUrl && this.draftCredentialId === credentialId;
-			setFetching(true);
-			this.showAll = true;
+		trigger.addEventListener('click', () => {
+			this.setPanelOpen(!this.panelOpen);
+			if (this.panelOpen) void this.requestModelCatalog(baseUrlInput, false);
+		});
+		this.fetchButton = new ButtonComponent(bar).setTooltip(this.text.fetchModelsDescription).onClick(() => {
 			this.setPanelOpen(true);
-			try {
-				const service = this.createDraftService();
-				// 改过地址时只访问用户填写的端点，不能把草稿密钥交给内置目录。
-				if (this.isCustomProvider() || (baseUrl && baseUrl.replace(/\/+$/, '') !== provider.baseUrl.replace(/\/+$/, ''))) {
-					if (!baseUrl) {
-						new Notice(this.text.baseUrlRequired);
-						return;
-					}
-					const found = await service.listCustomModels(provider.id, baseUrl);
-					if (!isCurrent()) return;
-					if (found.baseUrl !== baseUrl) {
-						baseUrlInput.value = found.baseUrl;
-						baseUrlInput.dispatchEvent(new Event('input'));
-					}
-					this.remoteModels = found.models;
-				} else {
-					await service.refresh(provider.id);
-					if (!isCurrent()) return;
-					this.provider = service.providers().find((entry) => entry.id === provider.id) ?? provider;
-					for (const model of this.draftModels) {
-						if (!this.provider.models.some((entry) => entry.id === model)) this.customIds.add(model);
-					}
-				}
-			} catch (error) {
-				if (isCurrent()) new Notice(`${this.text.refreshModelsFailed}: ${error instanceof Error ? error.message : String(error)}`);
-			} finally {
-				setFetching(false);
-				if (panel.isConnected && this.panel === panel) this.renderPanelRows();
-			}
+			void this.requestModelCatalog(baseUrlInput, true);
 		});
 
 		this.renderPanelRows();
 		this.addedListEl = this.contentEl.createDiv({ cls: 'scribe-model-added-list' });
 	}
 
-	/** “添加模型”一行下方的常驻区域：显示已添加模型，向上浮面板只管搜索与挑选 */
+	/** “添加模型”一行下方的常驻区域：显示已添加模型，浮层只管搜索与挑选。 */
 	private renderAddedList(): void {
 		const list = this.addedListEl;
 		if (!list) return;
@@ -547,7 +585,8 @@ export class ConfigureProviderModal extends Modal {
 		const rows = list.createDiv({ cls: 'scribe-model-added-rows', attr: { role: 'list' } });
 		for (const model of this.draftModels) {
 			const row = rows.createDiv({ cls: 'scribe-model-panel-row', attr: { role: 'listitem' } });
-			row.createSpan({ cls: 'scribe-model-panel-name', text: model });
+			const name = row.createSpan({ cls: 'scribe-model-panel-name', text: model });
+			name.addEventListener('pointerenter', () => updateOverflowTitle(name));
 			// 上下文长度紧跟模型 ID，右侧只放操作按钮
 			row.createSpan({ cls: 'scribe-model-context', text: formatContext(this.contextOf(model)) });
 			const meta = row.createSpan({ cls: 'scribe-model-panel-meta' });
@@ -592,23 +631,59 @@ export class ConfigureProviderModal extends Modal {
 		if (!this.draftModels.length) rows.createDiv({ cls: 'scribe-models-empty', text: this.text.noModelsAdded });
 	}
 
+	private renderModelDetails(row: HTMLElement, model: string): void {
+		const { details, bundled, override } = this.modelDetails(model);
+		const context = override?.contextWindow ?? details?.contextWindow ?? bundled?.contextWindow;
+		const output = override?.maxTokens ?? details?.maxTokens ?? bundled?.maxTokens;
+		const reasoning = (details?.reasoning ?? bundled?.reasoning) === true
+			&& (bundled?.requiresReasoning || override?.capabilities?.reasoning !== false);
+		const tools = details?.tools === true && override?.capabilities?.tools !== false;
+		const knownLevels: readonly string[] = details?.thinkingLevels ?? bundled?.thinkingLevels ?? [];
+		const customLevels = override?.thinkingLevels ?? (override?.thinkingLevel ? [override.thinkingLevel] : undefined);
+		const levels = (customLevels ?? knownLevels).filter((level) => level !== 'off'
+			&& (knownLevels.includes(level) || (override?.literalThinkingLevels && level !== 'minimal')));
+		if (!context && !output && !reasoning && !tools) return;
+		const meta = row.createDiv({ cls: 'scribe-model-panel-details' });
+		if (context) meta.createSpan({
+			text: `${this.text.contextWindow} ${formatContext(context)}`, attr: { title: `${this.text.contextWindow} ${context.toLocaleString()}` },
+		});
+		if (output) meta.createSpan({
+			text: `${this.text.maxOutputTokens} ${formatContext(output)}`, attr: { title: `${this.text.maxOutputTokens} ${output.toLocaleString()}` },
+		});
+		if (tools) meta.createSpan({ text: this.text.capabilityTools });
+		if (reasoning) meta.createSpan({ text: this.text.capabilityReasoning });
+		if (reasoning && levels.length) {
+			meta.createSpan({ text: `${this.text.thinkingLevel} ${levels.map((level) => thinkingLabel(this.text, level)).join(' / ')}` });
+		}
+	}
+
 	private renderPanelRows(): void {
+		const fetching = this.fetchController !== null;
+		this.fetchButton?.setDisabled(fetching).setButtonText(fetching ? this.text.refreshing : this.text.fetchModels);
 		const list = this.panelList;
 		if (!list) return;
 		list.empty();
 		const normalized = this.panelSearch?.value.trim().toLowerCase() ?? '';
-		// 获取模型之后是全部目录模型 + 手填的 ID，默认只显示已添加的
-		const ids = this.showAll
-			? [...new Set([...this.draftModels, ...this.provider.models.map((entry) => entry.id), ...this.remoteModels, ...this.customIds])]
+		const catalog = this.modelCatalog;
+		const status = fetching ? this.text.loadingModels
+			: this.catalogLoadFailed ? this.text.refreshModelsFailed
+			: catalog?.source === 'provider' ? this.text.modelsFromProvider
+			: catalog?.source === 'pi' ? this.text.modelsFromPi
+			: catalog ? this.text.modelsFromBundled : '';
+		this.panelStatus?.setText(status);
+		this.panelStatus?.toggleClass('scribe-hidden', !status);
+		const ids = catalog
+			? [...new Set([...this.draftModels, ...catalog.models, ...this.customIds])]
 			: [...this.draftModels];
 		const visible = ids.filter((model) => !normalized || model.toLowerCase().includes(normalized));
 		if (this.panelEmpty) {
-			this.panelEmpty.setText(normalized ? this.text.noModelsMatch : this.text.noModelsAdded);
-			this.panelEmpty.toggleClass('scribe-hidden', visible.length > 0);
+			this.panelEmpty.setText(normalized ? this.text.noModelsMatch
+				: catalog || this.catalogLoadFailed ? this.text.noModelsDiscovered : this.text.noModelsAdded);
+			this.panelEmpty.toggleClass('scribe-hidden', visible.length > 0 || fetching);
 		}
 		for (const model of visible) {
 			const row = list.createDiv({ cls: 'scribe-model-panel-row', attr: { role: 'listitem' } });
-			if (this.showAll) {
+			if (catalog) {
 				// 圆角复选框：外观像单选，但允许多选
 				const pick = row.createEl('input', {
 					cls: 'scribe-model-radio',
@@ -616,11 +691,12 @@ export class ConfigureProviderModal extends Modal {
 				});
 				pick.addEventListener('change', () => this.toggleModel(model));
 			}
-			row.createSpan({ cls: 'scribe-model-panel-name', text: model });
-			const meta = row.createSpan({ cls: 'scribe-model-panel-meta' });
-			meta.createSpan({ cls: 'scribe-model-context', text: formatContext(this.contextOf(model)) });
-			if (this.isAdded(model) && !this.showAll) {
-				const remove = meta.createSpan({ cls: 'scribe-model-panel-remove' });
+			const summary = row.createDiv({ cls: 'scribe-model-panel-summary' });
+			const name = summary.createSpan({ cls: 'scribe-model-panel-name', text: model });
+			name.addEventListener('pointerenter', () => updateOverflowTitle(name));
+			this.renderModelDetails(summary, model);
+			if (this.isAdded(model) && !catalog) {
+				const remove = row.createSpan({ cls: 'scribe-model-panel-remove' });
 				setIcon(remove, 'x');
 				remove.setAttribute('aria-label', this.text.removeModel);
 				remove.addEventListener('click', () => this.toggleModel(model));

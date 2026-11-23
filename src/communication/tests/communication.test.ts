@@ -136,7 +136,7 @@ const server = http.createServer((request, response) => {
 		}
 		if (url === '/scan/models') {
 			response.writeHead(200, { 'content-type': 'application/json' });
-			response.end(JSON.stringify({ data: [{ id: 'scanned-1' }, { id: 'scanned-2' }] }));
+			response.end(JSON.stringify({ data: [{ id: 'scanned-1', context_length: 16000, supported_parameters: ['tools'] }, { id: 'scanned-2' }] }));
 			return;
 		}
 		if (url === '/protected/v1/models') {
@@ -707,16 +707,156 @@ void test('Custom model discovery authenticates and reports the working chat bas
 		customProviders: () => [{ id: 'custom-1', label: 'Local', baseUrl: discoveredBaseUrl,
 			protocol: 'openai-completions', models: ['local-model'] }],
 	});
-	assert.deepEqual(await service.listCustomModels('custom-1', `${baseUrl}/scan`), {
-		models: ['scanned-1', 'scanned-2'], baseUrl: `${baseUrl}/scan`,
-	});
+	const scanned = await service.listCustomModels('openai', `${baseUrl}/scan`);
+	assert.deepEqual(scanned.models, ['scanned-1', 'scanned-2']);
+	assert.equal(scanned.baseUrl, `${baseUrl}/scan`);
+	assert.equal(scanned.details?.get('scanned-1')?.tools, true);
+	assert.equal(scanned.details?.get('scanned-1')?.contextWindow, 16000);
+	assert.deepEqual(scanned.details?.get('scanned-2'), {});
 	const found = await service.listCustomModels('custom-1', `${baseUrl}/protected`);
-	assert.deepEqual(found, { models: ['local-model'], baseUrl: `${baseUrl}/protected/v1` });
+	assert.deepEqual(found.models, ['local-model']);
+	assert.equal(found.baseUrl, `${baseUrl}/protected/v1`);
 	discoveredBaseUrl = found.baseUrl;
 	const result = await service.send({ providerId: 'custom-1', model: 'local-model', messages: [], tools: [] });
 	assert.equal(result.content, 'Mirrored');
 	assert.equal(mirroredPath, '/protected/v1/chat/completions');
 	assert.equal(mirroredAuthorization, 'Bearer test-key');
+});
+
+void test('Official model discovery uses the selected endpoint and falls back to Pi without the provider key', async () => {
+	const urls: string[] = [];
+	const service = createModelService(credentials, {
+		...transport,
+		fetch: async (input, init) => {
+			const url = new URL(new Request(input).url);
+			urls.push(url.href);
+			const headers = new Headers(init?.headers);
+			switch (url.origin) {
+				case 'https://api.openai.com':
+					assert.equal(headers.get('authorization'), 'Bearer test-key');
+					return Response.json({ data: [{ id: 'new-model' }, { id: 'new-model' }] });
+				case 'https://api.anthropic.com':
+					assert.equal(headers.get('x-api-key'), 'test-key');
+					assert.equal(headers.get('anthropic-version'), '2023-06-01');
+					return new Response(null, { status: 401 });
+				case 'https://pi.dev':
+					assert.equal(headers.get('authorization'), null);
+					assert.equal(headers.get('x-api-key'), null);
+					return Response.json({
+						'pi-chat': { id: 'pi-chat', type: 'chat', baseUrl: 'https://unused.example/v1' },
+						'pi-image': { id: 'pi-image', type: 'image' },
+					});
+				default:
+					throw new Error(`Unexpected catalog request ${url.href}`);
+			}
+		},
+	});
+	const openai = await service.listProviderModels('openai');
+	assert.deepEqual(openai.models, ['new-model']);
+	assert.equal(openai.source, 'provider');
+	const anthropic = await service.listProviderModels('anthropic');
+	assert.deepEqual(anthropic.models, ['pi-chat']);
+	assert.equal(anthropic.source, 'pi');
+	assert.deepEqual(urls.filter((url) => !url.includes('models.dev')), [
+		'https://api.openai.com/v1/models',
+		'https://api.anthropic.com/v1/models',
+		'https://pi.dev/api/models/providers/anthropic?pi-version=1.5.2',
+	]);
+});
+
+void test('Gemini discovery reads every page and keeps generation models only', async () => {
+	const urls: string[] = [];
+	const service = createModelService(credentials, {
+		...transport,
+		fetch: async (input, init) => {
+			const url = new URL(new Request(input).url);
+			if (url.origin === 'https://models.dev') return Response.json({});
+			urls.push(url.href);
+			assert.equal(new Headers(init?.headers).get('x-goog-api-key'), 'test-key');
+			return url.searchParams.has('pageToken')
+				? Response.json({ models: [{ name: 'models/gemini-second', supportedGenerationMethods: ['generateContent'] }] })
+				: Response.json({
+					models: [
+						{ name: 'models/gemini-first', supportedGenerationMethods: ['generateContent'] },
+						{ name: 'models/embedding', supportedGenerationMethods: ['embedContent'] },
+					],
+					nextPageToken: 'second',
+				});
+		},
+	});
+	const catalog = await service.listProviderModels('google');
+	assert.deepEqual(catalog.models, ['gemini-first', 'gemini-second']);
+	assert.equal(catalog.source, 'provider');
+	assert.deepEqual(urls, [
+		'https://generativelanguage.googleapis.com/v1beta/models',
+		'https://generativelanguage.googleapis.com/v1beta/models?pageToken=second',
+	]);
+});
+
+void test('Discovery keeps the bundled list offline and stops before Pi when cancelled', async () => {
+	const urls: string[] = [];
+	const controller = new AbortController();
+	const service = createModelService(credentials, {
+		...transport,
+		fetch: async (input) => {
+			urls.push(new Request(input).url);
+			return new Response(null, { status: 404 });
+		},
+	});
+	const bundled = service.providers().find((entry) => entry.id === 'deepseek')?.models.map((model) => model.id);
+	assert.ok(bundled?.length);
+	const catalog = await service.listProviderModels('deepseek');
+	assert.deepEqual(catalog.models, bundled);
+	assert.equal(catalog.source, 'bundled');
+	assert.ok(catalog.details?.size);
+	assert.deepEqual(urls.filter((url) => !url.includes('models.dev')), [
+		'https://api.deepseek.com/models',
+		'https://pi.dev/api/models/providers/deepseek?pi-version=1.5.2',
+	]);
+	const pending = service.listProviderModels('openai', controller.signal);
+	controller.abort();
+	await assert.rejects(pending, { name: 'AbortError' });
+	assert.ok(!urls.some((url) => url.includes('/providers/openai')));
+});
+
+void test('Adding models merges exact catalog matches and keeps unpublished ids out of the picker', async () => {
+	const seen: { origin: string; authorization: string | null }[] = [];
+	const service = createModelService(credentials, {
+		...transport,
+		fetch: (input, init) => {
+			const url = new URL(new Request(input).url);
+			const authorization = new Headers(init?.headers).get('authorization');
+			seen.push({ origin: url.origin, authorization });
+			if (url.origin === 'https://openrouter.ai') return Promise.resolve(Response.json({ data: [
+				{ id: 'google/gemini-3.8-flash', context_length: 250000, architecture: { input_modalities: ['text', 'image', 'audio'] },
+					supported_parameters: ['reasoning', 'structured_outputs'] },
+				{ id: 'new-only' },
+			] }));
+			if (url.origin === 'https://models.dev') return Promise.resolve(Response.json({
+				openrouter: { models: {
+					'google/gemini-3.8-flash': { tool_call: true, limit: { context: 500000, output: 30000 }, modalities: { output: ['text'] } },
+					'public-only': { tool_call: true },
+				} },
+				google: { models: { 'new-only': { tool_call: true } } },
+			}));
+			return Promise.reject(new Error(`Unexpected catalog request ${url.href}`));
+		},
+	});
+	const catalog = await service.listProviderModels('openrouter');
+	assert.deepEqual(catalog.models, ['google/gemini-3.8-flash', 'new-only']);
+	const details = catalog.details?.get('google/gemini-3.8-flash');
+	assert.ok(details);
+	assert.equal(details.contextWindow, 250000);
+	assert.equal(details.maxTokens, 30000);
+	assert.equal(details.tools, false);
+	assert.equal(details.reasoning, true);
+	assert.equal(details.structuredOutput, true);
+	assert.deepEqual(details.inputModalities, ['text', 'image', 'audio']);
+	assert.deepEqual(details.outputModalities, ['text']);
+	assert.ok(details.thinkingLevels?.includes('high'));
+	assert.deepEqual(catalog.details?.get('new-only'), {});
+	assert.deepEqual(seen.find(({ origin }) => origin === 'https://models.dev'), { origin: 'https://models.dev', authorization: null });
+	assert.deepEqual(seen.find(({ origin }) => origin === 'https://openrouter.ai'), { origin: 'https://openrouter.ai', authorization: 'Bearer test-key' });
 });
 
 void test('Model settings control the actual tools, reasoning and output limit sent', async () => {

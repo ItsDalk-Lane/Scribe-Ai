@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { composerShortcut } from '../composerKeyboard';
+import { updateOverflowTitle } from '../overflowTitle';
 import { paintProviderIcon } from '../paintProviderIcon';
 import { thinkingLabel, uiText } from '../uiText';
 import type { ChatModelGroup } from '../useChatModel';
@@ -187,7 +188,8 @@ export default function ChatModelPicker({ groups, value, thinking, disabled, sav
 						const next = rows[(index + (event.key === 'ArrowUp' ? -1 : 1) + rows.length) % rows.length];
 						next?.focus();
 					}}>
-					{models.map((model) => <button type="button" key={model.value} title={model.id}
+					{models.map((model) => <button type="button" key={model.value}
+						onPointerEnter={({ currentTarget }) => updateOverflowTitle(currentTarget, currentTarget.querySelector('span'))}
 						aria-current={value === model.value || undefined} aria-disabled={saving || undefined} onClick={() => void choose(model.value)}>
 						<span>{model.id}</span>
 						{model.vision && <small>{text.chatVisionModel}</small>}

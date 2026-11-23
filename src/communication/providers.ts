@@ -26,6 +26,7 @@ import * as openaiCompletions from '@earendil-works/pi-ai/api/openai-completions
 import * as openaiResponses from '@earendil-works/pi-ai/api/openai-responses';
 import * as piMessages from '@earendil-works/pi-ai/api/pi-messages';
 import { EXTRA_IMAGE_LIMITS, EXTRA_PROVIDERS } from './extraProviders';
+import { fetchModelsDevDetails, fetchOfficialModelCatalog, fetchPiModelCatalog, mergeModelCatalogDetails, readProviderCatalog } from './modelCatalog';
 import { confirmModelRequest, modelRequestConfirmation } from './modelRequestConfirmation';
 import type { ModelRequestConfirmation } from './modelRequestConfirmation';
 import { modelNodeFetch, nodeFetch } from './nodeFetch';
@@ -37,6 +38,8 @@ import type {
 	CredentialStore,
 	Message,
 	CustomProviderDef,
+	ModelCatalogDetails,
+	ModelCatalogResult,
 	ModelOverride,
 	ModelProviderInfo,
 	ModelRequest,
@@ -252,6 +255,22 @@ function providerBaseUrl(provider: Provider): string {
 			.filter((url): url is string => Boolean(url)),
 	);
 	return provider.baseUrl ?? (urls.size === 1 ? [...urls][0] ?? '' : '');
+}
+
+function catalogSignal(signal?: AbortSignal): AbortSignal {
+	const timeout = AbortSignal.timeout(8_000);
+	return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+function piCatalogDetails(models: readonly Model<Api>[]): Map<string, ModelCatalogDetails> {
+	return new Map(models.map((model) => [model.id, {
+		...(model.contextWindow > 0 && { contextWindow: model.contextWindow }),
+		...(model.maxTokens > 0 && { maxTokens: model.maxTokens }),
+		inputModalities: model.input,
+		outputModalities: ['text'],
+		reasoning: model.reasoning,
+		thinkingLevels: getSupportedThinkingLevels(model).filter((level) => level !== 'off'),
+	}]));
 }
 
 const API_MODULES = {
@@ -513,6 +532,68 @@ export function createModelService(
 		}
 	};
 
+	async function discoverProviderModels(provider: Provider, signal?: AbortSignal): Promise<ModelCatalogResult> {
+		const providerId = provider.id;
+		const bundled = provider.getModels();
+		try {
+			const requestSignal = catalogSignal(signal);
+			if (provider.refreshModels) {
+				const result = await models.refresh({ allowNetwork: true, force: true, providers: [providerId], signal: requestSignal });
+				signal?.throwIfAborted();
+				const refreshed = provider.getModels();
+				if (!result.aborted && !result.errors.size && refreshed !== bundled) {
+					return { models: refreshed.map((model) => model.id), source: 'provider', details: piCatalogDetails(refreshed) };
+				}
+			} else {
+				const catalog = await fetchOfficialModelCatalog(providerId, providerBaseUrl(provider), credentials, transport.fetch, requestSignal);
+				signal?.throwIfAborted();
+				if (catalog) return catalog;
+			}
+		} catch {
+			signal?.throwIfAborted();
+		}
+
+		// 百炼 Token Plan 有同套餐的 Pi 目录。其他补充端点保留各自的套餐清单。
+		const piId = providerId === 'bailian-token-plan' ? 'qwen-token-plan-cn'
+			: EXTRA_PROVIDERS.some((entry) => entry.id === providerId) ? undefined : providerId;
+		if (piId) {
+			try {
+				const catalog = await fetchPiModelCatalog(piId, transport.fetch, catalogSignal(signal));
+				signal?.throwIfAborted();
+				return catalog;
+			} catch {
+				signal?.throwIfAborted();
+			}
+		}
+		return { models: provider.getModels().map((model) => model.id), source: 'bundled' };
+	}
+
+	async function readCustomModelCatalog(providerId: string, baseUrl: string, signal?: AbortSignal): ReturnType<ModelService['listCustomModels']> {
+		const requestSignal = catalogSignal(signal);
+		const url = new URL(baseUrl.trim());
+		let endpoint = url.href.replace(/\/+$/, '');
+		if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+			throw new Error('Invalid base URL');
+		}
+		const credential = await credentials.read(providerId, { signal: requestSignal });
+		const headers: Record<string, string> = { accept: 'application/json' };
+		if (credential?.type === 'api_key' && credential.key) headers.authorization = `Bearer ${credential.key}`;
+		let response = await transport.fetch(`${endpoint}/models`, { headers, signal: requestSignal });
+		// 备用地址确实能返回目录时，聊天也使用同一个前缀。
+		if (response.status === 404 && !/\/v\d+[a-z0-9]*$/i.test(endpoint)) {
+			await response.body?.cancel();
+			endpoint += '/v1';
+			response = await transport.fetch(`${endpoint}/models`, { headers, signal: requestSignal });
+		}
+		if (!response.ok) {
+			await response.body?.cancel();
+			throw new Error(`HTTP ${response.status}`);
+		}
+		const { models, details } = readProviderCatalog(await response.json());
+		requestSignal.throwIfAborted();
+		return { models, details, baseUrl: endpoint };
+	}
+
 	return {
 		contextLimits,
 		modelOrigin: ({ providerId, model: id }) => {
@@ -546,46 +627,29 @@ export function createModelService(
 			}));
 		},
 		login: (providerId, interaction, options) => models.login(providerId, 'oauth', interaction, options),
-		refresh: async (providerId) => {
+		listProviderModels: async (providerId, signal) => {
+			signal?.throwIfAborted();
 			syncCustomProviders();
-			const result = await models.refresh({
-				allowNetwork: true,
-				force: true,
-				...(providerId ? { providers: [providerId] } : {}),
-			});
-			if (result.errors.size) {
-				throw new AggregateError([...result.errors.values()], 'Failed to refresh model catalogs');
+			const provider = models.getProvider(providerId);
+			if (!provider) throw new Error('Unknown model provider');
+			if (registered.has(providerId)) {
+				const { models, details } = await readCustomModelCatalog(providerId, providerBaseUrl(provider), signal);
+				return { models, details, source: 'provider' };
 			}
+			const bundled = piCatalogDetails(provider.getModels());
+			const [catalog, publicDetails] = await Promise.all([
+				discoverProviderModels(provider, signal),
+				fetchModelsDevDetails(providerId, transport.fetch, catalogSignal(signal)).catch(() => undefined),
+			]);
+			signal?.throwIfAborted();
+			const details = catalog.source === 'pi'
+				? mergeModelCatalogDetails(bundled, catalog.details, publicDetails)
+				: mergeModelCatalogDetails(bundled, publicDetails, catalog.details);
+			return { ...catalog, details };
 		},
-		listCustomModels: async (providerId, baseUrl) => {
-			const url = new URL(baseUrl.trim());
-			let endpoint = url.href.replace(/\/+$/, '');
-			if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
-				throw new Error('Invalid base URL');
-			}
-			const credential = await credentials.read(providerId);
-			const headers: Record<string, string> = { accept: 'application/json' };
-			if (credential?.type === 'api_key' && credential.key) headers.authorization = `Bearer ${credential.key}`;
-			let response = await transport.fetch(`${endpoint}/models`, { headers });
-			// 备用地址确实能返回目录时，聊天也使用同一个前缀。
-			if (response.status === 404 && !/\/v\d+[a-z0-9]*$/i.test(endpoint)) {
-				await response.body?.cancel();
-				endpoint += '/v1';
-				response = await transport.fetch(`${endpoint}/models`, { headers });
-			}
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
-			// OpenAI 兼容服务返回 {data:[...]}，Ollama 原生 /api/tags 返回 {models:[...]}
-			const payload = await response.json() as {
-				data?: Array<{ id?: unknown }>;
-				models?: Array<{ id?: unknown; name?: unknown }>;
-			};
-			const entries = (Array.isArray(payload.data) ? payload.data : Array.isArray(payload.models) ? payload.models : []) as Array<{ id?: unknown; name?: unknown }>;
-			const ids = [...new Set(entries
-				.map((entry) => (typeof entry.id === 'string' ? entry.id : typeof entry.name === 'string' ? entry.name : '').trim())
-				.filter((id) => id.length > 0))];
-			return { models: ids, baseUrl: endpoint };
-		},
+		listCustomModels: readCustomModelCatalog,
 		stream,
 		send: (request, onUsage) => stream(request, onUsage).result(),
 	};
+
 }

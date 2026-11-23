@@ -14,6 +14,7 @@ import type { ModelProviderInfo } from '../types';
 import { confirmAction } from './ConfirmModal';
 import { ScribeModelConfigModal } from './ModelConfigModal';
 import { ConfigureProviderModal } from './ProviderConfigModal';
+import { updateOverflowTitle } from './overflowTitle';
 import { removeProviderSettings } from './providerSettings';
 import type { UiText } from './uiText';
 
@@ -319,7 +320,8 @@ class AddProviderModal extends Modal {
 				const tile = card.createSpan({ cls: 'scribe-provider-icon-tile' });
 				setIcon(tile, icon);
 				const label = card.createSpan({ cls: 'scribe-add-provider-label' });
-				label.createSpan({ cls: 'scribe-add-provider-name', text: name });
+				const nameEl = label.createSpan({ cls: 'scribe-add-provider-name', text: name });
+				nameEl.addEventListener('pointerenter', () => updateOverflowTitle(nameEl));
 				label.createSpan({ cls: 'scribe-add-provider-detail', text: detail });
 				const plus = card.createSpan({ cls: 'scribe-provider-plus' });
 				setIcon(plus, 'plus');
@@ -354,7 +356,8 @@ class AddProviderModal extends Modal {
 				const tile = card.createSpan({ cls: 'scribe-provider-icon-tile' });
 				paintProviderIcon(tile, group.providers[0]?.id ?? group.id, group.label);
 				const label = card.createSpan({ cls: 'scribe-add-provider-label' });
-				label.createSpan({ cls: 'scribe-add-provider-name', text: group.label });
+				const nameEl = label.createSpan({ cls: 'scribe-add-provider-name', text: group.label });
+				nameEl.addEventListener('pointerenter', () => updateOverflowTitle(nameEl));
 				label.createSpan({
 					cls: 'scribe-add-provider-detail',
 					text: group.providers.length > 1

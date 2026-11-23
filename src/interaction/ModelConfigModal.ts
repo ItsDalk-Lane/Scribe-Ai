@@ -33,8 +33,8 @@ function formatTokens(tokens: number): string {
 	return `${Math.round(tokens / 1000)}K`;
 }
 
-function formField(container: HTMLElement, label: string): HTMLDivElement {
-	const field = container.createDiv({ cls: 'scribe-form-field' });
+function formField(container: HTMLElement, label: string, stacked = false): HTMLDivElement {
+	const field = container.createDiv({ cls: stacked ? 'scribe-form-field is-stacked' : 'scribe-form-field' });
 	field.createEl('label', { text: label });
 	return field.createDiv({ cls: 'scribe-form-control' });
 }
@@ -180,7 +180,7 @@ export class ScribeModelConfigModal extends Modal {
 			this.draftMaxTokens = value;
 		});
 
-		const capsControl = formField(fields, this.text.capabilities);
+		const capsControl = formField(fields, this.text.capabilities, true);
 		const capsGroup = capsControl.createDiv({ cls: 'scribe-choice-group' });
 		const capItems: Array<{ key: keyof Caps; label: string }> = [
 			{ key: 'reasoning', label: this.text.capabilityReasoning },
@@ -196,13 +196,14 @@ export class ScribeModelConfigModal extends Modal {
 				this.caps[item.key] = !this.caps[item.key];
 				button.toggleClass('is-selected', this.caps[item.key]);
 				button.setAttribute('aria-pressed', String(this.caps[item.key]));
-				thinkingRow.toggleClass('scribe-hidden', !this.caps.reasoning || !this.defaultThinking.length);
+				thinkingRow?.toggleClass('scribe-hidden', !this.caps.reasoning || !this.defaultThinking.length);
 			});
 		}
 
-		const thinkingRow = formField(fields, this.text.thinkingLevel);
-		thinkingRow.toggleClass('scribe-hidden', !this.caps.reasoning || !this.defaultThinking.length);
-		this.renderThinkingPicker(thinkingRow);
+		const thinkingControl = formField(fields, this.text.thinkingLevel, true);
+		const thinkingRow = thinkingControl.parentElement;
+		thinkingRow?.toggleClass('scribe-hidden', !this.caps.reasoning || !this.defaultThinking.length);
+		this.renderThinkingPicker(thinkingControl);
 
 		const footer = this.contentEl.createDiv({ cls: 'scribe-model-config-footer' });
 		const actions = footer.createDiv({ cls: 'scribe-modal-action-group' });
