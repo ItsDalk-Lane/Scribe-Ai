@@ -3,7 +3,7 @@ import { realpath } from 'node:fs/promises';
 import type { App, FileSystemAdapter } from 'obsidian';
 import { createSkillLibrary } from '../../skills/library';
 import type { ImportPreview } from '../../skills/library/contracts';
-import { createLiveSkillCache, discoverLiveSkills, skillDirectory, skillScope, skillText } from '../../skills/discovery';
+import { createLiveSkillCache, discoverLiveSkills, skillDirectory, skillNotePaths, skillScope, skillText } from '../../skills/discovery';
 import type { DiscoveredSkill, SkillScanIssue } from '../../skills/discovery';
 import { installSharedPackage } from '../../skills/installTarget';
 import type { NoteRef, ScribeSettings } from '../../types';
@@ -27,18 +27,28 @@ export function createSkillRegistry(app: App, settings: ScribeSettings, save: ()
 	const listeners = new Set<() => void>();
 	let budget: { listed?: number; shortened: boolean; omitted: string[] } = { shortened: false, omitted: [] as string[] };
 	const notify = () => listeners.forEach((listener) => listener());
-	const scope = (refs?: NoteRef[], activeNote = app.workspace.getActiveFile()?.path) => skillScope(refs, activeNote);
+	const scope = (refs?: NoteRef[], activeNote = app.workspace?.getActiveFile?.()?.path) => skillScope(refs, activeNote);
+	const notePaths = (refs?: NoteRef[], activeNote = app.workspace?.getActiveFile?.()?.path) => skillNotePaths(refs, activeNote);
 	const cache = createLiveSkillCache();
 	async function inspect(refs?: NoteRef[], activeNote?: string, folders = scope(refs, activeNote)) {
 		const prefs = options();
 		const issues: SkillScanIssue[] = [];
-		const [managed, live] = await Promise.all([library.list(), discoverLiveSkills(cwd, app.vault.configDir, folders, prefs.sharedDirectories, new Set(prefs.disabledIds), { cache, issues })]);
+		const [managed, live] = await Promise.all([
+			library.list().catch((error: unknown) => {
+				issues.push({ path: library.directory, reason: error instanceof Error ? error.message : '无法读取技能库。' });
+				return [];
+			}),
+			discoverLiveSkills(cwd, app.vault.configDir, folders, prefs.sharedDirectories, new Set(prefs.disabledIds), { cache, issues }).catch((error: unknown) => {
+				issues.push({ path: cwd, reason: error instanceof Error ? error.message : '无法扫描技能目录。' });
+				return [];
+			}),
+		]);
 		for (const skill of managed) if (skill.error) issues.push({ path: skill.path, reason: skill.error });
 		const labels = { builtin: '内置', agent: 'Agent 创建', system: '系统导入', local: '本地', github: 'GitHub' };
 		const local: DiscoveredSkill[] = managed.filter((item) => !item.error).map((s) => ({
 			id: s.path, name: s.name, managed: s.name, description: s.description, sourceLabel: labels[s.source.kind],
 			displayName: s.displayName, defaultPrompt: s.defaultPrompt,
-			enabled: s.enabled, manual: s.userInvocable, implicit: s.allowImplicit,
+			enabled: s.enabled, manual: s.userInvocable, implicit: s.allowImplicit, paths: s.paths,
 		}));
 		const ids = new Set(local.map((item) => item.id));
 		const items: DiscoveredSkill[] = [...local, ...live.filter((item) => !ids.has(item.id)), {
@@ -67,7 +77,7 @@ export function createSkillRegistry(app: App, settings: ScribeSettings, save: ()
 		notify();
 	}
 	return {
-		library, scope, inspect, list, options, notify, sharedDirectory,
+		library, scope, notePaths, inspect, list, options, notify, sharedDirectory,
 		subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
 		budgetStatus: () => budget,
 		reportBudget(next: typeof budget) {

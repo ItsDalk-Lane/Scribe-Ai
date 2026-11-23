@@ -500,6 +500,7 @@ export function createSubagentController(
 	function taskFor(group: Group, instruction: string, source?: Task['request'], quotes = false, caller?: OriginatingRun) {
 		return createTask({ conversationId: group.id, instruction, refs: source?.refs ?? [],
 			...(source?.skillScope && { skillScope: source.skillScope }),
+				...(source?.skillNotePaths && { skillNotePaths: source.skillNotePaths }),
 			...(source && { approvalSource: source.approvalSource ?? source.instruction,
 				...caller?.skillRun?.delegation() }),
 			...(quotes && source?.chatQuotes?.length ? { chatQuotes: source.chatQuotes } : {}),

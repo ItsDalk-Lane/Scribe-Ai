@@ -142,6 +142,32 @@ void test('Codex 显示信息、图标及 MCP 提示按真实文件读取并更�
 	} finally { await close(); }
 });
 
+void test('自动推荐范围写入技能说明、保护并发修改，并可清空', async () => {
+	const { lib, close } = await fixture();
+	try {
+		const info = async () => (await lib.list()).find((item) => item.name === 'scoped')!;
+		const text = document('scoped').replace('\n---\n', '\npaths:\n  - "旧笔记.md"\ncustom: keep\n---\n');
+		await lib.install(await lib.previewDraft(text));
+		const original = await info();
+		assert.deepEqual(original.paths, ['旧笔记.md']);
+		await lib.saveMetadata('scoped', { paths: ['  会议/ ', '', '项目/**/*.{md,txt}', '会议/'] }, original);
+		const changed = await info();
+		assert.deepEqual(changed.paths, ['会议/', '项目/**/*.{md,txt}']);
+		assert.equal(changed.userInvocable, true);
+		assert.equal(changed.allowImplicit, true);
+		await assert.rejects(lib.saveMetadata('scoped', { paths: ['旧笔记.md'] }, original), /重新载入/u);
+		await assert.rejects(lib.saveMetadata('scoped', { paths: ['../私人.md'] }, changed), /无效/u);
+		await assert.rejects(lib.saveMetadata('scoped', { paths: ['/私人.md'] }, changed), /无效/u);
+		await assert.rejects(lib.saveMetadata('scoped', { paths: ['项目/*.{md,txt'] }, changed), /无效/u);
+		const saved = await lib.readFile('scoped', 'SKILL.md');
+		assert.match(saved, /custom: keep\n/u);
+		assert.match(saved, /按照日期整理。/u);
+		await lib.saveMetadata('scoped', { paths: ['  '] }, changed);
+		assert.equal((await info()).paths, undefined);
+		assert.doesNotMatch(await lib.readFile('scoped', 'SKILL.md'), /^paths:/mu);
+	} finally { await close(); }
+});
+
 
 void test('普通文件工具只读管理记录和内置包，同名个人技能仍可修复', async () => {
 	const { lib, root, close } = await fixture();

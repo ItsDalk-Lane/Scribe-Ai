@@ -27,7 +27,7 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 		const skill = join(base!, 'outline');
 		await mkdir(join(skill, 'agents'), { recursive: true });
 		await writeFile(join(skill, 'SKILL.md'), `---\nname: outline\ndescription: 整理章节提纲\n---\n${label} ${body}`);
-		await writeFile(join(skill, 'example.md'), '资源内容' + 'a'.repeat(21000));
+		await writeFile(join(skill, 'example.md'), label + '资源内容' + 'a'.repeat(21000));
 		await writeFile(join(skill, 'agents/openai.yaml'), `interface:\n  display_name: "${label}提纲"\npolicy:\n  allow_implicit_invocation: ${label === '个人'}\n`);
 	}
 	const app = { vault: { adapter: { getBasePath: () => vault }, configDir: '.test-settings' },
@@ -58,20 +58,31 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 	assert.ok(first.tools.some((s) => s.name === 'read_skill'));
 	assert.ok(!first.tools.some((s) => s.name === 'propose_skill' || s.name === 'install_skill'));
 	assert.doesNotMatch(initial.content, /摘录/);
+	const catalog = await runtime.list(0);
+	assert.ok(!catalog.includes(root) && !first.system!.includes(root) && first.messages.every((m) => !m.content.includes(root)));
+	const identities = (JSON.parse(catalog) as { items: { name: string; id: string }[] }).items.filter((skill) => skill.name === 'outline');
+	assert.equal(identities.length, 2);
+	const localReference = identities.find(({ id }) => !first.system!.includes(id))!.id;
+	const personalReference = identities.find(({ id }) => first.system!.includes(id))!.id;
+	assert.match(personalReference, /^s_[\w-]{12}$/u);
+	const localReceipt = await runtime.read(localReference, 'example.md', 0);
+	assert.equal((JSON.parse(localReceipt.split('\n').at(-1)!) as { id: string }).id, local.id);
+	assert.match(await runtime.files(localReference), /example\.md/u);
 	const localText = await readFile(local.id, 'utf8');
 	await writeFile(local.id, localText.replace('name: outline', 'name: renamed'));
 	await assert.rejects(runtime.read(local.id, 'example.md', 0), /需要用户点名/);
 	assert.doesNotMatch(await runtime.list(0), /"renamed"/);
 	await writeFile(local.id, localText);
-	const receipt = await runtime.read(personal.id, 'example.md', 0);
+	const receipt = await runtime.read(personalReference, 'example.md', 0);
 	// 模型可能把清单里的名称当作标识传入；名称唯一时按名称也能读取，并返回真实标识。
 	const builtin = list.find((s) => s.sourceLabel === '内置' && s.implicit)!;
 	const namedReceipt = await runtime.read(builtin.name, 'SKILL.md', 0);
 	assert.equal((JSON.parse(namedReceipt.split('\n').at(-1)!) as { id: string }).id, builtin.id);
-	const call: Message = { role: 'assistant', content: '', toolCalls: [{ id: 'read1', name: 'read_skill', input: { id: personal.id, file: 'example.md' } }] };
+	const call: Message = { role: 'assistant', content: '', toolCalls: [{ id: 'read1', name: 'read_skill', input: { id: personalReference, file: 'example.md' } }] };
 	const result: Message = { role: 'tool', content: receipt, toolCallId: 'read1', toolName: 'read_skill' };
 	const next = await builder.build(ctx, [initial, call, result], 100_000);
-	assert.match(next.messages.at(-1)!.content, /资源内容[\s\S]*下一页 offset=20000/u);
+	assert.match(next.messages.at(-1)!.content, /个人资源内容[\s\S]*下一页 offset=20000/u);
+	assert.ok(!next.messages.at(-1)!.content.includes(root));
 	assert.doesNotMatch(receipt, /资源内容/u);
 	await writeFile(join(shared, 'outline/example.md'), '已更新的资源');
 	assert.match((await builder.build(ctx, [initial, call, result], 100_000)).messages.at(-1)!.content, /重新读取/u);
@@ -79,11 +90,64 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 	await writeFile(join(root, 'outside'), '外部文件');
 	await assert.rejects(runtime.read(personal.id, 'outside.md', 0), /授权目录/);
 	config.skillSettings!.sharedDirectories = [];
-	await assert.rejects(runtime.read(personal.id, 'SKILL.md', 0), /不在本轮/);
+	await assert.rejects(runtime.read(personalReference, 'SKILL.md', 0), /不在本轮/);
 	await registry.setEnabled(local.id, false);
 	await assert.rejects(builder.build(ctx, [initial], 100_000), /已停用/);
 	const tiny = renderSkillCatalog(list, { ...config.skillSettings!, catalogBudgetMaxTokens: 1 });
 	assert.ok(tiny.omitted.length && tiny.list === '');
+});
+
+void test('扫描缺项时仍能按当前笔记推荐和读取技能，手动选择不受推荐规则限制', async (t) => {
+	const root = await realpath(await mkdtemp(join(tmpdir(), 'scribe-skill-paths-')));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const vault = join(root, 'vault'), shared = join(root, 'shared');
+	await mkdir(vault);
+	const rules = [
+		{ name: 'weekly', pattern: '会议/周报.md' },
+		{ name: 'meeting', pattern: '会议/' },
+		{ name: 'research', pattern: '研究/**/*.md' },
+	];
+	const writeSkill = async (name: string, pattern: string) => {
+		const dir = join(shared, name);
+		await mkdir(dir, { recursive: true });
+		await writeFile(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: 任务说明\npaths: [${JSON.stringify(pattern)}]\n---\n请按要求完成。`);
+	};
+	await Promise.all(rules.map(({ name, pattern }) => writeSkill(name, pattern)));
+	const settings = normalizeSettings(null);
+	settings.skillSettings!.sharedDirectories = [shared, join(root, 'missing')];
+	let active = '会议/周报.md';
+	const app = { vault: { adapter: { getBasePath: () => vault }, configDir: '.test-settings' },
+		workspace: { getActiveFile: () => ({ path: active }) } } as unknown as App;
+	const registry = createSkillRegistry(app, settings, async () => {}, { draft: async () => false, install: async () => false });
+	const signal = new AbortController().signal;
+	const request: TaskRequest = { conversationId: 'chat', instruction: '帮我整理', refs: [] };
+	const current = createSkillRun(registry, request, 32_000, signal, 'current');
+	const preview = await current.project([taskMessage(request)], true);
+	assert.match(preview.guidance, /扫描有异常[\s\S]*仍可使用/u);
+	assert.match(preview.guidance, /"weekly"[\s\S]*"meeting"|"meeting"[\s\S]*"weekly"/u);
+	assert.ok(!preview.guidance.includes(root));
+	const listing = JSON.parse(await current.list(0)) as { incomplete: boolean; items: { name: string; id: string }[] };
+	assert.equal(listing.incomplete, true);
+	const weekly = listing.items.find(({ name }) => name === 'weekly')!.id;
+	assert.match(await current.read(weekly, 'SKILL.md', 0), /weekly/u);
+
+	active = '会议/复盘.md';
+	const other = createSkillRun(registry, request, 32_000, signal, 'other');
+	const next = await other.project([taskMessage(request)], true);
+	assert.match(next.guidance, /"meeting"/u);
+	assert.doesNotMatch(next.guidance, /"weekly"|"research"/u);
+	await assert.rejects(other.read(weekly, 'SKILL.md', 0), /不在本轮/u);
+	const attached = { ...request, refs: [{ path: '研究/文献/来源.md' }] };
+	const withAttachment = await createSkillRun(registry, attached, 32_000, signal).project([taskMessage(attached)], true);
+	assert.match(withAttachment.guidance, /"research"/u);
+	assert.doesNotMatch(withAttachment.guidance, /"meeting"|"weekly"/u);
+	const folder = { ...request, refs: [{ path: '会议', kind: 'folder' as const }] };
+	assert.match((await createSkillRun(registry, folder, 32_000, signal).project([], true)).guidance, /"meeting"/u);
+	const manual = { ...request, instruction: '$weekly 帮我整理' };
+	assert.match((await createSkillRun(registry, manual, 32_000, signal).project([], true)).instructions, /请按要求完成/u);
+	await writeSkill('weekly', '会议/另一天.md');
+	await assert.rejects(preview.beforeSend!(), /技能权限或目录已变化/u);
+	await assert.rejects(current.read(weekly, 'SKILL.md', 0), /不在本轮/u);
 });
 
 void test('用户选定的共享保存目标独立于本库，重复安装保留原件', async (t) => {

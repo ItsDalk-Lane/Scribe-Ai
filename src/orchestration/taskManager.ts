@@ -9,6 +9,7 @@ export function createTask(request: TaskRequest): Task {
 		request: {
 			...request,
 			...(request.skillScope && { skillScope: [...request.skillScope] }),
+			...(request.skillNotePaths && { skillNotePaths: [...request.skillNotePaths] }),
 			...(request.skillMentions && { skillMentions: request.skillMentions.map((mention) => ({ ...mention })) }),
 			refs: request.refs.map((ref) => ({ ...ref, lines: ref.lines && [...ref.lines] })),
 			chatQuotes: request.chatQuotes?.slice(),

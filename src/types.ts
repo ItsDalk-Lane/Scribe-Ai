@@ -62,6 +62,7 @@ export interface Message {
 	skillInputLength?: number;
 	skillMentions?: SkillMention[];
 	skillScope?: string[];
+	skillNotePaths?: string[];
 	role: MessageRole;
 	content: string;
 	/** 应用生成的回复，只在聊天中显示，不计入模型用量。 */
@@ -142,6 +143,8 @@ export interface TaskRequest {
 	inheritedSkillIds?: string[];
 	skillMentions?: SkillMention[];
 	skillScope?: string[];
+	/** 本次请求选定的库内笔记或文件夹，文件夹以 / 结尾。 */
+	skillNotePaths?: string[];
 	conversationId: string;
 	instruction: string;
 	refs: NoteRef[];

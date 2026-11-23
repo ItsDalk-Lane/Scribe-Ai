@@ -19,7 +19,7 @@ function page(input: Record<string, unknown>) {
 }
 
 const definitions: SkillTool[] = [
-	{ name: 'list_skills', description: '列出当前任务可调用的技能，含真实来源标识。可用 offset 翻页。', fields: { offset },
+	{ name: 'list_skills', description: '列出当前任务可调用的技能及本轮短标识。可用 offset 翻页。', fields: { offset },
 		run: (s, a) => s.list(page(a)) },
 	{ name: 'read_skill', description: '按技能标识（技能清单第二项，不是技能名称）读取操作说明，或按技能目录内的相对路径读取配套文本。续读请传回 offset 与 digest。',
 		fields: { id: text, file: text, offset, digest: text }, required: ['id'],

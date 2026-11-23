@@ -110,6 +110,7 @@ function validSkillScope(value: unknown): boolean {
 
 function message(value: unknown): boolean {
 	return record(value) && roles.has(value.role) && text(value.content) && validSkillMentions(value.skillMentions) && validSkillScope(value.skillScope)
+		&& validSkillScope(value.skillNotePaths)
 		&& (value.skillInputLength === undefined || (count(value.skillInputLength) && Number(value.skillInputLength) <= value.content.length))
 		&& (value.subagentActivity === undefined || (value.local === true && (value.role === 'assistant' || value.role === 'user')
 			&& subagentActivity(value.subagentActivity)))
@@ -148,7 +149,7 @@ function request(value: unknown): value is TaskRequest {
 		&& (value.goalRound === undefined || (value.goalRound === true && value.intent === undefined))
 		&& (value.reviewMaterial === undefined || (value.intent === 'review' && text(value.reviewMaterial)
 			&& Buffer.byteLength(value.reviewMaterial) <= MAX_REVIEW_MATERIAL_BYTES))
-		&& validSkillMentions(value.skillMentions) && validSkillScope(value.skillScope) && validSkillScope(value.inheritedSkillIds)
+		&& validSkillMentions(value.skillMentions) && validSkillScope(value.skillScope) && validSkillScope(value.skillNotePaths) && validSkillScope(value.inheritedSkillIds)
 		&& (value.inheritedSkills === undefined || (Array.isArray(value.inheritedSkills)
 			&& value.inheritedSkills.every((skill: unknown) => record(skill) && text(skill.name) && text(skill.id))))
 		&& value.refs.every((ref: unknown) => record(ref) && text(ref.path)

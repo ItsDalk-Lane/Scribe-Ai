@@ -1,4 +1,6 @@
 import { Document, parseDocument, isMap, isScalar, isSeq, isNode, YAMLMap } from "yaml";
+import { compilePathGlob } from "../../tools/support/pathGlob";
+import { safeResourcePath } from "./vaultAdapter";
 type BackendId = string;
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n([\s\S]*))?$/;
@@ -42,6 +44,7 @@ export interface SkillFrontmatter {
   model?: string;
   disableModelInvocation?: boolean;
   userInvocable?: boolean;
+  paths?: string[];
   enabledAgents: BackendId[];
   dependencies?: SkillDependency[];
   uiMetadata?: SkillUiMetadata;
@@ -114,6 +117,29 @@ function readBoolean(doc: Document.Parsed, key: string): boolean | undefined {
   const v = doc.get(key);
   if (doc.has(key) && typeof v !== "boolean") throw new SkillFormatError(`字段 ${key} 需要填写 true 或 false。`);
   return typeof v === "boolean" ? v : undefined;
+}
+
+export function parseSkillPaths(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  const items: unknown[] = Array.isArray(value) ? value : [value];
+  const paths = new Set<string>();
+  for (const item of items) {
+    if (typeof item !== "string") throw new SkillFormatError("自动推荐范围须填写一个相对路径或一组相对路径。");
+    const path = item.trim();
+    if (!path) continue;
+    const folder = path.endsWith("/");
+    const location = folder ? path.slice(0, -1) : path;
+    const invalid = () => new SkillFormatError(`无效的自动推荐范围「${path}」。请填写笔记库内的相对路径，例如 会议/ 或 项目/**/*.md。`);
+    if (location.length > 512 || /^(?:!|~(?:\/|$))/u.test(location) || /[\r\n\t]/u.test(location)
+      || !safeResourcePath(location) || (folder && /[*?{}]/u.test(location))) throw invalid();
+    try {
+      if (!folder && /[*?{}]/u.test(location)) compilePathGlob(location);
+    } catch {
+      throw invalid();
+    }
+    paths.add(path);
+  }
+  return paths.size ? [...paths] : undefined;
 }
 
 function readEnabledAgents(doc: Document.Parsed): BackendId[] {
@@ -243,6 +269,9 @@ export function parseSkillFile(content: string, parentDirName?: string): ParsedS
       frontmatterLine(doc, yaml, "web-search-command")
     );
 
+  const rawPaths = doc.get("paths", true);
+  const paths = parseSkillPaths(isSeq(rawPaths) ? rawPaths.items.map((item) => isScalar(item) ? item.value : item)
+    : isScalar(rawPaths) ? rawPaths.value : rawPaths);
   const frontmatter: SkillFrontmatter = {
     name,
     description,
@@ -252,6 +281,7 @@ export function parseSkillFile(content: string, parentDirName?: string): ParsedS
     model: readString(doc, "model"),
     disableModelInvocation: readBoolean(doc, "disable-model-invocation"),
     userInvocable: readBoolean(doc, "user-invocable"),
+    ...(paths ? { paths } : {}),
     enabledAgents: readEnabledAgents(doc),
     dependencies: readDependencies(doc),
     uiMetadata: readUiMetadata(doc, yaml),
@@ -300,6 +330,7 @@ export interface SkillFrontmatterPatch {
   model?: string;
   disableModelInvocation?: boolean;
   userInvocable?: boolean;
+  paths?: string[];
   enabledAgents?: BackendId[];
   author?: string;
   version?: string;
@@ -326,6 +357,7 @@ export function serializeSkillFile(
   for (const key of Object.keys(fields) as Array<keyof typeof fields>) {
     if (key in patch) yaml = patchYamlField(yaml, [fields[key]], patch[key]);
   }
+  if ("paths" in patch) yaml = patchYamlField(yaml, ["paths"], parseSkillPaths(patch.paths));
   for (const key of ["author", "version", "tags"] as const) {
     if (key in patch)
       yaml = patchYamlField(yaml, parsed.doc.has(key) ? [key] : ["metadata", key], patch[key]);

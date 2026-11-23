@@ -577,7 +577,9 @@ export default function App({ plugin, conversation, mode, onModeChange, selected
 		if (value.trim()) {
 			const current = active.current;
 			if (current) {
-				queue.add(draftRequest(draft, conversationId, planned ? 'plan' : undefined), Promise.resolve(conversationId));
+				const request = draftRequest(draft, conversationId, planned ? 'plan' : undefined);
+				request.skillNotePaths = services.orchestration.skills.notePaths(refs);
+				queue.add(request, Promise.resolve(conversationId));
 				clearDraft(draft);
 				setError('');
 			} else {

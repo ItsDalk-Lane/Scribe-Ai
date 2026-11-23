@@ -1,6 +1,6 @@
 import { Component, MarkdownRenderer, Notice } from 'obsidian';
 import type { App } from 'obsidian';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { SKILL_LIBRARY } from '../../skills/library/SkillLibrary';
 import type { LibrarySkill, ManagedSkillLibrary } from '../../skills/library/contracts';
 import ChatIcon from '../components/ChatIcon';
@@ -59,25 +59,37 @@ const fields = {
 	icon: () => tr('图标文件（技能文件夹内）', 'Icon file (inside the skill folder)'), brandColor: () => tr('品牌色（#RRGGBB）', 'Brand color (#RRGGBB)'),
 	defaultPrompt: () => tr('“立即使用”的默认提示语', 'Default prompt for Use now'),
 };
+const fieldKeys = Object.keys(fields) as (keyof typeof fields)[];
 function Metadata({ skill, library, disabled, refresh, flush }: { skill: LibrarySkill; library: ManagedSkillLibrary; disabled: boolean; refresh: () => Promise<void>; flush: () => Promise<void> }) {
 	const [edit, setEdit] = useState<LibrarySkill>(skill);
 	const [original, setOriginal] = useState<LibrarySkill>(skill);
 	const [busy, setBusy] = useState(false);
 	const [message, setMessage] = useState('');
-	const dirty = (Object.keys(fields) as (keyof typeof fields)[]).some((key) => edit[key] !== original[key]);
+	const pathsHelp = useId();
+	const paths = edit.paths?.join('\n') ?? '';
+	const pathsChanged = paths !== (original.paths?.join('\n') ?? '');
+	const editedFields = fieldKeys.filter((key) => edit[key] !== original[key]);
+	const dirty = pathsChanged || editedFields.length > 0;
 	useEffect(() => { if (!dirty) { setEdit(skill); setOriginal(skill); } }, [skill, dirty]);
-	return <details className="scribe-skill-metadata"><summary><ChatIcon name="chevron-down" />{tr('界面元数据', 'Interface metadata')}</summary>
+	return <details className="scribe-skill-metadata"><summary><ChatIcon name="chevron-down" />{tr('技能设置', 'Skill settings')}</summary>
 		<form onSubmit={(event) => {
 			event.preventDefault();
 			setBusy(true); setMessage('');
-			void flush().then(() => library.saveMetadata(skill.name, {
-				displayName: edit.displayName?.trim() || undefined, shortDescription: edit.shortDescription?.trim() || undefined,
-				icon: edit.icon?.trim() || undefined, brandColor: edit.brandColor?.trim() || undefined, defaultPrompt: edit.defaultPrompt?.trim() || undefined,
-			}, original)).then(async () => { setOriginal(edit); await refresh(); }).catch((cause: unknown) => setMessage(errorText(cause))).finally(() => setBusy(false));
-		}}>{(Object.keys(fields) as (keyof typeof fields)[]).map((key) => <label key={key} className="scribe-skill-field">{fields[key]()}
+			const patch: Parameters<ManagedSkillLibrary['saveMetadata']>[1] = {};
+			for (const key of editedFields) patch[key] = edit[key]?.trim() || undefined;
+			if (pathsChanged) patch.paths = edit.paths;
+			void flush().then(() => library.saveMetadata(skill.name, patch, original))
+				.then(async () => { setOriginal(edit); await refresh(); }).catch((cause: unknown) => setMessage(errorText(cause))).finally(() => setBusy(false));
+		}}>{fieldKeys.map((key) => <label key={key} className="scribe-skill-field">{fields[key]()}
 			<input value={edit[key] ?? ''} disabled={busy || disabled} onChange={(event) => setEdit({ ...edit, [key]: event.currentTarget.value })} /></label>)}
+			<label className="scribe-skill-field">{tr('自动推荐范围', 'Automatic recommendation scope')}
+				<textarea rows={3} cols={28} value={paths} spellCheck={false} aria-describedby={pathsHelp} disabled={busy || disabled}
+					onChange={(event) => setEdit({ ...edit, paths: event.currentTarget.value.split('\n') })} />
+			</label>
+			<small id={pathsHelp}>{tr('每行一项。可填笔记（会议/本周.md）、文件夹（会议/）或匹配规则（项目/**/*.md）。只影响自动推荐，留空表示不限范围。',
+				'One vault-relative path per line. Use a note (Meetings/Weekly.md), a folder (Meetings/), or a pattern (Projects/**/*.md). Affects automatic recommendations only. Leave blank for any note.')}</small>
 			{message && <p className="scribe-skill-error" role="alert">{message}</p>}
-			<button disabled={busy || disabled || !dirty}>{tr('保存界面元数据', 'Save interface metadata')}</button></form>
+			<div><button disabled={busy || disabled || !dirty}>{tr('保存设置', 'Save settings')}</button></div></form>
 	</details>;
 }
 function Dependencies({ skill, library }: { skill: LibrarySkill; library: ManagedSkillLibrary }) {

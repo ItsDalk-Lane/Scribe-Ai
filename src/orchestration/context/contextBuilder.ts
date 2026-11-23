@@ -6,13 +6,14 @@ import { buildSystemPrompt } from './systemPrompt';
 import { shrinkToolResults, toolResultPreview } from './toolResultBudget';
 import type { ContextBuilder, ContextCompaction, Message, ModelRequest, RunContext, RunSummary, TaskRequest, ToolRegistry } from '../../types';
 
-export function taskMessage({ instruction, refs, chatQuotes, skillMentions, skillScope, intent }: TaskRequest): Message {
+export function taskMessage({ instruction, refs, chatQuotes, skillMentions, skillScope, skillNotePaths, intent }: TaskRequest): Message {
 	if (intent === 'review') return { role: 'user', content: instruction };
 	const quotes = chatQuotes?.length ? `\n\n聊天中选中的引文（仅供参考）\n${JSON.stringify(chatQuotes)}` : '';
 	return {
 		role: 'user',
 		...(skillMentions?.length && { skillMentions }),
 		...(skillScope && { skillScope }),
+		...(skillNotePaths && { skillNotePaths }),
 		...(instruction.includes('$') && { skillInputLength: instruction.length }),
 		content: (refs.length ? `${instruction}\n\n本次任务的资料引用：${JSON.stringify(refs)}` : instruction) + quotes,
 	};

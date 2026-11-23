@@ -92,7 +92,7 @@ export function createSkillLibrary(vaultRoot: string, options: { pluginVersion?:
 			const f = parsed.frontmatter;
 			const spec = await vault.adapter.readHead(resource(name, 'agents/openai.yaml'), 65536).then(parseOpenAiMetadata).catch(() => undefined);
 			const tags = attr('tags');
-			return { ...base, revision: withRevision ? await revision(name) : undefined, description: f.description, ...f.uiMetadata, ...spec?.fields,
+			return { ...base, revision: withRevision ? await revision(name) : undefined, description: f.description, ...f.uiMetadata, ...spec?.fields, paths: f.paths,
 				author: typeof attr('author') === 'string' ? String(attr('author')) : undefined,
 				version: ['string','number','bigint'].includes(typeof attr('version')) ? String(attr('version')) : source.version,
 				tags: isSeq(tags) ? tags.items.filter(isScalar).map((item) => String(item.value)) : undefined,
@@ -243,14 +243,18 @@ export function createSkillLibrary(vaultRoot: string, options: { pluginVersion?:
 			if (!main) throw new Error('没有找到技能说明文件。');
 			const source = decoder.decode(main.data);
 			const parsed = parseSkillFile(source, name);
-			const sidecar = files.find((file) => file.path === 'agents/openai.yaml');
+			const { paths, ...uiPatch } = patch;
+			const updatePaths = 'paths' in patch;
+			if (updatePaths && JSON.stringify(parsed.frontmatter.paths) !== JSON.stringify(expected.paths))
+				throw new Error('自动推荐范围已发生变化，请重新载入。');
+			const sidecar = Object.keys(uiPatch).length ? files.find((file) => file.path === 'agents/openai.yaml') : undefined;
 			const sideText = sidecar && decoder.decode(sidecar.data);
 			const side = sideText !== undefined ? parseOpenAiMetadata(sideText) : undefined;
 			const fields = { ...parsed.frontmatter.uiMetadata, ...side?.fields };
-			const localPatch: typeof patch = {}, sidePatch: typeof patch = {};
-			for (const key of Object.keys(patch) as Array<keyof typeof patch>) {
+			const localPatch: typeof uiPatch = {}, sidePatch: typeof uiPatch = {};
+			for (const key of Object.keys(uiPatch) as Array<keyof typeof uiPatch>) {
 				if (fields[key] !== expected[key]) throw new Error('显示信息已发生变化，请重新载入。');
-				const value = patch[key]?.trim() || undefined;
+				const value = uiPatch[key]?.trim() || undefined;
 				if (value && key === 'icon' && !safeResourcePath(value.replace(/^\.\//u, ''))) throw new Error('图标应位于该技能的文件夹内。');
 				if (value && key === 'brandColor' && !/^#[a-f0-9]{6}$/iu.test(value)) throw new Error('品牌色格式应为 #RRGGBB。');
 				// 已有字段留在原文件，新字段优先写入技能已自带的 Codex 界面说明。
@@ -262,7 +266,8 @@ export function createSkillLibrary(vaultRoot: string, options: { pluginVersion?:
 			}
 			if (Object.keys(sidePatch).length && sidecar && side && sideText !== undefined)
 				sidecar.data = new TextEncoder().encode(editOpenAiMetadata(sideText, sidePatch, side.iconKey));
-			if (Object.keys(localPatch).length) main.data = new TextEncoder().encode(serializeSkillFile(parsed, { uiMetadata: localPatch }));
+			if (updatePaths || Object.keys(localPatch).length) main.data = new TextEncoder().encode(
+				serializeSkillFile(parsed, { uiMetadata: localPatch, ...(updatePaths && { paths }) }));
 			await store.install({name, files, source: store.entry(name)?.source ?? {kind:'local'}},
 				{replace:true, expectedContent:source, expectedFingerprint:fingerprint, updateBaseline:false});
 		}),

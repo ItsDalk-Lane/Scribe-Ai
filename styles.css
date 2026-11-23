@@ -4588,7 +4588,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 .scribe-skill-metadata > summary { display: flex; gap: 6px; align-items: center; padding: 6px 0; font-size: var(--font-ui-small); font-weight: 500; }
 .scribe-skill-metadata > summary::-webkit-details-marker { display: none; }
 .scribe-skill-metadata:not([open]) > summary .scribe-chat-icon { transform: rotate(-90deg); }
-.scribe-skill-metadata form input { width: min(260px,100%); }
+.scribe-skill-metadata form :is(input, textarea) { width: min(260px,100%); }
 .scribe-skill-metadata form { font-size: var(--font-ui-small); padding-block: .5rem; }
 .scribe-skill-workspace { display: grid; grid-template-columns: min(224px, 55%) minmax(0,1fr); align-items: stretch; gap: .75rem; min-height: 24rem; }
 .scribe-skill-workspace aside, .scribe-skill-document { min-width: 0; background: var(--background-secondary); border-radius: var(--radius-l); overflow: auto; }

@@ -28,13 +28,19 @@ void test('项目技能按笔记祖先逐级发现，同名分开，外部引用
 	for (const folder of ['', '项目', '项目/章节', '其他']) {
 		await skill(join(vault, folder, '.agents/skills/test'), 'test');
 	}
-	await skill(join(shared, 'test'), 'test');
+	const projectPath = join(vault, '项目/章节/.agents/skills/test/SKILL.md');
+	await writeFile(projectPath, '---\nname: test\ndescription: 示例\npaths: "项目/章节/A.md"\n---\n正文');
+	const sharedPath = await skill(join(shared, 'test'), 'test');
+	await writeFile(sharedPath, '---\nname: test\ndescription: 示例\npaths:\n  - " 项目/**/*.md "\n  - "其他/"\n---\n正文');
 	assert.deepEqual(skillScope([{ path: '/outside/note.md' }], '项目/章节/A.md'), ['项目/章节']);
 	assert.deepEqual(skillScope([{ path: '其他', kind: 'folder' }], '项目/章节/A.md'), ['其他']);
 	const all = await discoverLiveSkills(vault, configDir, ['项目/章节', '../', configDir], [shared], new Set());
 	assert.equal(all.length, 4);
 	assert.equal(new Set(all.map((item) => item.id)).size, 4);
 	assert.ok(all.every((item) => item.name === 'test' && !item.id.includes('其他')));
+	assert.deepEqual(all.find((item) => item.id === projectPath)?.paths, ['项目/章节/A.md']);
+	assert.deepEqual(all.find((item) => item.id === sharedPath)?.paths, ['项目/**/*.md', '其他/']);
+	assert.equal(all.find((item) => item.id === join(vault, '.agents/skills/test/SKILL.md'))?.paths, undefined);
 });
 
 void test('技能元数据按文件状态复用，修改说明、增删界面说明和失效文件都能反映', async (t) => {

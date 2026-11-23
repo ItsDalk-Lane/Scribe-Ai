@@ -117,6 +117,12 @@ async function runTask(
 	const toolsEnabled = () => settings.modelOverrides[providerId]?.[model]?.capabilities?.tools !== false;
 	const toolsEnabledAtStart = toolsEnabled();
 	const { intent } = task.request;
+	if (skills && intent !== 'review') {
+		const { refs } = task.request;
+		const activeNote = child || sideRuns ? '' : undefined;
+		task.request.skillScope ??= skills.scope(refs, activeNote);
+		task.request.skillNotePaths ??= skills.notePaths(refs, restored ? '' : activeNote);
+	}
 	const connection = connectionKey(settings, providerId, model);
 	const checkModel = () => {
 		if (connection !== connectionKey(settings, providerId, model)) {
@@ -183,7 +189,6 @@ async function runTask(
 		let ctx: RunContext | undefined;
 		try {
 			const { refs } = task.request;
-			if (skills) task.request.skillScope ??= skills.scope(refs, child || sideRuns ? '' : undefined);
 			if (skills && (queued || replaceFromTaskId !== undefined) && task.request.instruction.includes('$')) {
 				bindSkillMentions(task.request.instruction, task.request.skillMentions ?? [],
 					await skills.list(refs, '', task.request.skillScope));
@@ -205,7 +210,7 @@ async function runTask(
 				} : {}),
 				...(intent !== 'review' && conversationHistory(saved)),
 			}, app.vault.configDir, () => toolsEnabledAtStart && toolsEnabled(), Boolean(sideRuns), executionMode);
-			if (skills && intent !== 'review') ctx.skillRun = createSkillRun(skills, task.request, models?.contextLimits?.(selection)?.contextWindow, runSignal);
+			if (skills && intent !== 'review') ctx.skillRun = createSkillRun(skills, task.request, models?.contextLimits?.(selection)?.contextWindow, runSignal, task.id);
 			if (child) {
 				ctx.subagentId = child.agentId;
 				ctx.history = [...child.baseHistory ?? [], ...ctx.history ?? []];
@@ -376,7 +381,9 @@ export function createSessionController(
 			if (disposed) throw new Error('插件已关闭。');
 			const id = randomUUID();
 			const runs = [...parentRuns];
-			const parentScope = parentRuns.at(-1)?.request.skillScope ?? skills?.scope(parentRuns.at(-1)?.request.refs);
+		const parent = parentRuns.at(-1)?.request;
+		const parentScope = parent?.skillScope ?? skills?.scope(parent?.refs);
+		const parentPaths = parent?.skillNotePaths ?? skills?.notePaths(parent?.refs);
 			let running: AbortController | undefined;
 			let closed = false;
 			function close() {
@@ -393,8 +400,10 @@ export function createSessionController(
 					if (running) throw new Error('侧聊正在回答。');
 					if (!instruction.trim()) throw new Error('请输入问题。');
 					const model = selectedModel(choice);
-					const task = createTask({ conversationId: id, instruction, skillMentions, skillScope: skillScope ?? (refs.length ? skills?.scope(refs) : parentScope), refs: refs.filter(({ path, kind, addedExternal }) =>
-						!isAbsolute(path) || (kind === 'file' && addedExternal === true)), chatQuotes });
+				const allowedRefs = refs.filter(({ path, kind, addedExternal }) => !isAbsolute(path) || (kind === 'file' && addedExternal === true));
+				const notePaths = skills?.notePaths(allowedRefs, '');
+				const task = createTask({ conversationId: id, instruction, skillMentions, skillScope: skillScope ?? (refs.length ? skills?.scope(refs) : parentScope),
+					skillNotePaths: notePaths?.length ? notePaths : parentPaths, refs: allowedRefs, chatQuotes });
 					const request = task.request;
 					const controller = new AbortController();
 					running = controller;
@@ -438,7 +447,9 @@ export function createSessionController(
 				return Promise.reject(new Error('当前任务无法接受这条插话。'));
 			}
 			return new Promise((resolve, reject) => {
-				running.steering.pending.set(message.id, { message, resolve, reject });
+				const request = message.request.skillNotePaths || !skills ? message.request
+					: { ...message.request, skillNotePaths: skills.notePaths(message.request.refs, '') };
+				running.steering.pending.set(message.id, { message: { ...message, request }, resolve, reject });
 			});
 		},
 		resume(conversationId, taskId, observer = {}, { model, rememberConversation, executionMode } = {}) {

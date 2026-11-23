@@ -5,16 +5,18 @@ import { basename, dirname, isAbsolute, join, posix, relative, resolve, win32 } 
 import { parse } from 'yaml';
 import { safeResourcePath } from './library/vaultAdapter';
 import { parseOpenAiMetadata } from './library/openAiMetadata';
+import { parseSkillPaths } from './library/skillFormat';
 import type { NoteRef, SkillInfo } from '../types';
 import { hasFileErrorCode, isWithinPath } from '../tools/support/pathUtils';
 
 export interface DiscoveredSkill extends SkillInfo {
 	managed?: string;
 	dependencies?: string[];
+	paths?: string[];
 }
 
 export interface SkillScanIssue { path: string; reason: string }
-type Metadata = Pick<DiscoveredSkill, 'name' | 'description' | 'manual' | 'implicit' | 'displayName' | 'defaultPrompt' | 'dependencies'>;
+type Metadata = Pick<DiscoveredSkill, 'name' | 'description' | 'manual' | 'implicit' | 'displayName' | 'defaultPrompt' | 'dependencies' | 'paths'>;
 type CacheEntry = { key: string } & ({ value: Metadata; warning?: string } | { error: string });
 export function createLiveSkillCache() { return new Map<string, CacheEntry>(); }
 type DiscoveryOptions = { cache?: ReturnType<typeof createLiveSkillCache>; issues?: SkillScanIssue[] };
@@ -24,15 +26,21 @@ const maxEntries = 20_000;
 const maxDepth = 6;
 const maxFileSize = 50 * 1024 * 1024;
 
-export function skillScope(refs: NoteRef[] = [], activeNote?: string): string[] {
-	const scopes = new Set<string>();
+function selectedVaultRefs(refs: NoteRef[] = [], activeNote?: string): NoteRef[] {
 	const vaultRefs = refs.filter(({ path }) => path && !isAbsolute(path) && !win32.isAbsolute(path) && !path.includes('\\')
 		&& !path.includes('\0') && !path.split('/').includes('..'));
-	for (const ref of vaultRefs.length ? vaultRefs : activeNote ? [{ path: activeNote }] : []) {
-		const folder = ref.kind === 'folder' ? ref.path : posix.dirname(ref.path);
-		if (folder !== '.' && safeResourcePath(folder)) scopes.add(folder);
-	}
-	return [...scopes];
+	return vaultRefs.length ? vaultRefs : activeNote ? [{ path: activeNote }] : [];
+}
+
+export function skillNotePaths(refs?: NoteRef[], activeNote?: string): string[] {
+	return [...new Set(selectedVaultRefs(refs, activeNote).filter(({ path }) => safeResourcePath(path))
+		.map(({ path, kind }) => kind === 'folder' ? path + '/' : path))];
+}
+
+export function skillScope(refs?: NoteRef[], activeNote?: string): string[] {
+	return [...new Set(selectedVaultRefs(refs, activeNote)
+		.map(({ path, kind }) => kind === 'folder' ? path : posix.dirname(path))
+		.filter(safeResourcePath))];
 }
 
 function fields(value: unknown): Record<string, unknown> {
@@ -141,7 +149,8 @@ function descriptor(head: string, directory: string): Metadata {
 	const description = optionalText(meta.description)?.replace(/\s+/gu, ' ');
 	if (!description) throw new Error('技能缺少有效的说明（description）。');
 	if (!name || [...name].length > 64) throw new Error('技能名称须为 1 至 64 个字符。');
-	return { name, description, displayName: optionalText(fields(meta.ui).displayName),
+	const paths = parseSkillPaths(meta.paths);
+	return { name, description, displayName: optionalText(fields(meta.ui).displayName), ...(paths && { paths }),
 		implicit: meta['disable-model-invocation'] !== true, manual: meta['user-invocable'] !== false };
 }
 

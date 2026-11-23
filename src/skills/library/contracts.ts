@@ -5,7 +5,7 @@ export interface SkillPackage { name: string; source: SkillSource; files: SkillP
 export interface LibrarySkill {
 	name: string; description: string; path: string; source: SkillSource; enabled: boolean; error?: string;
 	displayName?: string; shortDescription?: string; defaultPrompt?: string; icon?: string; brandColor?: string;
-	revision?: string; version?: string; author?: string; tags?: string[]; allowImplicit: boolean; userInvocable: boolean;
+	revision?: string; version?: string; author?: string; tags?: string[]; paths?: string[]; allowImplicit: boolean; userInvocable: boolean;
 	usage: { count: number; lastUsedAt?: number; lastSource?: 'manual' | 'auto' }; dependencies: LibraryDependency[];
 }
 export interface LibraryDependency { type: 'command' | 'obsidian-plugin' | 'python-package' | 'mcp'; name: string; note?: string }
@@ -30,7 +30,7 @@ export interface ManagedSkillLibrary {
 	install(preview: ImportPreview, signal?: AbortSignal): Promise<void>;
 	previewPackage(preview: ImportPreview): SkillPackage;
 	discard(preview: ImportPreview): void;
-	saveMetadata(name: string, patch: Pick<LibrarySkill, 'displayName'|'shortDescription'|'icon'|'brandColor'|'defaultPrompt'>, expected: LibrarySkill): Promise<void>;
+	saveMetadata(name: string, patch: Pick<LibrarySkill, 'displayName'|'shortDescription'|'icon'|'brandColor'|'defaultPrompt'|'paths'>, expected: LibrarySkill): Promise<void>;
 	readIcon(name: string): Promise<string | undefined>;
 	recordUse(name: string, kind?: 'manual' | 'auto'): Promise<void>;
 	checkDependencies(name: string): Promise<{ name: string; ready: boolean; detail: string }[]>;
