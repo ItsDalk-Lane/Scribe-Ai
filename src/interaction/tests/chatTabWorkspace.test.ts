@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import type { ViewState, Workspace } from 'obsidian';
+import type { ViewState, Workspace, WorkspaceLeaf } from 'obsidian';
 import { initializeLocalState, executionModeKey } from '../../orchestration/storage/localState';
 import type { ChatGoal } from '../chatGoal';
 import { replaceActiveTabPane } from '../chatTabWorkspace';
-import { readSubagentTabState, SubagentTabs } from '../subagentTabs';
+import { readSubagentTabState, ConversationViews } from '../conversationViews';
 
 void test('同一子聊天重复打开时复用右栏标签，不同会话独立，删除仅关闭对应会话', async () => {
 	const right = {};
@@ -24,17 +25,23 @@ void test('同一子聊天重复打开时复用右栏标签，不同会话独立
 		leaves.push(leaf);
 		return leaf;
 	};
-	const tabs = new SubagentTabs({ rightSplit: right, getRightLeaf: createLeaf,
+	const tabs = new ConversationViews({ rightSplit: right, getRightLeaf: createLeaf,
 		getLeavesOfType: () => [...leaves], revealLeaf: async () => {} } as unknown as Workspace);
 	const target = { conversationId: 'first', agentId: 'agent', name: '签到' };
-	await Promise.all([tabs.open(target, ''), tabs.open(target, '')]);
-	await tabs.open(target, '');
-	await tabs.open({ ...target, agentId: 'another-agent' }, '');
-	await tabs.open({ ...target, conversationId: 'second' }, '');
+	await Promise.all([tabs.openSubagent(target, ''), tabs.openSubagent(target, '')]);
+	await tabs.openSubagent(target, '');
+	await tabs.openSubagent({ ...target, agentId: 'another-agent' }, '');
+	await tabs.openSubagent({ ...target, conversationId: 'second' }, '');
 	assert.equal(leaves.length, 3);
 	assert.deepEqual(readSubagentTabState(leaves[0]?.getViewState().state), target);
+	const firstSide = createLeaf(false);
+	const secondSide = createLeaf(false);
+	tabs.sideChatParents.set(firstSide as unknown as WorkspaceLeaf, 'first');
+	tabs.sideChatParents.set(secondSide as unknown as WorkspaceLeaf, 'second');
 	tabs.closeConversation('first');
-	assert.deepEqual(leaves.map((leaf) => leaf.getViewState().state?.conversationId), ['second']);
+	assert.ok(!leaves.includes(firstSide));
+	assert.deepEqual([...tabs.sideChatParents.values()], ['second']);
+	assert.deepEqual(leaves.filter((leaf) => leaf !== secondSide).map((leaf) => leaf.getViewState().state?.conversationId), ['second']);
 });
 
 interface TestPane {
@@ -122,4 +129,22 @@ void test('本机状态和旧目标迁移后可重开，验证之前保留旧副
 	const otherDevice = await initializeLocalState(path, app, ids);
 	assert.equal(otherDevice.loadExecutionMode(), 'ask');
 	assert.notEqual(await otherDevice.getOAuthDeviceId(), 'previous-device');
+});
+
+void test('权限写入失败后，排队的界面更新不会重新保存失败的权限', async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), 'scribe-state-test-'));
+	t.after(() => rm(directory, { force: true, recursive: true }));
+	const path = join(directory, 'state.json');
+	const app = { loadLocalStorage: () => undefined, saveLocalStorage: () => {} };
+	const state = await initializeLocalState(path, app, []);
+	t.mock.method(fs, 'rename', () => { throw new Error('磁盘写入失败'); }, { times: 1 });
+	const mode = state.saveExecutionMode('full-access', 'test-chat');
+	const timeline = state.saveTimelineExpanded(new Set(['tool:1']));
+	await assert.rejects(mode, /磁盘写入失败/u);
+	assert.equal(state.loadExecutionMode('test-chat'), 'ask');
+	await timeline;
+	const reopened = await initializeLocalState(path, app, []);
+	assert.equal(reopened.loadExecutionMode(), 'ask');
+	assert.equal(reopened.loadExecutionMode('test-chat'), 'ask');
+	assert.deepEqual([...reopened.timelineExpanded()], ['tool:1']);
 });

@@ -3,8 +3,103 @@ import { mkdir, mkdtemp, readFile, realpath, rm, stat, utimes, writeFile } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import type { Plugin } from 'obsidian';
+import { setProviderEnabled } from '../settings/modelAvailability';
+import { initializePluginStorage } from '../storage/pluginStorage';
+import { executionModeKey } from '../storage/localState';
 import { readStoredJson, storageStat, writeStoredJson } from '../storage/jsonFile';
 import { openVaultStorage, STORAGE_VERSION } from '../storage/vaultStorage';
+
+void test('服务商启停单独保存，旧设置与新设置重开都保留配置', async (t) => {
+	const root = await realpath(await mkdtemp(join(tmpdir(), 'scribe-provider-settings-')));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	let legacy: unknown = { providerId: 'first', model: 'one', providerModels: { first: ['one'], second: ['two'] },
+		modelOverrides: {
+			first: { one: { capabilities: { nativeWebSearch: true, structuredOutput: false }, input: ['text', 'video'] } },
+			second: { two: { capabilities: { nativeWebSearch: false } } },
+		} };
+	const plugin = {
+		app: {
+			vault: { configDir: 'vault-config', adapter: { getBasePath: () => root } },
+			loadLocalStorage: () => null,
+			saveLocalStorage: (_key: string, value: unknown) => assert.equal(value, null),
+		},
+		manifest: { id: 'scribe-ai' },
+		loadData: () => Promise.resolve(legacy),
+		saveData: (data: unknown) => { legacy = data; return Promise.resolve(); },
+	} as unknown as Plugin;
+	const first = await initializePluginStorage(plugin);
+	assert.deepEqual(first.settings.disabledProviderIds, []);
+	assert.equal(first.settings.videoModel, undefined);
+	assert.equal(first.settings.videoLinkModel, null);
+	await first.complete();
+	const migrated = await initializePluginStorage(plugin);
+	await migrated.complete();
+	const previousVideo = { providerId: 'first', model: 'one' };
+	await migrated.writeSettings({ ...migrated.settings, videoModel: previousVideo, videoLinkModel: undefined });
+	assert.deepEqual((await initializePluginStorage(plugin)).settings.videoLinkModel, previousVideo);
+	setProviderEnabled(migrated.settings, 'first', false);
+	migrated.settings.videoModel = previousVideo;
+	migrated.settings.videoLinkModel = { providerId: 'second', model: 'two' };
+	await migrated.writeSettings(migrated.settings);
+	const reopened = await initializePluginStorage(plugin);
+	assert.deepEqual(legacy, { storageVersion: STORAGE_VERSION });
+	assert.deepEqual(reopened.settings.disabledProviderIds, ['first']);
+	assert.deepEqual(reopened.settings.providerModels, { first: ['one'], second: ['two'] });
+	assert.deepEqual(reopened.settings.videoModel, { providerId: 'first', model: 'one' });
+	assert.deepEqual(reopened.settings.videoLinkModel, { providerId: 'second', model: 'two' });
+	assert.deepEqual(reopened.settings.modelOverrides, { first: { one: { capabilities: { structuredOutput: false }, input: ['text', 'video'] } } });
+	assert.doesNotMatch(await readFile(join(root, '.scribe-ai', 'settings.json'), 'utf8'), /nativeWebSearch/u);
+	assert.equal(reopened.settings.providerId, 'second');
+	assert.equal(reopened.settings.model, 'two');
+});
+
+void test('仅有旧本机设置时，重开确认后才清理，中断后继续清理并保留新修改', async (t) => {
+	const root = await realpath(await mkdtemp(join(tmpdir(), 'scribe-vault-storage-')));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const configDir = 'vault-config';
+	const directory = join(root, configDir, 'plugins', 'scribe-ai');
+	await mkdir(directory, { recursive: true });
+	const marker = join(directory, 'data.json');
+	const preset = { label: '继续', content: '继续上一轮' };
+	const presetsKey = 'scribe-ai:slash-presets';
+	const local = new Map<string, unknown>([[executionModeKey(), 'auto-review'], [presetsKey, [preset]]]);
+	let canClear = false;
+	const plugin = {
+		app: {
+			vault: { configDir, adapter: { getBasePath: () => root } },
+			loadLocalStorage: (key: string) => local.get(key),
+			saveLocalStorage: (key: string, value: unknown) => {
+				assert.equal(value, null);
+				if (key === presetsKey && !canClear) throw new Error('清理中断');
+				local.delete(key);
+			},
+		},
+		manifest: { id: 'scribe-ai' },
+		loadData: () => readStoredJson(marker),
+		saveData: (data: unknown) => writeStoredJson(marker, data),
+	} as unknown as Plugin;
+	const first = await initializePluginStorage(plugin);
+	await first.complete();
+	assert.equal(local.size, 2);
+	assert.equal(await readStoredJson(marker), undefined);
+	assert.deepEqual(first.settings.slashPresets?.[0], preset);
+	assert.equal(first.localState.loadExecutionMode(), 'auto-review');
+	await first.localState.saveExecutionMode('ask');
+	const next = await initializePluginStorage(plugin);
+	assert.equal(next.localState.loadExecutionMode(), 'ask');
+	assert.deepEqual(next.settings.slashPresets?.[0], preset);
+	await assert.rejects(next.complete(), /清理中断/u);
+	assert.deepEqual(await readStoredJson(marker), { storageVersion: STORAGE_VERSION });
+	assert.ok(local.has(presetsKey));
+	canClear = true;
+	const retry = await initializePluginStorage(plugin);
+	await retry.complete();
+	assert.equal(local.size, 0);
+	const reopened = await initializePluginStorage(plugin);
+	assert.deepEqual(reopened.settings.slashPresets?.[0], preset);
+	assert.equal(reopened.localState.loadExecutionMode(), 'ask');
+});
 
 void test('聊天与配置验证后才收起旧版本，重启保留新位置上的更新', async (t) => {
 	const root = await realpath(await mkdtemp(join(tmpdir(), 'scribe-vault-storage-')));
@@ -24,7 +119,7 @@ void test('聊天与配置验证后才收起旧版本，重启保留新位置上
 	const first = await openVaultStorage(root, legacy, data);
 	const settings = { model: '旧模型', slashPresets: [{ label: '预设', content: '继续' }] };
 	await writeStoredJson(first.paths.settings, settings);
-	await first.complete(mark, clear);
+	assert.equal(await first.stageMigration(() => false), true);
 	assert.deepEqual(data, { model: '旧模型' });
 	assert.equal(cleared, 0);
 	for (const [name, content] of Object.entries(files)) {
@@ -57,7 +152,7 @@ void test('旧记录在确认后又被修改时保留原件和已搬副本', asy
 	const first = await openVaultStorage(root, legacy, data);
 	await writeStoredJson(first.paths.settings, data);
 	const unexpected = () => { assert.fail('不应清除旧记录'); };
-	await first.complete(unexpected, unexpected);
+	assert.equal(await first.stageMigration(() => false), true);
 	await writeFile(file, '另一处补写的聊天\n');
 	const next = await openVaultStorage(root, legacy, data);
 	await assert.rejects(next.complete(unexpected, unexpected), /旧数据在迁移期间发生变化/u);

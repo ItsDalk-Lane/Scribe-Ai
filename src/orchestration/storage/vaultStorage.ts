@@ -120,17 +120,18 @@ export async function openVaultStorage(root: string, legacyDirectory: string, le
 		legacy,
 		importing,
 		needsLegacyMigration: !versionOnly || Boolean(pending) || importing,
+		async stageMigration(hasLegacyLocalData: () => boolean): Promise<boolean> {
+			if (pending || (!importing && (versionOnly || !hasLegacyLocalData()))) return false;
+			// 必须先保存核对记录，之后才能接受对新副本的编辑。
+			await ensureStoredDirectory(paths.migration);
+			await writeStoredJson(journal, {
+				legacyDirectory: relative(root, legacyDirectory),
+				settingsHash: hashJson(legacy),
+				conversationsHash: conversationHash(legacyFiles),
+			} satisfies MigrationReceipt);
+			return true;
+		},
 		async complete(writeVersion: () => Promise<void>, clearLegacy: () => Promise<void>): Promise<void> {
-			if (importing) {
-				// 首次打开从新位置读取，保留旧数据直到下一次成功加载。
-				await ensureStoredDirectory(paths.migration);
-				await writeStoredJson(journal, {
-					legacyDirectory: relative(root, legacyDirectory),
-					settingsHash: hashJson(legacy),
-					conversationsHash: conversationHash(legacyFiles),
-				} satisfies MigrationReceipt);
-				return;
-			}
 			if (pending) {
 				const oldFiles = await listFiles(legacyDirectory);
 				const retiredFiles = await listFiles(retired);
@@ -150,10 +151,7 @@ export async function openVaultStorage(root: string, legacyDirectory: string, le
 				});
 				return;
 			}
-			if (!versionOnly) {
-				await writeVersion();
-				await clearLegacy();
-			}
+			if (!versionOnly) await writeVersion();
 		},
 	};
 }

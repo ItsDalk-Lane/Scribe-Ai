@@ -1,4 +1,5 @@
 import { skillWriteLocations } from '../../skills/library/writeProtection';
+import { storageStat } from '../../orchestration/storage/jsonFile';
 import { scribeDataPaths } from '../../orchestration/storage/paths';
 import { accessSync, constants } from 'node:fs';
 import { realpath } from 'node:fs/promises';
@@ -21,6 +22,10 @@ export function hasMacShellSandbox(): boolean {
 export async function macShellSandboxArgs(ctx: ToolContext): Promise<string[]> {
 	const vault = await realpath(ctx.cwd);
 	const data = scribeDataPaths(vault);
+	for (const path of [data.root, data.skills]) {
+		const entry = await storageStat(path);
+		if (entry && !entry.isDirectory()) throw new Error('插件数据目录位置已变化，无法启动受限终端。');
+	}
 	const protectedPaths = new Set([resolve(vault, ctx.app.vault.configDir)]);
 	for (const ref of ctx.task.request.refs) {
 		const path = resolve(vault, ref.path);

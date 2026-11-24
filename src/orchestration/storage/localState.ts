@@ -13,6 +13,7 @@ const expansionKey = 'scribe-ai:timeline-expanded';
 const oauthDeviceIdKey = 'oauth-device-id';
 const goalKey = (id: string) => `scribe-ai:chat-goal:${id}`;
 export const executionModeKey = (id?: string) => id ? `scribe-ai:execution-mode:${id}` : 'scribe-ai:last-execution-mode';
+const globalLegacyKeys = [executionModeKey(), expansionKey, oauthDeviceIdKey];
 
 interface StoredState {
 	device: string;
@@ -60,15 +61,23 @@ export async function initializeLocalState(path: string, app: LegacyStorage, con
 
 	let persisted = state;
 	let writes = Promise.resolve();
+	const pending = new Set<(current: StoredState) => StoredState>();
 	let deviceIdSave: Promise<string> | undefined;
-	function save(patch: Partial<StoredState>): Promise<void> {
-		const next = state = { ...state, ...patch };
+	function save(update: (current: StoredState) => StoredState): Promise<void> {
+		pending.add(update);
+		state = update(state);
 		const result = writes.then(async () => {
+			pending.delete(update);
 			try {
-				await writeStoredJson(path, next);
-				persisted = next;
+				// 从最近成功保存的版本应用本次修改，避免带上另一项保存失败的设置。
+				const next = update(persisted);
+				if (next !== persisted) {
+					await writeStoredJson(path, next);
+					persisted = next;
+				}
+				if (!pending.size) state = persisted;
 			} catch (error) {
-				if (state === next) state = persisted;
+				state = [...pending].reduce((current, next) => next(current), persisted);
 				throw error;
 			}
 		});
@@ -91,34 +100,46 @@ export async function initializeLocalState(path: string, app: LegacyStorage, con
 		loadExecutionMode(id?: string): ExecutionMode {
 			return id ? executionMode(state.conversationModes[id]) ?? 'ask' : state.lastExecutionMode;
 		},
-		async saveExecutionMode(mode: ExecutionMode, id?: string): Promise<void> {
-			if (state.lastExecutionMode === mode && (!id || state.conversationModes[id] === mode)) return;
-			await save({ lastExecutionMode: mode, conversationModes: id ? { ...state.conversationModes, [id]: mode } : state.conversationModes });
+		saveExecutionMode(mode: ExecutionMode, id?: string): Promise<void> {
+			return save((current) => {
+				if (current.lastExecutionMode === mode && (!id || current.conversationModes[id] === mode)) return current;
+				const conversationModes = id ? { ...current.conversationModes, [id]: mode } : current.conversationModes;
+				return { ...current, lastExecutionMode: mode, conversationModes };
+			});
 		},
 		async forgetConversation(id: string): Promise<void> {
-			const conversationModes = { ...state.conversationModes };
-			delete conversationModes[id];
-			await save({ conversationModes });
+			await save((current) => {
+				const conversationModes = { ...current.conversationModes };
+				delete conversationModes[id];
+				return { ...current, conversationModes };
+			});
 			clear(executionModeKey(id));
 			clear(goalKey(id));
 		},
 		timelineExpanded: () => restoredTimelineExpansion(state.timelineExpanded),
-		saveTimelineExpanded: (expanded: ReadonlySet<string>) => save({ timelineExpanded: [...expanded] }),
+		saveTimelineExpanded(expanded: ReadonlySet<string>) {
+			const timelineExpanded = [...expanded];
+			return save((current) => ({ ...current, timelineExpanded }));
+		},
 		getOAuthDeviceId(): Promise<string> {
 			if (persisted.oauthDeviceId) return Promise.resolve(persisted.oauthDeviceId);
 			if (deviceIdSave) return deviceIdSave;
 			const id = randomUUID();
-			deviceIdSave = save({ oauthDeviceId: id }).then(() => id).finally(() => { deviceIdSave = undefined; });
+			deviceIdSave = save((current) => ({ ...current, oauthDeviceId: id })).then(() => id).finally(() => { deviceIdSave = undefined; });
 			return deviceIdSave;
 		},
 		restoreGoal,
+		hasLegacy(): boolean {
+			return globalLegacyKeys.some((key) => legacyValue(app, key) != null)
+				|| ids.some((id) => legacyValue(app, executionModeKey(id)) != null || Boolean(legacyGoal(id)));
+		},
 		async migrateLegacyGoals(store: Goals): Promise<void> {
 			for (const id of ids) if (legacyGoal(id)) await restoreGoal(store, id);
 		},
 		async clearLegacy(store: Goals): Promise<void> {
 			await writes;
 			if (JSON.stringify(await readStoredJson(path)) !== JSON.stringify(persisted)) throw new Error('无法确认插件状态已经迁移。');
-			for (const key of [executionModeKey(), expansionKey, oauthDeviceIdKey]) clear(key);
+			for (const key of globalLegacyKeys) clear(key);
 			for (const id of ids) {
 				clear(executionModeKey(id));
 				if (legacyGoal(id) && (await store.loadGoal(id)) !== undefined) clear(goalKey(id));

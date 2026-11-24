@@ -4,10 +4,11 @@ import { assertScribePath, ensureFolderExists, safeResourcePath, writeVaultFile,
 import { parseSkillFile, serializeSkillFile, validateName } from './skillFormat';
 import type { SkillPackage, SkillPackageFile, SkillSource } from './contracts';
 import { t } from './messages';
+import { SKILL_LIBRARY } from '../../orchestration/storage/paths';
+export { SKILL_LIBRARY };
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 const arrayBufferToBase64 = (data: ArrayBuffer) => Buffer.from(data).toString('base64');
 
-export const SKILL_LIBRARY = ".scribe-ai/skills";
 const REGISTRY = `${SKILL_LIBRARY}/.registry.json`;
 const OPERATIONS = `${SKILL_LIBRARY}/.operations`;
 
