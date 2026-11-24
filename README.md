@@ -14,7 +14,7 @@ Scribe saves chats, settings, command presets, and skills in the vault's hidden 
 
 Reopening Obsidian restores your last chat, including any partial reply saved when you stopped or closed the chat view. Send a follow-up to pick up from it, or select **Review before resuming** to inspect the saved task's outgoing content and destination before continuing it.
 
-Select **+** above the chat to open another conversation. Each tab keeps its own draft, queue, model, and running task. Right-click a tab to rename or close it. A task keeps running after you close its tab. On the start screen, hover over a row in **Recent chats** to rename or delete it. Inside a conversation, hover over a mark on the right edge of the chat to see its title, update time, and latest exchange. Select the mark to reopen the chat. The preview also lets you rename or delete it. In a narrow pane, select **Chat history** at the lower right.
+Select **+** above the chat to open another conversation. Each tab keeps its own draft, queue, model, and running task. If a saved chat or side chat loses its selected model, it uses the current default for new messages. If no default is available, select a model before sending. Right-click a tab to rename or close it. A task keeps running after you close its tab. On the start screen, hover over a row in **Recent chats** to rename or delete it. Inside a conversation, hover over a mark on the right edge of the chat to see its title, update time, and latest exchange. Select the mark to reopen the chat. The preview also lets you rename or delete it. In a narrow pane, select **Chat history** at the lower right.
 
 When you send a task, the current chat history, instructions, file references, and tool results it uses can be sent to the selected model provider. Select **Stop** to cancel pending work. Tools from a previous task only run again when a new task requests them and any required approval is granted.
 
@@ -34,7 +34,7 @@ On macOS, routine Bash commands run within a restricted environment with network
 
 Bash and PowerShell commands can move to the background after 10 seconds of foreground execution. If the command is still running and a slot is available, the chat receives a task ID and continues. The same process and collected output carry over, but the foreground wait deadline stops applying: background commands have no runtime limit and run until they finish or are stopped. Ask for background execution explicitly to receive an ID as soon as the command is approved and starts. A command that does not move to the background is stopped by its foreground timeout (2 minutes by default, up to 10 minutes). Scribe Ai allows up to 8 background commands at once.
 
-While a job runs, its in-memory output window is bounded to 256 KiB shared by stdout and stderr. After settlement the window keeps 16 KiB shared by both streams, plus output the model has not read yet. Complete output up to 64 MiB per stream is written to private temporary files, and the job output tool reports those paths. The expanded task view reads the in-memory window, so it can show an output-dropped notice instead of the full stream. These temporary files follow DSH's startup retention: one best-effort sweep at plugin start removes regular files older than the configured period (30 days by default) and prunes empty spill directories; set the period to 0 in **Advanced** to disable cleanup. Leaving a job list or unloading the plugin does not delete them. Roots that are not private and owned by the current user are left untouched. Changes apply at the next plugin start. Model-facing single tool results use DSH's 12,500 estimated-token budget: oversized text keeps ordered head and tail previews, the full result is stored in a private temporary file, and the result includes that path for a later read or grep. The Read tool keeps its own paging limits. The same configurable startup sweep handles these result files.
+While a job runs, its in-memory output window is bounded to 256 KiB shared by stdout and stderr. After settlement the window keeps 16 KiB shared by both streams, plus output the model has not read yet. Complete output up to 64 MiB per stream is written to private files in this vault’s `.scribe-ai/cache` folder, and the job output tool reports those paths. The expanded task view reads the in-memory window, so it can show an output-dropped notice instead of the full stream. These files follow the configured retention period: one best-effort sweep at plugin start removes regular files older than the configured period (30 days by default) and prunes empty spill directories; set the period to 0 in **Advanced** to disable cleanup. Leaving a job list or unloading the plugin does not delete them. Roots that are not private and owned by the current user are left untouched. Changes apply at the next plugin start. Model-facing single tool results use DSH's 12,500 estimated-token budget: oversized text keeps ordered head and tail previews, the full result is stored in the same private cache, and the result includes that path for a later read or grep. The Read tool keeps its own paging limits. The same configurable startup sweep handles these result files.
 
 Open the background-task control in the toolbar above the chat input to see running and finished commands, expand their output, stop a running command, or clear finished rows. Chat history lists all conversations. Scribe Ai saves the most recent 32 finished results per chat, including their read state and the retained beginnings and ends of the output. Older results saved before read tracking remain available in the same control. Closing Obsidian or unloading the plugin stops running background commands.
 
@@ -52,11 +52,19 @@ In an editable skill's details, open **Skill settings → Automatic recommendati
 
 Use `$skill-installer` in chat to list the public OpenAI curated skills or install from a public GitHub folder. This contacts GitHub to retrieve the catalog or selected files. Installation shows the source and destination, and does not run downloaded scripts or install dependencies. The details page reports declared dependencies. Connections to external tool services are not supplied by the skill system.
 
+## Web search
+
+Open **Settings → Scribe Ai → Services**, choose a search provider, and turn on **Enable web search**. The agent decides when to search in chats that allow tools. **Ask for approval** previews the search query and its destination, **Approve for me** uses the same AI review as other tools, and **Full access** sends the query directly. Side chats, plan mode, and read-only subagents keep their restricted tool sets.
+
+Zhipu Coding Plan uses the plan's search quota. DeepSeek uses its standalone Search API, which bills successful searches with results. Both can reuse the corresponding official model provider's linked key or use a key selected in Obsidian Secret Storage. Unlinking applies to search only and keeps the key in Obsidian Secret Storage. Exa offers public search subject to rate limits. Tavily requires its own API key and can use the free quota for basic searches. **Test search** sends one public query and may use provider quota.
+
+Each search sends the query to the selected provider. The chat model receives the resulting titles, links, and excerpts, which may also be saved in chat history.
+
 ## MCP
 
 Open **Settings → Scribe Ai → MCP** to add a local command or a remote MCP server (HTTP or SSE). Use the Obsidian secret picker to link an existing key or create one. For remote servers, you can also use **Sign in** if the service supports browser sign-in. When you import MCP JSON or Codex TOML, Scribe saves recognized credentials in Obsidian Secret Storage using the server name and a numeric suffix for each collision. This covers headers, environment variables, tokens, OAuth client secrets, URL query parameters, and common command arguments such as `--api-key`. JSON export leaves out stored credential values. Imported servers start disabled. Enabling a local server runs the configured program on your computer.
 
-Enabled servers can offer tools and resources to chats with tool access. MCP calls follow the permission mode selected in the chat composer. **Ask for approval** prompts you, **Approve for me** uses the same AI review as built-in tools, and **Full access** runs calls directly. Tool arguments go to the selected server. Tool results can be saved in the conversation and sent to the configured chat model. Text and structured data are supported. Attachments such as images and audio are described in the result. Use the server's **Tools** tab to enable or disable individual tools, or switch the server off to close the connection.
+Enabled servers can offer tools and resources to chats with tool access. MCP calls follow the permission mode selected in the chat composer. **Ask for approval** prompts you, **Approve for me** uses the same AI review as built-in tools, and **Full access** runs calls directly. Tool arguments go to the selected server. Tool results can be saved in the conversation and sent to the configured chat model. Text and structured data are supported. Supported image blocks and image resources are sent to vision models. Audio attachments are described in text. Use the server's **Tools** tab to enable or disable individual tools, or switch the server off to close the connection.
 
 ## Subagents
 
@@ -66,7 +74,7 @@ Expand the main chat’s execution details to see **Started**, **Contacted**, an
 
 Open **Subagents** above the input to send instructions, stop work, or close and reopen a subagent. Closing the chat tab lets subagents continue. Closing Obsidian saves recorded progress so you can inspect it after reopening.
 
-Subagents use your configured models and the main chat’s access and approval rules. A custom role can restrict its tools. By default, the selected model receives the assigned instruction and references for this task. Delegation can also include earlier chat context. Selecting a model for a custom role authorizes sending its assignments to that model’s configured service. A model request to a different service otherwise asks for your confirmation and shows the destination and content. Subagent requests add to the model usage shown in the chat.
+Subagents use your configured models and the main chat’s access and approval rules. The built-in explorer is read-only, including under Full access. A custom role can restrict its tools. By default, the selected model receives the assigned instruction and references for this task. Delegation can also include earlier chat context. Selecting a model for a custom role authorizes sending its assignments to that model’s configured service. A model request to a different service otherwise asks for your confirmation and shows the destination and content. Subagent requests add to the model usage shown in the chat.
 
 ## Side chat
 
@@ -87,19 +95,21 @@ Type the first few characters of a skill's name after `/`, then select it to add
 - Use `/recap` to see a progress summary or `/compact` to summarize older chat content for future turns. Both use your configured model. The full chat stays available locally.
 - Select **Chat history** in the title bar to reopen a conversation. Select **Archive chat** in history or recent chats. Open **Archived** in the history popover to view archived chats or select **Unarchive chat** to return a conversation to the regular lists. `/export` saves a separate Markdown note, and `/presets` saves frequently used prompts and commands.
 
-Side chat can read and search notes in the current vault using `Read`, `Glob`, and `Grep`. Use **Add context** to attach a vault file or folder, and choose a model for that side chat from the input box. The selected provider can receive the inherited conversation, attached text and paths, and note contents it reads. Closing the side chat tab cancels its current response and clears its messages. Side chats are separate from the saved chat history.
+Side chat can read and search notes in the current vault using `Read`, `Glob`, and `Grep`. Use **Add context** to attach a vault file or folder, and choose a model for that side chat from the input box. The selected provider can receive the inherited conversation, attached text and paths, and note contents it reads. Closing the side chat tab cancels its current response and clears its messages. Confirming deletion of its main conversation also closes that side chat and discards its draft. Side chats are separate from the saved chat history.
 
 ## Development
+
+Contributors and coding agents must follow the [feature integration rules](AGENTS.md#新功能如何接入现有规则) and the [project storage rules](AGENTS.md#插件数据存储).
 
 ```bash
 npm install
 npm run dev    # watch build into main.js
 npm run build  # type-check + production bundle
 npm run lint
-npm run test:agent
+npm test       # run all tests, including communication and cross-feature checks
 ```
 
-The agent suite also checks live chat timeline order, tool grouping, and remembered disclosure state.
+The same tests run on pushes and pull requests. New test files under `src/` are discovered automatically.
 
 Copy `main.js` and `manifest.json` (plus `styles.css` if present) into
 `<Vault>/.obsidian/plugins/scribe-ai/` and enable the plugin in
@@ -116,9 +126,31 @@ is the exact version number (no `v` prefix) and attach `manifest.json`,
 
 The communication layer pins `@earendil-works/pi-ai@1.5.2` and exposes its built-in provider catalog. Model HTTP requests use Node's network stack rather than Chromium, so third-party gateways are not limited by browser CORS. This makes the plugin desktop-only.
 
-**Add model** loads the selected provider's model list. Use **Fetch models** to refresh it. For preset addresses, Scribe Ai combines details from the provider, the Pi catalog bundled with the plugin, and the public Models.dev catalog. Preset providers fall back to Pi's online catalog and then the bundled list when their own list is unavailable. The provider request may use your linked key. The Pi request includes the provider ID and Pi version. Models.dev receives a request for its public catalog. Neither public catalog receives your key, model selections, or vault content. Custom and local addresses supply their own model information.
+Scribe Ai updates its model data in the background on startup. To update it yourself, open **Settings → Scribe Ai → Models** and select **Update model data** next to **Add provider**. The update starts with each service's official catalog, using the linked account for services that require it. It collects every reported page and keeps chat models. When the official list is unavailable, Scribe Ai can use Pi's online snapshot or the catalog bundled with the plugin. Models.dev supplements capability details. Pi receives the Pi version, and Models.dev receives a request for its public catalog. Neither public catalog receives credentials, model selections, or vault content. See the [provider catalog audit](docs/model-catalogs.md) for connection-specific details.
 
-The picker keeps the combined catalog in memory while the configuration dialog is open. It shows known context and output limits, tool calling, reasoning, and available reasoning levels. Your model settings take precedence when you enter an explicit value.
+**Add model** and **Fetch models** read the saved catalog in the current vault. The list shows its source and refresh time. If an update fails, the last saved list for that connection stays available. Capability fields have their own sources and may still be updated when the model list comes from a saved copy. A new custom address can be saved with a manually entered model ID and picked up by the next update. Model lists show catalog capabilities for image, audio, video and PDF input, reasoning, tool calling, and structured output.
+
+When you open an individual model's settings, Scribe Ai fills structured output and video input independently from the local data for the model, API, and address. Saved manual settings take precedence. The structured output control distinguishes supported, unsupported, unconfirmed, and conflicting evidence. An unqualified claim of JSON support is recorded separately from JSON Schema. Missing limits and effort levels use the bundled model data or the plugin defaults.
+
+Select a model with **Image** enabled to send images in chat. Use **Add context** to select a file, paste a screenshot straight into the input, or send an Obsidian image link such as `![[diagram.png]]`. Public HTTP or HTTPS image links work directly when the URL has a supported image extension. For links without an extension, use a Markdown image embed such as `![Diagram](https://example.com/render?id=123)`. The plugin downloads the image without model credentials and sends the image bytes to the selected model. The Agent can read image files and direct image links returned by tools using **Read**, subject to the chat's permissions. Approvals for tool-initiated image downloads show the destination.
+
+Scribe Ai accepts PNG, JPEG, GIF, and WebP, up to 5 MiB per image and up to 12 images or 12 MiB of images per model request. Individual providers may apply lower limits. Pasted screenshots and binary tool images are stored in the current vault's private `.scribe-ai/cache/` so queued tasks and interrupted runs can reopen them. The existing 30-day cache cleanup applies. Conversation records store references, and unrelated later turns do not replay the image bytes.
+
+To use native video in an ordinary chat, select a supported video model and use the existing attachment picker. Model settings show whether the selected API has a video input format and whether it needs an HTTPS link. Inline attachments have a combined 12 MiB limit. For a supported GLM Chat connection, include a direct HTTPS video URL as a Markdown embed, for example `![Video](https://example.com/clip.mp4)`. The selected provider receives explicit video attachments or URLs for the current task. Binary contents are loaded for the request and kept out of chat history. See the [verified video connections](docs/model-catalogs.md#固定-json-schema-和视频输入).
+
+Open **Settings → Scribe Ai → Services** to choose **Local video analysis model** and **Linked video analysis model** separately. The local selector lists enabled model connections that accept video bytes. The link selector also lists connections that require HTTPS video links. A message with both sources uses the corresponding selection for each video.
+
+In an ordinary chat, attach a file or embed a public HTTPS address whose path ends in a supported video extension. The link-only routes receive that address and retrieve the video themselves. Other routes receive video bytes prepared with locally installed FFmpeg and ffprobe. Scribe Ai checks the media and converts it to compatible MP4 when needed. Each locally prepared source is limited to 128 MiB and each prepared video to 12 MiB.
+
+The selected video provider receives the video or link and your current question. Each dedicated analysis requires a provider receipt showing that video input was processed. Scribe Ai reads Gemini video usage and explicit video token counts from Chat Completions and Responses. A connection can support video input without providing that count. The chat model receives the timestamped analysis as context. If preparation, delivery confirmation, or analysis fails, the chat request stops with the reason. A resumed task reuses its saved analysis. Temporary files are kept in the vault cache and removed after preparation. **Use chat model** selects the direct path for that source only. Existing video analysis settings initially carry over to both selectors.
+
+**Structured output** lets the Agent supply a JSON Schema for its next answer when a task needs fixed fields and types. The setting is a capability declaration. Ordinary answers use the usual format.
+
+Model settings, connection tests, and chat resolve the API protocol and base URL together. Model overrides take precedence over provider overrides. Leave the model address blank and select its automatic protocol option to follow the resolved connection. For an unlisted model, Scribe Ai can use a compatible connection when the provider's protocol and address are unambiguous. When they cannot be resolved, select a protocol or enter its base URL before sending. Custom endpoints can still be configured explicitly.
+
+OpenCode Zen and Go use the supported protocol from the saved catalog or, when no model-specific route is known, the plan's OpenAI Chat Completions route. A protocol change selects a matching official endpoint when the address is automatic. Connections that explicitly mix one OpenCode plan or protocol with another plan or protocol's official address are rejected before sending. Azure can resolve its address from the account configuration when the address is left blank. A task stops before its next model request if a catalog refresh changes its resolved connection. See the [OpenCode inference API](https://opencode.ai/docs/console/api/inference/).
+
+You can enable several providers at once in **Models** and choose the model to use in chat. Turning a provider off hides its models from new selections and keeps its configuration and running tasks. If it held the chat default, Scribe Ai selects another enabled model when one is available. Turn the provider back on to resume an interrupted task that used one of its models.
 
 ### Credentials
 
@@ -133,6 +165,8 @@ OAuth token refreshes are serialized and written back to the same secret. Secret
 ### Network
 
 Streaming responses support cancellation, gzip/Brotli/deflate decoding, backpressure, and connection/first-byte/stream-idle timeouts. The plugin's network channel blocks automatic redirects to a different site. If a service has moved, configure its new URL directly. Proxy resolution order is plugin setting, environment variables, Electron system proxy (best effort), then direct connection. Localhost and `NO_PROXY` targets bypass proxies.
+
+HTTPS image downloads can use the configured local proxy when the system resolver returns synthetic addresses for public hostnames. The public-image checks still reject private destinations and literal synthetic addresses.
 
 Run the local transport and protocol integration tests with:
 
