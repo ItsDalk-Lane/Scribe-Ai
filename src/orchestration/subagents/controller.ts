@@ -1,10 +1,12 @@
+import { meteredService } from '../meteredService';
 import { randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { setTimeout, clearTimeout } from 'node:timers';
 import { normalizeSubagentSettings, BUILTIN_SUBAGENT_ROLES } from '../settings/subagentSettings';
 import { inputBytes } from '../context/contextBuilder';
+import { historicalMessages, manualSummaryContext } from '../context/conversationHistory';
 import { replayConversation } from '../storage/taskStore';
-import { pauseRun } from '../runResume';
+import { canResumeRun, pauseRun, wasSharedRef } from '../runResume';
 import { createTask } from '../taskManager';
 import { isSteeringMessage, latestIncompleteReply } from '../../runtime/continuationText';
 import type {
@@ -14,7 +16,7 @@ import type {
 } from '../../types';
 
 type Model = RunContext['model'];
-type OriginatingRun = Pick<RunContext, 'task' | 'model' | 'history' | 'signal' | 'permissions' | 'skillRun' | 'observer'>;
+type OriginatingRun = Pick<RunContext, 'task' | 'model' | 'history' | 'manualSummary' | 'signal' | 'permissions' | 'skillRun' | 'observer'>;
 type StartRecord = Extract<SubagentRecord, { kind: 'create' }>;
 type RunEntry = Extract<SubagentRecord, { kind: 'run' }>['entry'];
 type ReviewRecord = Extract<SubagentRecord, { kind: 'review' }>;
@@ -94,7 +96,7 @@ export function createSubagentController(
 	settings: ScribeSettings,
 	store: ConversationStore,
 	runChild: (task: Task, model: Model, signal: AbortSignal, observer: RunObserver, mode: ExecutionMode | undefined, options: ChildRunOptions) => Promise<RunState>,
-	selectModel: (model: Model) => Model,
+	selectModel: (model: Model, restored?: boolean) => Model,
 	models?: Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin'>,
 	stopJobs?: (conversationId: string, ids: Set<string>) => Promise<void>,
 ) {
@@ -159,7 +161,7 @@ export function createSubagentController(
 		group.deliveries.delete(taskId);
 	}
 
-	async function composeReport(group: Group, delivery: PendingDelivery, sections: string[], signal: AbortSignal): Promise<string | undefined> {
+	async function composeReport(group: Group, taskId: string, delivery: PendingDelivery, sections: string[], signal: AbortSignal): Promise<string | undefined> {
 		const { model, agentIds } = delivery;
 		const origin = group.agents.get(agentIds[0]!)?.create.modelOrigin;
 		// 延迟回传和恢复旧对话时，仅把结果交给原先分工所用的模型地址。
@@ -179,7 +181,8 @@ export function createSubagentController(
 			},
 		};
 		if (output <= 0 || inputBytes(request) > (window * 0.85 - output) * 2) return;
-		const response = await models.send(request);
+		const summaries = meteredService(models, 'summary', (usage) => store.append(group.id, [{ type: 'auxiliary-usage', taskId, usage }]));
+		const response = await summaries.send(request);
 		return response.stopReason === 'end' && !response.toolCalls.length ? response.content.trim() : undefined;
 	}
 
@@ -198,7 +201,7 @@ export function createSubagentController(
 		// 同一组最后两个任务可能同时结束，只让一份回传写入聊天记录。
 		delivery.writing = Promise.resolve().then(async () => {
 			const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(180_000)]);
-			const content = await composeReport(group, delivery, sections, signal).catch(() => undefined);
+			const content = await composeReport(group, taskId, delivery, sections, signal).catch(() => undefined);
 			if (controller.signal.aborted) return;
 			const report = { content: content || sections.join('\n\n---\n\n'), sentAt: Date.now() };
 			await store.append(group.id, [{ type: 'subagent-report', taskId, report }]);
@@ -224,7 +227,12 @@ export function createSubagentController(
 		group.reports = {};
 		for (const { agentId, record } of snapshot.subagents ?? []) {
 			if (record.kind === 'create') {
-				group.agents.set(agentId, { create: record, view: { ...record.agent, runs: [], status: 'interrupted' } });
+				// 旧记录未写下内置探索角色的只读设置，恢复时同步约束它和原有下级。
+				const inherited = record.agent.parentId && group.agents.get(record.agent.parentId)?.create.readOnly;
+				const builtin = record.readOnly === undefined && BUILTIN_SUBAGENT_ROLES.some((role) => role.readOnly
+					&& role.name === record.agent.role && (!record.instructions || role.instructions === record.instructions));
+				const create = inherited || builtin ? { ...record, readOnly: true } : record;
+				group.agents.set(agentId, { create, view: { ...record.agent, runs: [], status: 'interrupted' } });
 				inner.set(agentId, []);
 			} else if (record.kind === 'run') inner.get(agentId)?.push(record.entry);
 			else if (record.kind === 'visibility') {
@@ -416,14 +424,20 @@ export function createSubagentController(
 				runs: [...(restored ? previous.slice(0, -1) : previous), liveRun] });
 			publish(group);
 		};
-		const selected = selectModel(view.model);
+		const selected = selectModel(restored?.model ?? view.model, restored !== undefined);
 		const open = creating ? save(group, [{ agentId, record: create }]) : visibility(group, agent, false);
 		const signal = parentSignal ? AbortSignal.any([controller.signal, parentSignal]) : controller.signal;
 		const ready = open.then(async () => {
 			await beforeRun?.();
 			const options: ChildRunOptions = {
-				agentId, instructions: create.instructions ?? '', readOnly: create.readOnly === true, baseHistory: create.history,
-				append: (entries) => save(group, entries.map((entry) => ({ agentId, record: { kind: 'run', entry } }))),
+				agentId, instructions: create.instructions ?? '', readOnly: create.readOnly === true,
+				baseHistory: create.history && historicalMessages(create.history),
+				async append(entries) {
+					await save(group, entries.map((entry) => ({ agentId, record: { kind: 'run', entry } })));
+					for (const entry of entries) {
+						if ((entry.type === 'step' || entry.type === 'messages') && entry.step) liveRun = { ...liveRun, step: entry.step };
+					}
+				},
 				snapshot: { id: group.id, runs: previous }, restored,
 				confirmDestination: destinationGuard(group, agent, task, signal, restored !== undefined),
 			};
@@ -689,9 +703,10 @@ export function createSubagentController(
 				rootTaskId: agentId ? find(group, agentId).view.rootTaskId : caller.task.id,
 				name: input.nickname ?? role.name, role: input.system_instructions ? 'custom' : role.name, model };
 			const state = current();
-			const history = input.fork_turns === 'all' ? [
+			const history = input.fork_turns === 'all' ? historicalMessages([
+				...(caller.manualSummary ? [{ role: 'user' as const, content: manualSummaryContext(caller.manualSummary) }] : []),
 				...caller.history ?? [], ...(state?.messages ?? []).filter((message) => !message.incomplete),
-			] : undefined;
+			]) : undefined;
 			// 当前批次的工具仍在运行，分支仅带走已有配对结果的消息。
 			if (history && state?.pendingCalls.length) {
 				const pending = new Set(state.pendingCalls.map(({ id }) => id));
@@ -700,7 +715,7 @@ export function createSubagentController(
 			}
 			const create: StartRecord = { kind: 'create', agent: identity, history,
 				instructions: input.system_instructions ?? role.instructions,
-				readOnly: readOnly || role.readOnly, allowProvider: Boolean(role.model) || sameProvider,
+				readOnly: readOnly || role.readOnly === true, allowProvider: Boolean(role.model) || sameProvider,
 				modelOrigin: role.model ? modelOrigin?.(model) : callerOrigin };
 			const child = { create, view: { ...identity, status: 'idle' as const, runs: [] } };
 			const task = taskFor(group, input.message!, caller.task.request, Boolean(directSkills) || input.fork_turns === 'all', caller, !create.readOnly);
@@ -804,8 +819,8 @@ export function createSubagentController(
 			const agent = find(group, agentId);
 			const run = agent.view.runs.at(-1);
 			if (agent.active || agent.view.status !== 'interrupted') throw new Error('这个子 Agent 无法继续。');
-			if (!run) throw new Error('这个子 Agent 尚未保存任务，请补充指令。');
-			const task = { ...createTask(run.request), id: run.state.taskId };
+			if (!canResumeRun(run)) throw new Error('请先核对已保存的子任务进度，再补充指令。');
+			const task = { ...createTask({ ...run.request, refs: run.request.refs.filter(wasSharedRef) }), id: run.state.taskId };
 			await launch(group, agent, task, mode, { restored: run });
 		},
 		respond(id, requestId, accepted) { groups.get(id.toLowerCase())?.requests.get(requestId)?.resolve(accepted); },

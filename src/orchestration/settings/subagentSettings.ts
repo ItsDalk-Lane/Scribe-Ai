@@ -21,6 +21,7 @@ export const BUILTIN_SUBAGENT_ROLES: readonly SubagentRole[] = [
 	},
 	{
 		name: 'explorer',
+		readOnly: true,
 		description: '搜索和核对资料，找出与问题直接相关的证据。',
 		instructions: '以只读方式查找和核对资料。回答分配给你的具体问题，附上可验证的出处，不修改资料。',
 	},

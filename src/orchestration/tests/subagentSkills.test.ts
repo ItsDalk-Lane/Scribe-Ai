@@ -18,11 +18,13 @@ import { normalizeMcpSettings } from '../../tools/external/mcpConfig';
 import { createMcpTools } from '../../tools/external/mcpTools';
 import { skillTools } from '../../tools/skillTools';
 import { subagentTools } from '../../tools/subagentTools';
+import { writeTools } from '../../tools/writeTools';
 import { createContextBuilder } from '../context/contextBuilder';
 import { createSkillRegistry } from '../context/skills';
 import { createSessionController } from '../sessionController';
 import { normalizeSettings } from '../settings/defaults';
 import { createConversationStore } from '../storage/conversationStore';
+import { createTask } from '../taskManager';
 
 function respond(calls: ToolCall[] = [], beforeResult?: () => Promise<void>): ModelStream {
 	const content = calls.length ? '' : '已完成核对。';
@@ -57,6 +59,8 @@ interface Scenario {
 	parent: string;
 	child: string;
 	readOnly?: boolean;
+	explorer?: boolean;
+	forkCompacted?: boolean;
 	pick?: boolean;
 	direct?: boolean;
 	mcp?: boolean;
@@ -65,6 +69,7 @@ interface Scenario {
 }
 
 async function delegate(t: TestContext, scenario: Scenario) {
+	const role = scenario.explorer ? 'explorer' : scenario.direct || scenario.readOnly ? 'proofreader' : 'worker';
 	const root = await realpath(await mkdtemp(join(tmpdir(),'scribe-child-skill-')));
 	const dir = join(root,'.agents','skills','manual-guide');
 	await mkdir(join(dir,'agents'),{recursive:true});
@@ -94,7 +99,7 @@ async function delegate(t: TestContext, scenario: Scenario) {
 		},
 	}) : undefined;
 	mcp?.reconcile();
-	const registry = createToolRegistry([subagentTools, skillTools, () => mcp ? createMcpTools(mcp) : []]);
+	const registry = createToolRegistry([subagentTools, skillTools, writeTools, () => mcp ? createMcpTools(mcp) : []]);
 	const toolCoordinator = createToolCoordinator(app, createToolExecutor(registry));
 	const parentRequests: ModelRequest[] = [], childRequests: ModelRequest[] = [];
 	let id: string;
@@ -102,32 +107,40 @@ async function delegate(t: TestContext, scenario: Scenario) {
 	const models = createModelCoordinator({contextLimits: () => ({contextWindow: 200000, maxTokens: 8000}), stream(request) {
 		if (request.sessionId === id) {
 			if (scenario.direct) {
-				assert.equal(sessions.subagents?.snapshot(id).agents[0]?.role, 'proofreader');
+				assert.equal(sessions.subagents?.snapshot(id).agents[0]?.role, role);
 				assert.ok(!request.tools.some(({ name }) => name === 'spawn_agent'));
 				parentRequests.push(request);
 				return respond(reviewResults(request));
 			}
 			parentRequests.push(request);
 			return respond(parentRequests.length === 1 ? [{id:'spawn',name:'spawn_agent',input:{message:scenario.child,
-				agent_type:scenario.readOnly ? 'proofreader' : 'worker',fork_turns:'none'}}] : reviewResults(request),
+				agent_type:role,fork_turns:scenario.forkCompacted ? 'all' : 'none'}}] : reviewResults(request),
 			parentRequests.length === 1 && scenario.afterParentReceives ? () => scenario.afterParentReceives!(dir) : undefined);
 		}
 		childRequests.push(request);
 		return respond(childRequests.length === 1 ? scenario.childCalls(skillId) : []);
 	}}, createContextBuilder(registry));
 	const runtime = { newState:createRunState, createAgent:bindAgent(createAgentLoop(models,toolCoordinator,mcp)),models,tools:toolCoordinator };
-	const sessions = createSessionController(app,settings,runtime,createConversationStore(join(root,'history')),undefined,undefined,undefined,skills);
+	const store = createConversationStore(join(root, 'history'));
+	const sessions = createSessionController(app,settings,runtime,store,undefined,undefined,undefined,skills);
 	t.after(async () => { sessions.dispose(); mcp?.dispose(); await rm(root,{recursive:true,force:true}); });
 	id = await sessions.createConversation();
+	if (scenario.forkCompacted) {
+		const task = createTask({ conversationId: id, instruction: '压缩前的材料', refs: [] });
+		await store.append(id, [{ type: 'start', task, model: { providerId: 'test', model: 'local' } },
+			{ type: 'messages', taskId: task.id, messages: [{ role: 'user', content: task.request.instruction }] },
+			{ type: 'finish', taskId: task.id, status: 'done', turn: 1 }]);
+		await store.saveManualCompaction(id, { throughTaskId: task.id, text: '核对规则已确认' });
+	}
 	const all = await skills.list();
 	const skillMentions: SkillMention[] = scenario.pick ? all.flatMap((skill) => {
 		const start = scenario.parent.indexOf('$'+skill.name);
 		return start < 0 ? [] : [{name:skill.name,id:skill.id,start,end:start + skill.name.length + 1}];
 	}) : [];
 	const result = await sessions.submit({conversationId:id,instruction:scenario.parent,refs:[],skillMentions,
-		...(scenario.direct && {target:{kind:'agent', id:'proofreader',label:'proofreader'} as const}),
+		...(scenario.direct && {target:{kind:'agent', id:role,label:role} as const}),
 		...(scenario.mcp && {target:{kind:'mcp', id:'example',label:'示例服务'} as const}),
-	}, {}, undefined,{executionMode:'ask'}).result;
+	}, {}, undefined,{executionMode:scenario.explorer ? 'full-access' : 'ask'}).result;
 	assert.equal(result.status,'done', result.error);
 	const agents = sessions.subagents!.snapshot(id).agents;
 	const child = agents[0];
@@ -136,6 +149,22 @@ async function delegate(t: TestContext, scenario: Scenario) {
 }
 
 const readExample = (id: string): ToolCall[] => [{id:'sample',name:'read_skill',input:{id,file:'example.md'}}];
+
+void test('继承完整对话的子任务沿用手动压缩摘要', async (t) => {
+	const result = await delegate(t, { parent: '分工核对。', child: '查找资料。', forkCompacted: true, childCalls: () => [] });
+	const inherited = result.childRequests[0]!.messages.map(({ content }) => content).join('\n');
+	assert.match(inherited, /核对规则已确认/u);
+	assert.doesNotMatch(inherited, /压缩前的材料/u);
+});
+
+for (const direct of [false, true]) {
+	void test(`完全访问下${direct ? '点选' : '委派'}的内置探索角色仍只读`, async (t) => {
+		const result = await delegate(t, { direct, explorer: true, parent: '查找资料。', child: '核对资料。', childCalls: () => [] });
+		assert.ok(result.parentRequests[0]?.tools.some(({ name }) => name === 'Write'));
+		assert.ok(result.childRequests.length);
+		assert.ok(result.childRequests.every(({ tools }) => !tools.some(({ name }) => name === 'Write')));
+	});
+}
 
 void test('用户直接选择的子 Agent 立即使用角色模型和点选技能，主聊天收取同一份结果', {timeout:10000}, async (t) => {
 	const result = await delegate(t, {direct:true, parent:'请用 $manual-guide 核对样本。', child:'', pick:true, childCalls:readExample});

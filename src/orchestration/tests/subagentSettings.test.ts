@@ -24,7 +24,7 @@ void test('subagent settings recover safe defaults and keep valid custom role ch
 			model: { providerId: 'test-provider', model: 'test-model', reasoning: 'high' }, readOnly: true,
 		}],
 	});
-	assert.equal(BUILTIN_SUBAGENT_ROLES.find(({ name }) => name === 'explorer')?.readOnly, undefined);
+	assert.equal(BUILTIN_SUBAGENT_ROLES.find(({ name }) => name === 'explorer')?.readOnly, true);
 });
 
 void test('subagent tools enforce scoped access and validate inputs before dispatch', async () => {
