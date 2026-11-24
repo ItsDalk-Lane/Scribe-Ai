@@ -3,7 +3,8 @@ import { basename, join, relative, sep } from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 import { RE2JS } from 're2js';
 import type { PreparedTool, ToolContext, ToolModule } from '../types';
-import { fileToolInput, readToolFile, requiredText } from './support/fileAccess';
+import { cacheLineBatches } from './support/cacheLines';
+import { fileToolInput, MAX_TEXT_BYTES, readToolFile, requiredText, TEXT_LINE_BREAK } from './support/fileAccess';
 import { compilePathGlob } from './support/pathGlob';
 import { authorizedLineRange, isWithinPath, recheckToolPath, resolveToolPath } from './support/pathUtils';
 import type { ResolvedToolPath } from './support/pathUtils';
@@ -123,24 +124,36 @@ interface GrepOptions {
 	offset: number;
 }
 
-async function* grepFile(ctx: ToolContext, file: ResolvedToolPath, text: string, options: GrepOptions): AsyncGenerator<string> {
-	const lines = text.split(/\r\n|\n|\r/);
-	if (lines[lines.length - 1] === '') lines.pop();
-	const [first, last] = authorizedLineRange(ctx, file) ?? [1, lines.length];
+async function* grepFile(ctx: ToolContext, file: ResolvedToolPath, options: GrepOptions, skipLine: () => void): AsyncGenerator<string> {
+	const [first, last] = authorizedLineRange(ctx, file) ?? [1, Infinity];
+	let batches: string[][] | AsyncIterable<string[]>;
+	if (file.cacheOutput) batches = cacheLineBatches(ctx, file, MAX_TEXT_BYTES + 1);
+	else {
+		const lines = (await readToolFile(ctx, file)).split(TEXT_LINE_BREAK);
+		if (lines.at(-1) === '') lines.pop();
+		batches = [lines];
+	}
 	let count = 0;
-	for (let index = first - 1; index < Math.min(last, lines.length); index++) {
-		if (index % 1024 === 0) {
-			await setImmediate();
-			ctx.signal.throwIfAborted();
+	let consumed = 0;
+	for await (const batch of batches) {
+		for (let i = Math.max(0, first - 1 - consumed); i < batch.length && consumed + i < last; i++) {
+			const index = consumed + i;
+			if (index % 1024 === 0) {
+				await setImmediate();
+				ctx.signal.throwIfAborted();
+			}
+			const line = batch[i]!;
+			if (line.length > MAX_TEXT_BYTES) { skipLine(); continue; }
+			if (!options.regex.test(line)) continue;
+			if (options.mode === 'files_with_matches') {
+				yield file.displayPath;
+				return;
+			}
+			count++;
+			if (options.mode === 'content') yield `${file.displayPath}:${options.showLineNumbers ? `${index + 1}:` : ''}${line}`;
 		}
-		const line = lines[index];
-		if (line === undefined || !options.regex.test(line)) continue;
-		if (options.mode === 'files_with_matches') {
-			yield file.displayPath;
-			return;
-		}
-		count++;
-		if (options.mode === 'content') yield `${file.displayPath}:${options.showLineNumbers ? `${index + 1}:` : ''}${line}`;
+		consumed += batch.length;
+		if (consumed >= last) break;
 	}
 	if (options.mode === 'count' && count) yield `${file.displayPath}:${count}`;
 }
@@ -148,36 +161,35 @@ async function* grepFile(ctx: ToolContext, file: ResolvedToolPath, text: string,
 async function grepSearch(ctx: ToolContext, target: ResolvedToolPath | undefined, options: GrepOptions): Promise<string> {
 	const results: string[] = [];
 	let omitted = 0;
+	let longLines = 0;
 	let offset = options.offset;
 	let length = 0;
 	let truncated = false;
 	search: for await (const file of searchFiles(ctx, target, options.fileMatches, () => omitted++)) {
-		let text: string;
 		try {
-			text = await readToolFile(ctx, file);
+			for await (const row of grepFile(ctx, file, options, () => longLines++)) {
+				if (offset > 0) {
+					offset--;
+					continue;
+				}
+				if ((options.limit > 0 && results.length === options.limit) || length >= RESULT_CHARACTERS - 200) {
+					truncated = true;
+					break search;
+				}
+				const remaining = RESULT_CHARACTERS - 200 - length;
+				const output = row.length > remaining ? `${row.slice(0, Math.max(0, remaining - 8))}…（行已截断）` : row;
+				results.push(output);
+				length += output.length + 1;
+			}
 		} catch {
 			ctx.signal.throwIfAborted();
 			omitted++;
-			continue;
-		}
-		for await (const row of grepFile(ctx, file, text, options)) {
-			if (offset > 0) {
-				offset--;
-				continue;
-			}
-			if ((options.limit > 0 && results.length === options.limit) || length >= RESULT_CHARACTERS - 200) {
-				truncated = true;
-				break search;
-			}
-			const remaining = RESULT_CHARACTERS - 200 - length;
-			const output = row.length > remaining ? `${row.slice(0, Math.max(0, remaining - 8))}…（行已截断）` : row;
-			results.push(output);
-			length += output.length + 1;
 		}
 	}
 	return [
 		...(results.length ? results : ['未找到匹配结果。']),
 		...(truncated ? [`还有匹配结果，可用 offset=${options.offset + results.length} 继续查看。`] : []),
+		...(longLines ? [`跳过 ${longLines} 行过长的输出，这些行未参与匹配。`] : []),
 		...(omitted ? [`跳过 ${omitted} 个无法读取的位置、过大的文件或非文本文件。`] : []),
 	].join('\n');
 }

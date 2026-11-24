@@ -11,6 +11,7 @@ import { createPermissionPolicy } from '../../orchestration/policies/permissions
 import { scribeDataPaths } from '../../orchestration/storage/paths';
 import { createReadDelivery } from '../../runtime/readDelivery';
 import { createToolExecutor } from '../executor';
+import { JobOutputRing } from '../external/jobOutput';
 import { createToolRegistry } from '../index';
 import { readTools } from '../readTools';
 import { searchTools } from '../searchTools';
@@ -169,6 +170,34 @@ void test('normal tools hide plugin data and only open explicit cached outputs f
 	assert.equal((await search('Grep', { path: paths.cache, pattern: 'sample output' })).isError, true);
 });
 
+void test('后台命令的大输出可在所属聊天中分页读取和搜索，普通笔记保留原大小限制', async (t) => {
+	const { cwd, context, run } = await fileToolsFixture(t);
+	const conversationId = context.task.request.conversationId;
+	context.permissions = await createPermissionPolicy(cwd, context.app.vault.configDir, [], () => true, 'ask');
+	const ring = new JobOutputRing({ cacheDirectory: scribeDataPaths(cwd).cache, conversationId });
+	t.after(() => ring.dispose());
+	const longLine = 'X'.repeat(2 * 1024 * 1024 + 1);
+	const body = 'a'.repeat(65_535) + '\r\n' + longLine + '\n末尾的汇总\n';
+	ring.appendText('stdout', body);
+	ring.end();
+	const [path] = ring.paths();
+	assert.ok(path);
+	const page = await run('Read', { file_path: path, offset: 2 });
+	assert.ok(page.length <= 100_000);
+	assert.match(page, /第 2 行过长/u);
+	assert.match(page, /offset=3/u);
+	assert.match(await run('Read', { file_path: path, offset: 3, limit: 1 }), /3\t末尾的汇总/u);
+	const grep = createToolExecutor(createToolRegistry([searchTools]));
+	const search = await grep.execute({ id: 'summary', name: 'Grep', input: { pattern: '汇总', path, output_mode: 'content' } }, context);
+	assert.match(search.content, /stdout\.log:3:末尾的汇总/u);
+	assert.match(search.content, /跳过 1 行过长/u);
+	assert.equal(context.readFiles.has(path), false);
+	context.task.request.conversationId = 'another';
+	await assert.rejects(run('Read', { file_path: path }), /未包含/u);
+	await writeFile(join(cwd, 'large.md'), body);
+	await assert.rejects(run('Read', { file_path: 'large.md' }), /2 MB/u);
+});
+
 void test('File tools read and write vault files and authorized external files', async (testContext) => {
 	const { directory, cwd, outside, usedVaultApi, context, prepare, run } = await fileToolsFixture(testContext);
 	const note = join(cwd, 'note.md');
@@ -183,6 +212,8 @@ void test('File tools read and write vault files and authorized external files',
 	const excerpt = await run('Read', { file_path: 'note.md' });
 	assert.match(excerpt, /2\tUnicode 😀$/);
 	assert.doesNotMatch(excerpt, /before|after/);
+	await writeFile(join(cwd, 'old-format.md'), 'one\rtwo\rthree\r');
+	assert.match(await run('Read', { file_path: 'old-format.md', offset: 2, limit: 1 }), /2\ttwo$/u);
 	await assert.rejects(prepare('Write', { file_path: 'note.md', content: 'test' }), /部分行/);
 	context.task.request.refs = [];
 	await assert.rejects(run('Read', { file_path: denied }), /未包含/);

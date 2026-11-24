@@ -43,7 +43,7 @@ export function toolAbsolutePath(cwd: string, input: string): string {
 
 /** 同时检查传入路径和实际地址，避免链接把操作带出授权范围。 */
 export async function resolveToolPath(
-	ctx: ToolContext,
+	ctx: Pick<ToolContext, 'cwd' | 'signal' | 'permissions' | 'task' | 'subagentId'>,
 	input: string,
 	operation: 'read' | 'write',
 	options?: { allowMissing?: boolean; requestApproval?: boolean; approvedRoot?: string; readCache?: boolean },

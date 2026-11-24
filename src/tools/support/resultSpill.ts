@@ -13,6 +13,7 @@ const RETRIEVAL = '用 Read 工具按 offset/limit 读取，或用 Grep 搜索�
 
 export const TOOL_SPILL_PREFIX = 'scribe-ai-tools-';
 export const SHELL_SPILL_PREFIX = 'scribe-ai-shell-';
+export const MAX_SHELL_SPILL_BYTES = 64 * 1024 * 1024;
 
 export interface SpillLocation {
 	cacheDirectory: string;

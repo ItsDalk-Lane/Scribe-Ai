@@ -9,6 +9,7 @@ import type { ResolvedToolPath } from './pathUtils';
 import { captureNoteChange } from './noteChange';
 
 export const MAX_TEXT_BYTES = 2 * 1024 * 1024;
+export const TEXT_LINE_BREAK = /\r\n|[\r\n]/u;
 const committingExternalFiles = new Set<string>();
 
 export function fileFingerprint(text: string): string {
@@ -34,7 +35,7 @@ export function checkTextSize(text: string): void {
 	if (text.includes('\0')) throw new Error('文件包含二进制数据，无法按文本处理。');
 }
 
-async function readDiskFile(ctx: ToolContext, path: ResolvedToolPath): Promise<Buffer> {
+export async function openToolFile(path: ResolvedToolPath) {
 	const file = await open(path.absolutePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
 	try {
 		const current = await file.stat();
@@ -42,7 +43,17 @@ async function readDiskFile(ctx: ToolContext, path: ResolvedToolPath): Promise<B
 			|| (path.cacheOutput && current.nlink !== 1)) {
 			throw new Error('文件位置或状态已变化，请重新确认。');
 		}
-		if (current.size > MAX_TEXT_BYTES) throw new Error('文件超过 2 MB 的文本处理限制。');
+		return { file, size: current.size };
+	} catch (error) {
+		await file.close();
+		throw error;
+	}
+}
+
+async function readDiskFile(ctx: ToolContext, path: ResolvedToolPath): Promise<Buffer> {
+	const { file, size } = await openToolFile(path);
+	try {
+		if (size > MAX_TEXT_BYTES) throw new Error('文件超过 2 MB 的文本处理限制。');
 		return await file.readFile({ signal: ctx.signal });
 	} finally {
 		await file.close();

@@ -2,7 +2,7 @@ import { Buffer } from 'node:buffer';
 import { closeSync, openSync, unlinkSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-import { createSpillDirectory, SHELL_SPILL_PREFIX } from '../support/resultSpill';
+import { createSpillDirectory, MAX_SHELL_SPILL_BYTES, SHELL_SPILL_PREFIX } from '../support/resultSpill';
 import type { SpillLocation } from '../support/resultSpill';
 import type { ShellOutputCursor } from './shellOutput';
 
@@ -14,8 +14,6 @@ const LIVE_JOB_BYTES = 262_144;
 const SETTLED_JOB_BYTES = 16_384;
 /** DSH executor memory cap per stream; a full spill starts once this is exceeded. */
 const SPILL_TRIGGER_BYTES = 64_000;
-/** Complete spill file cap per stream, matching the DSH executor. */
-const SPILL_STREAM_BYTES = 67_108_864;
 const GAP = '…（较早的输出已丢弃）\n';
 
 interface RingChunk {
@@ -144,7 +142,7 @@ class JobSpill {
 	write(channel: Channel, buffer: Buffer): void {
 		const file = this.files[channel];
 		if (!this.location || file.broken || buffer.length === 0) return;
-		if (file.written + file.pendingBytes + buffer.length > SPILL_STREAM_BYTES) {
+		if (file.written + file.pendingBytes + buffer.length > MAX_SHELL_SPILL_BYTES) {
 			this.breakFile(channel);
 			return;
 		}
