@@ -1,4 +1,4 @@
-import type { Workspace } from 'obsidian';
+import type { Workspace, WorkspaceLeaf } from 'obsidian';
 import { SUBAGENT_VIEW_TYPE } from '../constants';
 
 export type SubagentTabState = { conversationId: string; agentId: string; name: string };
@@ -11,12 +11,13 @@ export function readSubagentTabState(state: unknown): SubagentTabState | undefin
 	return undefined;
 }
 
-export class SubagentTabs {
+export class ConversationViews {
+	readonly sideChatParents = new Map<WorkspaceLeaf, string>();
 	private opening = new Map<string, Promise<void>>();
 
 	constructor(private workspace: Workspace) {}
 
-	open(target: SubagentTabState, unavailable: string): Promise<void> {
+	openSubagent(target: SubagentTabState, unavailable: string): Promise<void> {
 		const key = JSON.stringify([target.conversationId, target.agentId]);
 		const pending = this.opening.get(key);
 		if (pending) return pending;
@@ -47,6 +48,11 @@ export class SubagentTabs {
 	}
 
 	closeConversation(conversationId: string) {
+		for (const [leaf, parentId] of this.sideChatParents) {
+			if (parentId !== conversationId) continue;
+			this.sideChatParents.delete(leaf);
+			leaf.detach();
+		}
 		for (const leaf of this.workspace.getLeavesOfType(SUBAGENT_VIEW_TYPE)) {
 			if (leaf.getViewState().state?.conversationId === conversationId) leaf.detach();
 		}

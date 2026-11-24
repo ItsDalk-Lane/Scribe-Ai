@@ -230,12 +230,6 @@ export default function ChatTabs({ plugin, registerTabOpener, historyTrigger }: 
 
 	async function remove(id: string) {
 		await sessions.deleteConversation(id);
-		plugin.subagentTabs.closeConversation(id);
-		try {
-			await localState.forgetConversation(id);
-		} catch {
-			new Notice(text.saveFailed);
-		}
 		pendingTitles.current.delete(id);
 		refreshVersion.current++;
 		setIndex((previous) => previous.filter((row) => row.id !== id));

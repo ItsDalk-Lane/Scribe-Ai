@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Menu, type App } from 'obsidian';
+import { canResumeRun } from '../../orchestration/runResume';
 import type { ExecutionMode, SkillRegistry, SubagentController, SubagentSnapshot, SubagentView } from '../../types';
 import { toggleTimelineExpansion } from '../chatTimeline';
 import { questionBody, subagentChatTurns } from '../subagentTranscript';
@@ -215,7 +216,7 @@ export default function SubagentsPanel({ controller, conversationId, snapshot, o
 		if (agent.closed) actions.addItem((item) => item.setTitle(text.reopen)
 			.onClick(() => { void act(() => controller.reopen(conversationId, agent.id)); }));
 		else {
-			if (agent.status === 'interrupted') actions.addItem((item) => item.setTitle(uiText().chatResume)
+			if (agent.status === 'interrupted' && canResumeRun(agent.runs.at(-1))) actions.addItem((item) => item.setTitle(uiText().chatResume)
 				.onClick(() => { void act(() => controller.resume(conversationId, agent.id, executionMode)); }));
 			actions.addItem((item) => item.setTitle(text.close)
 				.onClick(() => { void act(() => controller.close(conversationId, agent.id)); }));

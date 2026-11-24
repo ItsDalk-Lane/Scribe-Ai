@@ -6,8 +6,8 @@ import type ScribeAiPlugin from '../main';
 import { MetricPopoverProvider } from './components/MetricPopover';
 import { SubagentDetail } from './components/SubagentsPanel';
 import { subagentUiText } from './subagentUiText';
-import { readSubagentTabState } from './subagentTabs';
-import type { SubagentTabState } from './subagentTabs';
+import { readSubagentTabState } from './conversationViews';
+import type { SubagentTabState } from './conversationViews';
 import { uiText } from './uiText';
 
 export class SubagentView extends ItemView {
