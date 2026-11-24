@@ -1,5 +1,4 @@
 import { Buffer } from 'node:buffer';
-import { realpath } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { MAX_REVIEW_MATERIAL_BYTES } from '../constants';
 import { readOnlySkillTools } from '../tools/skillTools';
@@ -31,7 +30,8 @@ export async function createRunContext(
 	const refs = sideChat ? task.request.refs.filter((ref) => isAbsolute(ref.path) && ref.kind === 'file' && ref.addedExternal)
 		: intent === 'review' ? [] : intent === 'plan'
 			? task.request.refs.filter(({ path }) => !isAbsolute(path) && isWithinPath(cwd, resolve(cwd, path))) : task.request.refs;
-	const permissions = await createPermissionPolicy(cwd, configDir, refs, toolsEnabled, sideChat || intent ? undefined : executionMode);
+	const permissions = await createPermissionPolicy(cwd, configDir, refs, toolsEnabled,
+		sideChat || intent ? undefined : executionMode, intent !== 'plan');
 	signal.throwIfAborted();
 	if (sideChat) {
 		return { ...options, task, sideChat, readFiles: new Map(), readDelivery, permissions: {
@@ -41,12 +41,9 @@ export async function createRunContext(
 		} };
 	}
 	if (intent) {
-		const vaultRoot = await realpath(cwd);
-		const protectedPaths = [resolve(cwd, configDir), resolve(vaultRoot, configDir)];
-		signal.throwIfAborted();
 		return { ...options, task, readFiles: new Map(), readDelivery, permissions: {
 			...permissions,
-			canRead: (path) => intent === 'plan' && permissions.canRead(path) && protectedPaths.every((dir) => !isWithinPath(dir, path)),
+			canRead: (path) => intent === 'plan' && permissions.canRead(path),
 			canWrite: () => false,
 			canCallTool: (tool) => intent === 'plan' && tool.isReadOnly && sideChatTools.has(tool.name) && permissions.canCallTool(tool),
 		} };

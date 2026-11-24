@@ -17,8 +17,9 @@ import { createRunContext } from '../../orchestration/runContext';
 import { createConversationStore } from '../../orchestration/storage/conversationStore';
 import { scribeDataPaths } from '../../orchestration/storage/paths';
 import type { NoteRef, ShellOutputPreview, ToolApproval, ToolContext } from '../../types';
-import { createToolLayer } from '..';
-import { hasMacShellSandbox } from '../external/macosShellSandbox';
+import { createToolLayer, createToolRegistry } from '..';
+import { createToolExecutor } from '../executor';
+import { hasMacShellSandbox, macShellSandboxArgs } from '../external/macosShellSandbox';
 import { JobOutputRing, renderRingRead } from '../external/jobOutput';
 import { ShellJobs, FOREGROUND_WAIT_MS } from '../external/shellJobs';
 import { captureShellOutput } from '../external/shellOutput';
@@ -63,6 +64,37 @@ void test('only main chat with tool calling enabled advertises the installed she
 		const advertised = request.tools.filter(({ name }) => shells.some((shell) => shell.name === name)).map(({ name }) => name);
 		assert.deepEqual(advertised, !sideChat && enabled ? installedShells : []);
 	}
+});
+
+void test('关闭模型工具开关后，三档权限都隐藏全部工具并在执行前拦住调用', async (t) => {
+	const { ctx } = await fixture(t);
+	const guarded = createToolExecutor(createToolRegistry([() => registry.all().map((tool) => ({
+		...tool, prepare: () => assert.fail('禁用的工具不应进入准备或执行阶段'),
+	}))]));
+	const builder = createContextBuilder(registry);
+	const options = { cwd: ctx.cwd, signal: ctx.signal, model: { providerId: 'test', model: 'test' }, observer: {} };
+	for (const mode of ['ask', 'auto-review', 'full-access'] as const) {
+		const run = await createRunContext(ctx.task, options, ctx.app.vault.configDir, () => false, false, mode);
+		assert.deepEqual((await builder.build(run, [], 100_000)).tools, []);
+		for (const { name } of registry.all()) {
+			const result = await guarded.execute({ id: name, name, input: {} }, { ...ctx, permissions: run.permissions });
+			assert.equal(result.isError, true);
+			assert.equal(result.content, `未授权使用工具：${name}`);
+		}
+	}
+});
+
+void test('计划模式沿用配置目录的真实位置，并保留通常可读的笔记', async (t) => {
+	const { ctx } = await fixture(t);
+	const actual = join(ctx.cwd, 'settings-directory');
+	await mkdir(actual);
+	await symlink(actual, join(ctx.cwd, ctx.app.vault.configDir), process.platform === 'win32' ? 'junction' : 'dir');
+	const task = { ...ctx.task, request: { ...ctx.task.request, intent: 'plan' as const, refs: [{ path: 'settings-directory', kind: 'folder' as const }] } };
+	const run = await createRunContext(task, { cwd: ctx.cwd, signal: ctx.signal, model: { providerId: 'test', model: 'test' }, observer: {} },
+		ctx.app.vault.configDir, () => true, false, 'full-access');
+	assert.equal(run.permissions.canRead(join(actual, 'workspace.json')), false);
+	assert.equal(run.permissions.canRead(join(ctx.cwd, ctx.app.vault.configDir, 'workspace.json')), false);
+	assert.equal(run.permissions.canRead(join(ctx.cwd, 'notes.md')), true);
 });
 
 void test('Windows advertises the PowerShell version it selects, preferring 7 over 5.1', async (t) => {
@@ -151,6 +183,17 @@ void test('Bash uses the vault by default and runs the exact approved command in
 	assert.equal((await execute(ctx, 'Bash', { command, cwd: denied })).isError, true);
 	assert.equal((await execute(ctx, 'Bash', { command: 'echo text\u202E' })).isError, true);
 	assert.equal(approvals.length, 3);
+});
+
+void test('配置受限终端前会重新核对插件私有目录和技能目录', async (t) => {
+	const { ctx } = await fixture(t);
+	const data = scribeDataPaths(ctx.cwd);
+	await writeFile(data.root, '');
+	await assert.rejects(macShellSandboxArgs(ctx), /数据目录位置已变化/u);
+	await rm(data.root);
+	await mkdir(data.root);
+	await writeFile(data.skills, '');
+	await assert.rejects(macShellSandboxArgs(ctx), /数据目录位置已变化/u);
 });
 
 void test('macOS Bash restricts vault commands until a single escalation is approved or full access is selected', {

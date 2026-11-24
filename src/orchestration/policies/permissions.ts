@@ -26,7 +26,7 @@ async function canonicalPath(path: string): Promise<string> {
 
 export async function createPermissionPolicy(
 	cwd: string, configDir: string, refs: NoteRef[], toolsEnabled: () => boolean = () => true,
-	executionMode?: ExecutionMode,
+	executionMode?: ExecutionMode, allowConfigReferences = true,
 ): Promise<PermissionPolicy> {
 	const vaultRoot = await realpath(cwd);
 	const roots = [cwd, vaultRoot];
@@ -48,8 +48,8 @@ export async function createPermissionPolicy(
 	const matchingReferences = (path: string) => explicit.filter(({ ref, paths }) => paths.some((item) => (
 			ref.kind === 'folder' ? includesPath(item, path) : relative(item, path) === ''
 	)));
-	const isProtected = (path: string) => protectedRoots.some((root) => includesPath(root, path));
 	const pathKey = (path: string) => process.platform === 'darwin' || process.platform === 'win32' ? path.toLowerCase() : path;
+	const isProtected = (path: string) => protectedRoots.some((root) => includesPath(pathKey(root), pathKey(path)));
 	const isScribePrivate = (path: string, forWrite = false) => privateRoots.some((root) => {
 		const target = pathKey(path);
 		const base = pathKey(root);
@@ -59,6 +59,7 @@ export async function createPermissionPolicy(
 
 	function access(path: string, forWrite: boolean): boolean {
 		if (isScribePrivate(path, forWrite)) return false;
+		if (!allowConfigReferences && isProtected(path)) return false;
 		if (forWrite && executionMode !== 'full-access' && roots.some((root) =>
 			includesPath(root, path) && skillWriteProtected(vaultRoot, resolve(vaultRoot, relative(root, path))))) return false;
 		const matches = matchingReferences(path);

@@ -32,7 +32,7 @@ export function createToolCoordinator(app: App, executor: ToolExecutor): ToolCoo
 					}),
 					approve: approve && (async (approval, identity) => {
 						const requested = performance.now();
-						const trackReview = (approval.kind === 'shell' || approval.kind === 'mcp') && permissions.executionMode === 'auto-review';
+						const trackReview = permissions.executionMode === 'auto-review';
 						try {
 							const allowed = await approve(approval);
 							if (trackReview) approvalReview = allowed ? 'approved' : 'incomplete';

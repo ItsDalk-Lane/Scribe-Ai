@@ -68,16 +68,16 @@ export const ToolActivityRow = memo(function ToolActivityRow({
 	const text = uiText();
 	const kind = toolKind(call.name);
 	const shellStatus = result?.shellStatus;
-	const approvalReview = kind === 'terminal' ? result?.approvalReview : undefined;
+	const approvalReview = result?.approvalReview;
 	const reviewLabel = approvalReview && text.chatShellReview[approvalReview];
 	const reviewPrevented = !shellStatus && (approvalReview === 'denied' || approvalReview === 'incomplete');
-	const notApproved = kind === 'terminal' && !shellStatus && result?.isError && result.content === TOOL_NOT_APPROVED;
-	const shellLabel = shellStatus ? text.chatShellStatus[shellStatus]
+	const notApproved = !shellStatus && result?.isError && result.content === TOOL_NOT_APPROVED;
+	const executionLabel = shellStatus ? text.chatShellStatus[shellStatus]
 		: reviewPrevented ? text.chatShellNotRun : notApproved ? text.chatShellNotApproved : undefined;
 	const state = resolved ? 'resolved' : skipped || notApproved || reviewPrevented ? 'skipped' : shellStatus === 'stopped' ? 'stopped'
 		: result ? (result.isError ? 'error' : 'success')
 		: status === 'awaiting-approval' ? 'waiting' : status === 'running' ? 'running' : 'stopped';
-	const label = shellLabel ? (resolved ? `${shellLabel} · ${text.chatResolved}` : shellLabel)
+	const label = executionLabel ? (resolved ? `${executionLabel} · ${text.chatResolved}` : executionLabel)
 		: resolved ? text.chatResolved : skipped ? text.chatToolSkipped
 		: result ? (result.isError ? text.phaseError : text.phaseDone) : statusLabel;
 	const outcome = reviewLabel ? `${reviewLabel} · ${label}` : label;
@@ -92,7 +92,7 @@ export const ToolActivityRow = memo(function ToolActivityRow({
 			expanded={expanded} onToggle={onToggle} title={title} accessibilityLabel={title}
 			preview={state === 'running' && shellOutput && <ShellPreview output={shellOutput} />}
 			end={<span className="scribe-tool-status" aria-hidden="true">
-				<ChatIcon name={toolStatusIcons[state]} />{reviewLabel ? outcome : shellLabel}
+				<ChatIcon name={toolStatusIcons[state]} />{reviewLabel ? outcome : executionLabel}
 			</span>}>
 			<div className="scribe-tool-body">
 				<ToolInput app={app} call={call} />
