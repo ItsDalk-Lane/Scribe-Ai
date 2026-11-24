@@ -27,6 +27,7 @@ export default function ApprovalView({ approval, source }: { approval: ChatAppro
 	const shell = approval.kind === 'shell';
 	const access = approval.kind === 'access';
 	const mcp = approval.kind === 'mcp';
+	const webSearch = approval.kind === 'web-search';
 	const title = access ? text.chatApprovalAccess : approval.title === '创建文件' ? text.chatApprovalCreate
 		: approval.title === '修改文件' ? text.chatApprovalEdit : approval.title;
 	return (
@@ -44,8 +45,9 @@ export default function ApprovalView({ approval, source }: { approval: ChatAppro
 				{shell && <p className="scribe-chat-disclosure">{text.chatShellDisclosure}</p>}
 				{shell && approval.background && <p className="scribe-chat-disclosure">{text.chatBackgroundApproval}</p>}
 				{access && <p className="scribe-chat-disclosure">{text.chatApprovalPathDisclosure}</p>}
-				{approval.after !== undefined && (shell || mcp ? <div>
-					<strong>{mcp ? (tr('将发送的参数', 'Arguments to send')) : text.chatCommand}</strong>
+				{approval.after !== undefined && (shell || mcp || webSearch ? <div>
+					<strong>{webSearch ? tr('将发送的搜索词', 'Search query to send')
+						: mcp ? tr('将发送的参数', 'Arguments to send') : text.chatCommand}</strong>
 					<pre className="scribe-chat-pre" tabIndex={0}>{approval.after}</pre>
 				</div> : <FileChanges before={approval.before} after={approval.after} />)}
 			</div>

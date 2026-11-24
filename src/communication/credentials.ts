@@ -16,7 +16,7 @@ export function credentialIdForProvider(providerId: string): string {
 	return `${SECRET_PREFIX}${providerId}`;
 }
 
-function parseCredential(secret: string | null): Credential | undefined {
+export function parseCredential(secret: string | null): Credential | undefined {
 	if (!secret) return undefined;
 	if (!secret.trimStart().startsWith('{')) return { type: 'api_key', key: secret };
 	const value = JSON.parse(secret) as Partial<Credential>;

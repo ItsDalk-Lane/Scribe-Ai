@@ -3,6 +3,7 @@ import type ScribeAiPlugin from '../main';
 import type { ChatLocation } from '../types';
 import { renderModelSettings } from './ModelSettings';
 import { renderMcpSettings } from './McpSettings';
+import { renderServiceSettings } from './ServiceSettings';
 import { renderSubagentSettings } from './SubagentSettings';
 import { CustomInstructionsEditor, renderWritingRulesSettings } from './WritingRulesSettings';
 import { subagentSettingsText } from './subagentSettingsText';
@@ -11,8 +12,8 @@ import { tr } from './skills/dialog';
 import { renderSkillSettings } from './skills/skillUi';
 import type { SkillPageHandle } from './skills/skillUi';
 
-type SettingsSection = 'general' | 'personalization' | 'models' | 'skills' | 'subagents' | 'mcp' | 'advanced';
-const SECTIONS: readonly SettingsSection[] = ['general', 'personalization', 'models', 'skills', 'subagents', 'mcp', 'advanced'];
+type SettingsSection = 'general' | 'personalization' | 'models' | 'services' | 'skills' | 'subagents' | 'mcp' | 'advanced';
+const SECTIONS: readonly SettingsSection[] = ['general', 'personalization', 'models', 'services', 'skills', 'subagents', 'mcp', 'advanced'];
 
 /** 设置界面：通用、模型配置与高级网络/诊断分开，避免主配置页过载 */
 export class ScribeAiSettingTab extends PluginSettingTab {
@@ -20,6 +21,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 	private skillPage?: SkillPageHandle;
 	private instructionsEditor?: CustomInstructionsEditor;
 	private mcpDispose?: () => void;
+	private servicesDispose?: () => void;
 	private diagnosticsDispose?: () => void;
 
 	constructor(
@@ -36,6 +38,8 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		this.skillPage = undefined;
 		this.mcpDispose?.();
 		this.mcpDispose = undefined;
+		this.servicesDispose?.();
+		this.servicesDispose = undefined;
 		this.diagnosticsDispose?.();
 		this.diagnosticsDispose = undefined;
 		containerEl.empty();
@@ -44,6 +48,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		const transport = this.plugin.services.communication.transport;
 		const text = uiText();
 		const skillsTab = tr('技能', 'Skills');
+		const servicesTab = tr('服务', 'Services');
 		const subagentsTab = subagentSettingsText().tab;
 		const phaseLabels = {
 			connecting: text.phaseConnecting,
@@ -56,7 +61,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 
 		const tabList = containerEl.createDiv({
 			cls: 'scribe-settings-tabs',
-			attr: { role: 'tablist', 'aria-label': `${text.generalTab} / ${text.personalizationTab} / ${text.modelsTab} / ${skillsTab} / ${subagentsTab} / MCP / ${text.advancedTab}` },
+			attr: { role: 'tablist', 'aria-label': `${text.generalTab} / ${text.personalizationTab} / ${text.modelsTab} / ${servicesTab} / ${skillsTab} / ${subagentsTab} / MCP / ${text.advancedTab}` },
 		});
 		const panels: Record<SettingsSection, HTMLDivElement> = {
 			general: containerEl.createDiv({
@@ -70,6 +75,10 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 			models: containerEl.createDiv({
 				cls: 'scribe-settings-panel',
 				attr: { role: 'tabpanel', id: 'scribe-ai-settings-models' },
+			}),
+			services: containerEl.createDiv({
+				cls: 'scribe-settings-panel',
+				attr: { role: 'tabpanel', id: 'scribe-ai-settings-services', 'aria-labelledby': 'scribe-ai-settings-tab-services' },
 			}),
 			skills: containerEl.createDiv({
 				cls: 'scribe-settings-panel',
@@ -103,6 +112,11 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 				cls: 'scribe-settings-tab',
 				text: text.modelsTab,
 				attr: { role: 'tab', id: 'scribe-ai-settings-tab-models', 'aria-controls': 'scribe-ai-settings-models' },
+			}),
+			services: tabList.createDiv({
+				cls: 'scribe-settings-tab',
+				text: servicesTab,
+				attr: { role: 'tab', id: 'scribe-ai-settings-tab-services', 'aria-controls': 'scribe-ai-settings-services' },
 			}),
 			skills: tabList.createDiv({
 				cls: 'scribe-settings-tab',
@@ -223,11 +237,18 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		};
 		void this.plugin.services.orchestration.skills.library.list().then((skills) => updateSkillWarning(skills.filter((s) => s.error).length)).catch(() => {});
 		const activate = (section: SettingsSection, focus = false) => {
+			if (this.activeSection === 'services' && section !== 'services') {
+				this.servicesDispose?.();
+				this.servicesDispose = undefined;
+				panels.services.empty();
+				rendered.delete('services');
+			}
 			this.activeSection = section;
 			if (!rendered.has(section)) {
 				if (section === 'general') renderGeneral();
 				else if (section === 'personalization') renderWritingRulesSettings(panels.personalization, text, editInstructions);
 				else if (section === 'models') renderModels();
+				else if (section === 'services') this.servicesDispose = renderServiceSettings(panels.services, this.plugin);
 				else if (section === 'skills') this.skillPage = renderSkillSettings(this.plugin, panels.skills, updateSkillWarning);
 				else if (section === 'subagents') renderSubagentSettings(panels.subagents, this.plugin, text);
 				else if (section === 'mcp') this.mcpDispose = renderMcpSettings(panels.mcp, this.plugin);
@@ -283,6 +304,8 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		this.skillPage = undefined;
 		this.mcpDispose?.();
 		this.mcpDispose = undefined;
+		this.servicesDispose?.();
+		this.servicesDispose = undefined;
 		this.diagnosticsDispose?.();
 		this.diagnosticsDispose = undefined;
 		super.hide();

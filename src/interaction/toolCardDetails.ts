@@ -10,6 +10,7 @@ export function toolKind(name: string): ToolKind {
 		case 'Edit': return 'edit';
 		case 'NotebookEdit': return 'notebook';
 		case 'Glob':
+		case 'web_search':
 		case 'Grep': return 'search';
 		case 'Bash':
 		case 'PowerShell': return 'terminal';
@@ -53,6 +54,7 @@ export function actionTarget(call: ToolCall): string | undefined {
 }
 
 export function toolHeadingTarget(call: ToolCall, vaultPath: string): string | undefined {
+	if (call.name === 'web_search') return toolTextField(call.input, 'query');
 	const kind = toolKind(call.name);
 	if (kind === 'terminal') {
 		const command = field(call.input, 'command');
