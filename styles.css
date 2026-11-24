@@ -3100,13 +3100,23 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 
 .scribe-models-header {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: flex-start;
 	justify-content: space-between;
 	gap: 16px;
 }
 
+.scribe-models-header-actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-inline-start: auto;
+}
+
 .scribe-models-heading {
 	display: flex;
+	flex: 1 1 200px;
 	flex-direction: column;
 	gap: 4px;
 }
@@ -3872,9 +3882,14 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	font-weight: var(--font-semibold);
 }
 
-.scribe-provider-icon-tile svg {
+.scribe-provider-icon-tile svg,
+.scribe-provider-icon-tile img {
 	width: 18px;
 	height: 18px;
+}
+
+.scribe-provider-icon-tile img {
+	object-fit: contain;
 }
 
 .scribe-add-provider-label {
@@ -4090,19 +4105,34 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	display: flex;
 	min-width: 0;
 	flex: 1;
-	flex-direction: column;
-	gap: 3px;
+	align-items: center;
+	gap: 8px;
 }
 
-.scribe-model-panel-details {
+.scribe-model-panel-capabilities {
 	display: flex;
-	flex-wrap: wrap;
-	column-gap: 10px;
-	row-gap: 2px;
+	flex-shrink: 0;
+	align-items: center;
+	gap: 6px;
+	margin-left: auto;
 	color: var(--text-muted);
-	font-size: var(--font-ui-smaller);
-	font-variant-numeric: tabular-nums;
-	overflow-wrap: anywhere;
+}
+
+.scribe-model-panel-capabilities [data-capability] {
+	display: inline-flex;
+	color: color-mix(in srgb, var(--scribe-capability-color) 68%, var(--text-normal));
+}
+
+.scribe-model-panel-capabilities [data-capability="eye"] { --scribe-capability-color: #00b96b; }
+.scribe-model-panel-capabilities [data-capability="ear"] { --scribe-capability-color: #13c2c2; }
+.scribe-model-panel-capabilities [data-capability="video"] { --scribe-capability-color: #722ed1; }
+.scribe-model-panel-capabilities [data-capability="lightbulb"] { --scribe-capability-color: #6372bd; }
+.scribe-model-panel-capabilities [data-capability="wrench"] { --scribe-capability-color: #f18737; }
+.scribe-model-panel-capabilities [data-capability="globe"] { --scribe-capability-color: #1677ff; }
+
+.scribe-model-panel-capabilities svg {
+	width: var(--icon-s, 16px);
+	height: var(--icon-s, 16px);
 }
 
 .scribe-model-panel-name {
@@ -4208,6 +4238,18 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	border-color: var(--interactive-accent);
 	background: var(--interactive-accent);
 	color: var(--text-on-accent);
+}
+
+.scribe-choice-button.scribe-input-modality {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.scribe-input-modality svg {
+	display: block;
+	width: var(--icon-s, 16px);
+	height: var(--icon-s, 16px);
 }
 
 .scribe-form-control.scribe-number-control {

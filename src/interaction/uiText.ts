@@ -1,7 +1,8 @@
 import { getLanguage } from 'obsidian';
 import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 import { isBuiltInThinkingLevel } from '../orchestration/settings/thinking';
-import type { ContextCompaction, ShellStatus, ToolReviewStatus } from '../types';
+import type { ContextCompaction, ModelConnection, ModelConnectionIssue, ShellStatus, ToolReviewStatus } from '../types';
+import type { ModelCapabilityIcon } from './modelCapabilityIcons';
 
 export interface UiText {
 	openChatCommand: string;
@@ -72,6 +73,13 @@ export interface UiText {
 	baseUrl: string;
 	protocol: string;
 	protocolAuto: string;
+	modelProtocolUnknown: string;
+	modelProtocolAuto: string;
+	modelProtocolAutomatic: string;
+	modelAddressUnknown: string;
+	modelAddressFromAuth: string;
+	modelConnectionSources: Record<ModelConnection['source'], string>;
+	modelConnectionIssues: Record<ModelConnectionIssue, string>;
 	baseUrlNone: string;
 	baseUrlRequired: string;
 	models: string;
@@ -80,6 +88,7 @@ export interface UiText {
 	modelsFromProvider: string;
 	modelsFromPi: string;
 	modelsFromBundled: string;
+	modelsStale: string;
 	selectedModels: string;
 	addModel: string;
 	refreshing: string;
@@ -98,8 +107,12 @@ export interface UiText {
 	inputModality: string;
 	outputModality: string;
 	capabilities: string;
+	modelCapabilityLabels: Record<ModelCapabilityIcon, string>;
 	capabilityReasoning: string;
 	capabilityTools: string;
+	capabilityStructuredOutput: string;
+	capabilityConnectionUnsupported: string;
+	capabilityStatus: { supported: string; unsupported: string; unknown: string; conflict: string; manual: string; jsonOnly: string; videoUrl: string };
 	capabilityStructured: string;
 	thinkingLevel: string;
 	thinkingLevelNames: Record<ModelThinkingLevel, string>;
@@ -121,6 +134,8 @@ export interface UiText {
 	noModelsMatch: string;
 	noModelsDiscovered: string;
 	loadingModels: string;
+	modelCatalogUnavailable: string;
+	modelCatalogReadFailed: string;
 	back: string;
 	modelConfiguration: string;
 	defaults: string;
@@ -128,8 +143,10 @@ export interface UiText {
 	invalidModelConfiguration: string;
 	duplicateModelId: string;
 	refreshModels: string;
+	refreshModelsDescription: string;
 	refreshingModels: string;
 	modelsRefreshed: string;
+	modelsRefreshPartial: string;
 	refreshModelsFailed: string;
 	searchProviders: string;
 	noMatchingProviders: string;
@@ -466,7 +483,7 @@ const EN: UiText = {
 	noModelsAdded: 'No models added',
 	credentialReady: 'Credential configured',
 	credentialMissing: 'Credential not configured',
-	includeProviderModels: 'Include this provider’s model',
+	includeProviderModels: 'Make this provider’s models available in chat',
 	editCredential: 'Edit credential',
 	configureModel: 'Configure model',
 	removeModel: 'Remove model',
@@ -485,14 +502,34 @@ const EN: UiText = {
 	baseUrl: 'Base URL',
 	protocol: 'API protocol',
 	protocolAuto: 'Follow each model\'s protocol',
+	modelProtocolUnknown: 'Protocol unconfirmed',
+	modelProtocolAuto: 'Select automatically',
+	modelProtocolAutomatic: '{protocol} (automatic)',
+	modelAddressUnknown: 'Enter the base URL for this protocol',
+	modelAddressFromAuth: 'Determined by the Azure connection',
+	modelConnectionSources: {
+		catalog: 'Connection from the model catalog.',
+		compatible: 'Using a compatible connection. This model has no explicit catalog entry for the connection.',
+		configured: 'Using your connection settings.',
+		unresolved: 'Connection unconfirmed.',
+	},
+	modelConnectionIssues: {
+		'unknown-provider': 'The model provider is unavailable.',
+		'missing-protocol': 'The model’s API protocol is unconfirmed. Select a protocol to connect.',
+		'unsupported-protocol': 'This API protocol is unsupported. Select a different protocol.',
+		'missing-address': 'Enter the base URL for this protocol.',
+		'invalid-address': 'Enter a valid HTTP or HTTPS base URL.',
+		'incompatible-address': 'The base URL does not match the API protocol or OpenCode plan. Correct or clear it.',
+	},
 	baseUrlNone: 'Models of this provider use different addresses, so there is no single default.',
 	baseUrlRequired: 'Fill in the base URL first',
 	models: 'Models',
 	fetchModels: 'Fetch models',
-	fetchModelsDescription: 'Refresh the model list. Built-in providers also use Pi and Models.dev to check capabilities.',
+	fetchModelsDescription: 'Read the model list from this vault’s saved data.',
 	modelsFromProvider: 'Model list from the provider',
 	modelsFromPi: 'Model list from Pi',
 	modelsFromBundled: 'Model list from the bundled catalog',
+	modelsStale: 'Showing the last saved list',
 	selectedModels: 'Selected models',
 	addModel: 'Add model',
 	refreshing: 'Loading…',
@@ -511,8 +548,13 @@ const EN: UiText = {
 	inputModality: 'Input modality',
 	outputModality: 'Output modality',
 	capabilities: 'Capabilities',
+	modelCapabilityLabels: { eye: 'Vision', ear: 'Audio input', video: 'Video input', 'file-text': 'PDF input', lightbulb: 'Reasoning', wrench: 'Tools', braces: 'Structured output' },
+	capabilityStatus: { supported: 'Supported', unsupported: 'Unsupported', unknown: 'Unconfirmed', conflict: 'Conflicting sources',
+		manual: 'Manual setting', jsonOnly: 'JSON is advertised. JSON Schema is unconfirmed.', videoUrl: 'This connection accepts HTTPS video links.' },
 	capabilityReasoning: 'Reasoning',
 	capabilityTools: 'Tool calling',
+	capabilityStructuredOutput: 'Structured output',
+	capabilityConnectionUnsupported: 'Unavailable on this connection.',
 	capabilityStructured: 'Structured output',
 	thinkingLevel: 'Thinking level',
 	thinkingLevelNames: { off: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Very high', max: 'Maximum' },
@@ -532,18 +574,22 @@ const EN: UiText = {
 	add: 'Add',
 	searchAvailableModels: 'Search available models…',
 	noModelsMatch: 'No models match the current filters.',
-	noModelsDiscovered: 'No models discovered — enter a model ID above or fetch models.',
+	noModelsDiscovered: 'No models in the saved list. Enter a model ID above.',
 	loadingModels: 'Loading models…',
+	modelCatalogUnavailable: 'No saved model data for this connection. Add a model by ID, save, then select Update model data in model settings.',
+	modelCatalogReadFailed: 'Could not read the saved model data.',
 	back: 'Back',
 	modelConfiguration: 'Model configuration',
 	defaults: 'Defaults',
 	modelConfigSaveNote: 'Saving updates this model and the agent run limits.',
 	invalidModelConfiguration: 'Enter a model ID and valid integer limits.',
 	duplicateModelId: 'This model ID is already in the list.',
-	refreshModels: 'Refresh model catalog',
-	refreshingModels: 'Refreshing…',
-	modelsRefreshed: 'Model catalog refreshed.',
-	refreshModelsFailed: 'Failed to refresh model catalog',
+	refreshModels: 'Update model data',
+	refreshModelsDescription: 'Update this vault’s model data from provider catalogs, Pi, and Models.dev.',
+	refreshingModels: 'Updating model data…',
+	modelsRefreshed: 'Model data updated.',
+	modelsRefreshPartial: 'Some model data could not be updated. The previous data is still available.',
+	refreshModelsFailed: 'Could not update model data.',
 	searchProviders: 'Search providers or models',
 	noMatchingProviders: 'No providers or models match your search.',
 	configureProvider: 'Configure provider',
@@ -609,7 +655,7 @@ const EN: UiText = {
 	chatArchiveUnsaved: 'This chat has no saved messages to archive.',
 	chatArchiveError: 'Could not update the chat’s archive status.',
 	chatDeleteConversation: 'Delete chat',
-	chatDeleteConfirm: 'Permanently delete “{title}” and all of its messages? This cannot be undone.',
+	chatDeleteConfirm: 'Permanently delete “{title}” and all of its messages? This cannot be undone. Its side chat will also close and any unsent side-chat draft will be lost.',
 	chatRenameError: 'Could not save the chat title.',
 	chatDeleteError: 'Could not delete the chat.',
 	chatNewTab: 'New tab',
@@ -879,7 +925,7 @@ const ZH_CN: UiText = {
 	noModelsAdded: '尚未添加模型',
 	credentialReady: '凭据已配置',
 	credentialMissing: '凭据未配置',
-	includeProviderModels: '启用此服务商的模型',
+	includeProviderModels: '在聊天中启用此服务商的模型',
 	editCredential: '编辑凭据',
 	configureModel: '配置模型',
 	removeModel: '移除模型',
@@ -898,14 +944,34 @@ const ZH_CN: UiText = {
 	baseUrl: 'Base URL',
 	protocol: 'API 协议',
 	protocolAuto: '跟随各模型自带协议',
+	modelProtocolUnknown: '协议未确认',
+	modelProtocolAuto: '自动选择协议',
+	modelProtocolAutomatic: '{protocol}（自动）',
+	modelAddressUnknown: '填写此协议对应的 Base URL',
+	modelAddressFromAuth: '由 Azure 连接配置决定',
+	modelConnectionSources: {
+		catalog: '使用模型目录中的连接信息。',
+		compatible: '使用兼容连接，目录没有提供此模型的专属连接信息。',
+		configured: '使用手动配置的连接。',
+		unresolved: '连接未确认。',
+	},
+	modelConnectionIssues: {
+		'unknown-provider': '找不到模型服务商。',
+		'missing-protocol': '无法确认此模型的 API 协议，请选择协议。',
+		'unsupported-protocol': '插件尚未接通此 API 协议，请重新选择。',
+		'missing-address': '请填写此协议对应的 Base URL。',
+		'invalid-address': '请输入有效的 HTTP 或 HTTPS Base URL。',
+		'incompatible-address': 'Base URL 与所选协议或 OpenCode 套餐不匹配，请更正地址或清空以自动选择。',
+	},
 	baseUrlNone: '该服务商各模型地址不一致，没有统一的默认地址。',
 	baseUrlRequired: '请先填写 Base URL',
 	models: '模型',
 	fetchModels: '获取模型',
-	fetchModelsDescription: '刷新模型列表。预置服务商会结合 Pi 和 Models.dev 核对能力。',
+	fetchModelsDescription: '从当前笔记库保存的模型数据中读取列表。',
 	modelsFromProvider: '模型列表来自服务商',
 	modelsFromPi: '模型列表来自 Pi',
 	modelsFromBundled: '模型列表来自插件内置目录',
+	modelsStale: '正在显示上次保存的列表',
 	selectedModels: '已选模型',
 	addModel: '添加模型',
 	refreshing: '加载中…',
@@ -924,8 +990,13 @@ const ZH_CN: UiText = {
 	inputModality: '输入模态',
 	outputModality: '输出模态',
 	capabilities: '能力',
+	modelCapabilityLabels: { eye: '视觉', ear: '音频', video: '视频', 'file-text': 'PDF 输入', lightbulb: '推理', wrench: '工具', braces: '结构化输出' },
+	capabilityStatus: { supported: '已确认支持', unsupported: '已确认不支持', unknown: '资料未确认', conflict: '资料来源有冲突',
+		manual: '手动设置', jsonOnly: '目录声明支持 JSON，固定 JSON Schema 未确认。', videoUrl: '此连接接受 HTTPS 视频链接。' },
 	capabilityReasoning: '推理/思考',
 	capabilityTools: '工具调用',
+	capabilityStructuredOutput: '结构化输出',
+	capabilityConnectionUnsupported: '此连接暂不支持该能力。',
 	capabilityStructured: '结构化输出',
 	thinkingLevel: '推理档位',
 	thinkingLevelNames: { off: '关闭', minimal: '极低', low: '轻度', medium: '中', high: '高', xhigh: '极高', max: '最高' },
@@ -945,18 +1016,22 @@ const ZH_CN: UiText = {
 	add: '添加',
 	searchAvailableModels: '搜索可用模型…',
 	noModelsMatch: '没有符合当前筛选条件的模型。',
-	noModelsDiscovered: '尚未发现模型，请在上方输入模型 ID 或获取模型。',
+	noModelsDiscovered: '已保存的列表里没有模型，可以在上方输入模型 ID。',
 	loadingModels: '正在加载模型…',
+	modelCatalogUnavailable: '这个连接还没有本地模型数据。可以先手动添加模型并保存，再到模型设置点击「更新模型数据」。',
+	modelCatalogReadFailed: '无法读取本地模型数据。',
 	back: '返回',
 	modelConfiguration: '模型配置',
 	defaults: '默认值',
 	modelConfigSaveNote: '保存会更新当前模型和 Agent 运行限制。',
 	invalidModelConfiguration: '请输入模型 ID 和有效的整数限制。',
 	duplicateModelId: '列表中已存在这个模型 ID。',
-	refreshModels: '刷新模型目录',
-	refreshingModels: '正在刷新…',
-	modelsRefreshed: '模型目录已刷新。',
-	refreshModelsFailed: '刷新模型目录失败',
+	refreshModels: '更新模型数据',
+	refreshModelsDescription: '从服务商目录、Pi 和 Models.dev 更新当前笔记库的模型数据。',
+	refreshingModels: '正在更新模型数据…',
+	modelsRefreshed: '模型数据已更新。',
+	modelsRefreshPartial: '部分模型数据更新失败，已有资料仍可使用。',
+	refreshModelsFailed: '无法更新模型数据。',
 	searchProviders: '搜索服务商或模型',
 	noMatchingProviders: '没有匹配的服务商或模型。',
 	configureProvider: '配置服务商',
@@ -1022,7 +1097,7 @@ const ZH_CN: UiText = {
 	chatArchiveUnsaved: '这段对话没有可归档的消息。',
 	chatArchiveError: '无法更新对话的归档状态。',
 	chatDeleteConversation: '删除对话',
-	chatDeleteConfirm: '永久删除「{title}」及其全部消息？删除后无法撤销。',
+	chatDeleteConfirm: '永久删除「{title}」及其全部消息？删除后无法撤销。如果开着这段对话的侧聊，它也会关闭，未发送的侧聊草稿将丢失。',
 	chatRenameError: '无法保存对话标题。',
 	chatDeleteError: '无法删除对话。',
 	chatNewTab: '新建标签页',
@@ -1292,7 +1367,7 @@ const ZH_TW: UiText = {
 	noModelsAdded: '尚未新增模型',
 	credentialReady: '憑證已設定',
 	credentialMissing: '憑證未設定',
-	includeProviderModels: '啟用此服務商的模型',
+	includeProviderModels: '在聊天中啟用此服務商的模型',
 	editCredential: '編輯憑證',
 	configureModel: '設定模型',
 	removeModel: '移除模型',
@@ -1311,14 +1386,34 @@ const ZH_TW: UiText = {
 	baseUrl: 'Base URL',
 	protocol: 'API 協定',
 	protocolAuto: '跟隨各模型自帶協定',
+	modelProtocolUnknown: '協定未確認',
+	modelProtocolAuto: '自動選擇協定',
+	modelProtocolAutomatic: '{protocol}（自動）',
+	modelAddressUnknown: '填寫此協定對應的 Base URL',
+	modelAddressFromAuth: '由 Azure 連線設定決定',
+	modelConnectionSources: {
+		catalog: '使用模型目錄中的連線資訊。',
+		compatible: '使用相容連線，目錄沒有提供此模型的專屬連線資訊。',
+		configured: '使用手動設定的連線。',
+		unresolved: '連線未確認。',
+	},
+	modelConnectionIssues: {
+		'unknown-provider': '找不到模型服務商。',
+		'missing-protocol': '無法確認此模型的 API 協定，請選擇協定。',
+		'unsupported-protocol': '外掛尚未接通此 API 協定，請重新選擇。',
+		'missing-address': '請填寫此協定對應的 Base URL。',
+		'invalid-address': '請輸入有效的 HTTP 或 HTTPS Base URL。',
+		'incompatible-address': 'Base URL 與所選協定或 OpenCode 方案不符，請更正網址或清空以自動選擇。',
+	},
 	baseUrlNone: '該服務商各模型地址不一致，沒有統一的預設地址。',
 	baseUrlRequired: '請先填寫 Base URL',
 	models: '模型',
 	fetchModels: '取得模型',
-	fetchModelsDescription: '重新整理模型清單。預設服務商會結合 Pi 和 Models.dev 核對能力。',
+	fetchModelsDescription: '從目前筆記庫已儲存的模型資料讀取清單。',
 	modelsFromProvider: '模型清單來自服務商',
 	modelsFromPi: '模型清單來自 Pi',
 	modelsFromBundled: '模型清單來自外掛內建目錄',
+	modelsStale: '正在顯示上次儲存的清單',
 	selectedModels: '已選模型',
 	addModel: '新增模型',
 	refreshing: '載入中…',
@@ -1337,8 +1432,13 @@ const ZH_TW: UiText = {
 	inputModality: '輸入模態',
 	outputModality: '輸出模態',
 	capabilities: '能力',
+	modelCapabilityLabels: { eye: '視覺', ear: '音訊', video: '影片', 'file-text': 'PDF 輸入', lightbulb: '推理', wrench: '工具', braces: '結構化輸出' },
+	capabilityStatus: { supported: '已確認支援', unsupported: '已確認不支援', unknown: '資料未確認', conflict: '資料來源有衝突',
+		manual: '手動設定', jsonOnly: '目錄聲明支援 JSON，固定 JSON Schema 尚未確認。', videoUrl: '此連線接受 HTTPS 影片連結。' },
 	capabilityReasoning: '推理/思考',
 	capabilityTools: '工具調用',
+	capabilityStructuredOutput: '結構化輸出',
+	capabilityConnectionUnsupported: '此連線暫不支援這項能力。',
 	capabilityStructured: '結構化輸出',
 	thinkingLevel: '推理檔位',
 	thinkingLevelNames: { off: '關閉', minimal: '極低', low: '輕度', medium: '中', high: '高', xhigh: '極高', max: '最高' },
@@ -1358,18 +1458,22 @@ const ZH_TW: UiText = {
 	add: '新增',
 	searchAvailableModels: '搜尋可用模型…',
 	noModelsMatch: '沒有符合目前篩選條件的模型。',
-	noModelsDiscovered: '尚未發現模型，請在上方輸入模型 ID 或取得模型。',
+	noModelsDiscovered: '已儲存的清單裡沒有模型，可在上方輸入模型 ID。',
 	loadingModels: '正在載入模型…',
+	modelCatalogUnavailable: '這個連線還沒有本機模型資料。可先手動新增模型並儲存，再到模型設定選取「更新模型資料」。',
+	modelCatalogReadFailed: '無法讀取本機模型資料。',
 	back: '返回',
 	modelConfiguration: '模型設定',
 	defaults: '預設值',
 	modelConfigSaveNote: '儲存會更新目前模型和 Agent 執行限制。',
 	invalidModelConfiguration: '請輸入模型 ID 和有效的整數限制。',
 	duplicateModelId: '清單中已存在這個模型 ID。',
-	refreshModels: '重新整理模型目錄',
-	refreshingModels: '正在重新整理…',
-	modelsRefreshed: '模型目錄已重新整理。',
-	refreshModelsFailed: '重新整理模型目錄失敗',
+	refreshModels: '更新模型資料',
+	refreshModelsDescription: '從服務商目錄、Pi 和 Models.dev 更新目前筆記庫的模型資料。',
+	refreshingModels: '正在更新模型資料…',
+	modelsRefreshed: '模型資料已更新。',
+	modelsRefreshPartial: '部分模型資料更新失敗，既有資料仍可使用。',
+	refreshModelsFailed: '無法更新模型資料。',
 	searchProviders: '搜尋服務商或模型',
 	noMatchingProviders: '沒有符合的服務商或模型。',
 	configureProvider: '設定服務商',
@@ -1435,7 +1539,7 @@ const ZH_TW: UiText = {
 	chatArchiveUnsaved: '這段對話沒有可封存的訊息。',
 	chatArchiveError: '無法更新對話的封存狀態。',
 	chatDeleteConversation: '刪除對話',
-	chatDeleteConfirm: '永久刪除「{title}」及其全部訊息？刪除後無法復原。',
+	chatDeleteConfirm: '永久刪除「{title}」及其全部訊息？刪除後無法復原。如果開著這段對話的側聊，它也會關閉，未送出的側聊草稿將遺失。',
 	chatRenameError: '無法儲存對話標題。',
 	chatDeleteError: '無法刪除對話。',
 	chatNewTab: '新建分頁',

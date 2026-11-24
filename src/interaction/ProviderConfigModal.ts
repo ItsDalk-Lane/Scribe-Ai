@@ -4,20 +4,22 @@ import {
 	DropdownComponent,
 	Modal,
 	Notice,
-	SecretComponent,
 	setIcon,
 } from 'obsidian';
 import { createCredentialStore, credentialIdForProvider } from '../communication/credentials';
 import { createModelService } from '../communication/providers';
 import type ScribeAiPlugin from '../main';
+import { reconcileDefaultModel } from '../orchestration/settings/modelAvailability';
 import type { ModelCatalogResult, ModelOverride, ModelProviderInfo } from '../types';
 import { confirmAction } from './ConfirmModal';
+import { renderCredentialLink } from './credentialLink';
+import { modelCatalogAddress, modelDetailsForConnection, renderModelCapabilityIcons } from './modelCapabilityIcons';
 import { applyModelDraft } from './modelDraft';
 import { createOAuthInteraction } from './oauthInteraction';
 import { ScribeModelConfigModal } from './ModelConfigModal';
 import { updateOverflowTitle } from './overflowTitle';
 import { removeProviderSettings } from './providerSettings';
-import { thinkingLabel, type UiText } from './uiText';
+import type { UiText } from './uiText';
 
 // 三个常见本地服务的 OpenAI 兼容地址
 const LOCAL_PRESETS = [
@@ -85,7 +87,7 @@ export class ConfigureProviderModal extends Modal {
 	private customIds = new Set<string>();
 	private panelOpen = false;
 	private modelCatalog: ModelCatalogResult | null = null;
-	private catalogLoadFailed = false;
+	private catalogMessage = '';
 	private fetchController: AbortController | null = null;
 	private fetchButton: ButtonComponent | null = null;
 	private panel: HTMLElement | null = null;
@@ -149,7 +151,7 @@ export class ConfigureProviderModal extends Modal {
 		this.fetchController?.abort();
 		this.fetchController = null;
 		this.modelCatalog = null;
-		this.catalogLoadFailed = false;
+		this.catalogMessage = '';
 		this.panelOpen = false;
 		this.loginController?.abort();
 		this.loginController = null;
@@ -194,24 +196,18 @@ export class ConfigureProviderModal extends Modal {
 		);
 	}
 
-	private contextOf(modelId: string): number {
-		const { details, bundled, override } = this.modelDetails(modelId);
-		return override?.contextWindow ?? details?.contextWindow ?? bundled?.contextWindow ?? 0;
-	}
-
-	private usesCustomAddress(baseUrl = this.draftBaseUrl.trim()): boolean {
-		return this.isCustomProvider() || Boolean(baseUrl && baseUrl.replace(/\/+$/, '') !== this.provider.baseUrl.replace(/\/+$/, ''));
+	private catalogAddress(): string | undefined {
+		return modelCatalogAddress(this.provider, this.draftBaseUrl, this.isCustomProvider());
 	}
 
 	private modelDetails(modelId: string) {
-		const override = Object.prototype.hasOwnProperty.call(this.draftOverrides, modelId) ? this.draftOverrides[modelId] : undefined;
-		const bundled = this.usesCustomAddress() ? undefined : this.provider.models.find((entry) => entry.id === modelId);
-		const address = this.draftBaseUrl.trim() || bundled?.baseUrl || this.provider.baseUrl;
-		const protocol = this.draftProtocol || bundled?.api || this.provider.protocol;
-		// 单模型有独立连接时，这份服务商目录无法确认该连接的能力。
-		if ((override?.baseUrl && override.baseUrl.replace(/\/+$/, '') !== address.replace(/\/+$/, ''))
-			|| (override?.protocol && override.protocol !== protocol)) return { override };
-		return { override, bundled, details: this.modelCatalog?.details?.get(modelId) };
+		return modelDetailsForConnection(this.provider, modelId, {
+			baseUrl: this.draftBaseUrl,
+			protocol: this.draftProtocol,
+			catalogAddress: this.catalogAddress(),
+			catalog: this.modelCatalog,
+			overrides: this.draftOverrides,
+		});
 	}
 
 	private isCustomProvider(): boolean {
@@ -303,43 +299,16 @@ export class ConfigureProviderModal extends Modal {
 		renderNameNote();
 
 		const credentialControl = formField(fields, this.text.credential);
-		const dot = credentialControl.parentElement?.querySelector('label')?.createSpan({ cls: 'scribe-secret-dot' });
-		const credentialRow = credentialControl.createDiv({ cls: 'scribe-secret-row' });
-		// SecretComponent 自带 Obsidian 原生的选择/新建密钥弹窗，这里只把它的按钮藏起来做代理
-		const secretHost = credentialRow.createDiv({ cls: 'scribe-secret-host' });
-		const credential = new SecretComponent(this.app, secretHost);
-		credential.setValue(this.draftCredentialId);
-		const linkButton = credentialRow.createEl('button', { cls: 'scribe-secret-button', attr: { type: 'button' } });
-		const unlinkButton = credentialRow.createEl('button', {
-			cls: 'scribe-secret-unlink',
-			attr: { type: 'button', 'aria-label': this.text.credentialUnlink },
+		renderCredentialLink(this.app, credentialControl, credentialControl.parentElement?.querySelector('label') ?? null, {
+			text: this.text,
+			read: () => this.draftCredentialId,
+			change: (id) => {
+				this.loginController?.abort();
+				this.draftCredentialId = id;
+				this.resetModelCatalog();
+				void this.requestModelCatalog(baseUrlInput, false);
+			},
 		});
-		setIcon(unlinkButton, 'trash-2');
-		const isLinked = () => Boolean(this.draftCredentialId && this.app.secretStorage.getSecret(this.draftCredentialId));
-		const renderSecret = () => {
-			const linked = isLinked();
-			linkButton.setText(linked ? this.text.credentialLinked : this.text.credentialLink);
-			linkButton.toggleClass('is-linked', linked);
-			unlinkButton.toggleClass('scribe-hidden', !linked);
-			dot?.toggleClass('scribe-hidden', !linked);
-		};
-		linkButton.addEventListener('click', () => {
-			secretHost.querySelector('button')?.click();
-		});
-		unlinkButton.addEventListener('click', () => {
-			this.loginController?.abort();
-			this.draftCredentialId = '';
-			this.resetModelCatalog();
-			credential.setValue('');
-			renderSecret();
-		});
-		credential.onChange((value) => {
-			this.loginController?.abort();
-			this.draftCredentialId = value ?? '';
-			this.resetModelCatalog();
-			renderSecret();
-		});
-		renderSecret();
 		if (this.provider.oauth) {
 			this.loginButton = new ButtonComponent(credentialControl)
 				.setButtonText(this.provider.oauth.subscription ? this.text.subscriptionLogin : this.text.oauthLogin);
@@ -368,6 +337,7 @@ export class ConfigureProviderModal extends Modal {
 			this.draftBaseUrl = url;
 			baseUrlInput.value = url;
 			this.resetModelCatalog();
+			void this.requestModelCatalog(baseUrlInput, false);
 		};
 		baseUrlInput.addEventListener('input', () => {
 			this.draftBaseUrl = baseUrlInput.value;
@@ -378,6 +348,7 @@ export class ConfigureProviderModal extends Modal {
 				presetSelect.setValue(matched?.url ?? '');
 			}
 		});
+		baseUrlInput.addEventListener('change', () => void this.requestModelCatalog(baseUrlInput, false));
 
 		const protocols = [...this.provider.protocols];
 		if (this.draftProtocol && !protocols.includes(this.draftProtocol)) protocols.push(this.draftProtocol);
@@ -389,10 +360,12 @@ export class ConfigureProviderModal extends Modal {
 		protocolDropdown.onChange((value) => {
 			this.draftProtocol = value;
 			this.resetModelCatalog();
+			void this.requestModelCatalog(baseUrlInput, false);
 		});
 
 		this.renderModelBar(baseUrlInput);
 		this.renderAddedList();
+		void this.requestModelCatalog(baseUrlInput, false);
 
 		if (this.options.mode === 'new') {
 			const actions = this.contentEl.createDiv({ cls: 'scribe-modal-actions is-end' });
@@ -463,41 +436,37 @@ export class ConfigureProviderModal extends Modal {
 		this.fetchController?.abort();
 		this.fetchController = null;
 		this.modelCatalog = null;
-		this.catalogLoadFailed = false;
+		this.catalogMessage = '';
 		this.renderPanelRows();
 		this.renderAddedList();
 	}
 
 	private async requestModelCatalog(baseUrlInput: HTMLInputElement, manual: boolean): Promise<void> {
-		if (this.fetchController || (!manual && this.modelCatalog)) return;
-		const baseUrl = this.draftBaseUrl.trim();
-		const customAddress = this.usesCustomAddress(baseUrl);
-		if (customAddress && !baseUrl) {
+		if (this.fetchController) return;
+		const baseUrl = this.catalogAddress();
+		if (baseUrl === '') {
 			if (manual) new Notice(this.text.baseUrlRequired);
 			return;
 		}
 		const controller = this.fetchController = new AbortController();
 		const isCurrent = () => this.fetchController === controller && !controller.signal.aborted;
-		this.catalogLoadFailed = false;
+		this.catalogMessage = '';
 		this.renderPanelRows();
 		try {
-			const service = this.createDraftService();
-			if (customAddress) {
-				const found = await service.listCustomModels(this.provider.id, baseUrl, controller.signal);
-				if (!isCurrent()) return;
-				this.draftBaseUrl = baseUrlInput.value = found.baseUrl;
-				this.modelCatalog = { models: found.models, details: found.details, source: 'provider' };
-			} else {
-				const found = await service.listProviderModels(this.provider.id, controller.signal);
-				if (!isCurrent()) return;
-				this.modelCatalog = found;
-				this.provider = service.providers().find((entry) => entry.id === this.provider.id) ?? this.provider;
-			}
-			this.renderAddedList();
-		} catch (error) {
+			const found = await this.plugin.services.communication.modelCatalog.read(
+				this.provider.id, baseUrl, this.draftCredentialId,
+				this.isCustomProvider() || this.draftProtocol !== this.provider.protocol ? this.draftProtocol : '',
+			);
 			if (!isCurrent()) return;
-			this.catalogLoadFailed = true;
-			if (manual) new Notice(`${this.text.refreshModelsFailed}: ${error instanceof Error ? error.message : String(error)}`);
+			if (this.panelOpen && baseUrl && found?.baseUrl) {
+				this.draftBaseUrl = baseUrlInput.value = found.baseUrl;
+			}
+			this.modelCatalog = found ?? null;
+			if (!found) this.catalogMessage = this.text.modelCatalogUnavailable;
+			this.renderAddedList();
+		} catch {
+			if (!isCurrent()) return;
+			this.catalogMessage = this.text.modelCatalogReadFailed;
 		} finally {
 			if (isCurrent()) {
 				this.fetchController = null;
@@ -580,17 +549,20 @@ export class ConfigureProviderModal extends Modal {
 		const rows = list.createDiv({ cls: 'scribe-model-added-rows', attr: { role: 'list' } });
 		for (const model of this.draftModels) {
 			const row = rows.createDiv({ cls: 'scribe-model-panel-row', attr: { role: 'listitem' } });
-			const name = row.createSpan({ cls: 'scribe-model-panel-name', text: model });
+			const summary = row.createDiv({ cls: 'scribe-model-panel-summary' });
+			const name = summary.createSpan({ cls: 'scribe-model-panel-name', text: model });
 			name.addEventListener('pointerenter', () => updateOverflowTitle(name));
-			// 上下文长度紧跟模型 ID，右侧只放操作按钮
-			row.createSpan({ cls: 'scribe-model-context', text: formatContext(this.contextOf(model)) });
+			const evidence = this.modelDetails(model);
+			const context = evidence.override?.contextWindow ?? evidence.details?.contextWindow ?? evidence.bundled?.contextWindow ?? 0;
+			summary.createSpan({ cls: 'scribe-model-context', text: formatContext(context) });
+			renderModelCapabilityIcons(summary, evidence, this.text.modelCapabilityLabels, setIcon);
 			const meta = row.createSpan({ cls: 'scribe-model-panel-meta' });
 			new ButtonComponent(meta)
 				.setIcon('pencil')
 				.setTooltip(this.text.configureModel)
 				.setClass('scribe-icon-button')
 				.onClick(() => {
-					new ScribeModelConfigModal(this.app, this.plugin, this.provider, model, this.text, {
+					void ScribeModelConfigModal.openFor(this.app, this.plugin, this.provider, model, this.text, {
 						providerBaseUrl: this.draftBaseUrl,
 						providerProtocol: this.draftProtocol,
 						providerCredentialId: this.draftCredentialId,
@@ -616,7 +588,7 @@ export class ConfigureProviderModal extends Modal {
 							this.renderPanelRows();
 							this.refreshSaveState();
 						},
-					}).open();
+					});
 				});
 			const remove = meta.createSpan({ cls: 'scribe-model-panel-remove' });
 			setIcon(remove, 'x');
@@ -626,46 +598,23 @@ export class ConfigureProviderModal extends Modal {
 		if (!this.draftModels.length) rows.createDiv({ cls: 'scribe-models-empty', text: this.text.noModelsAdded });
 	}
 
-	private renderModelDetails(row: HTMLElement, model: string): void {
-		const { details, bundled, override } = this.modelDetails(model);
-		const context = override?.contextWindow ?? details?.contextWindow ?? bundled?.contextWindow;
-		const output = override?.maxTokens ?? details?.maxTokens ?? bundled?.maxTokens;
-		const reasoning = (details?.reasoning ?? bundled?.reasoning) === true
-			&& (bundled?.requiresReasoning || override?.capabilities?.reasoning !== false);
-		const tools = details?.tools === true && override?.capabilities?.tools !== false;
-		const knownLevels: readonly string[] = details?.thinkingLevels ?? bundled?.thinkingLevels ?? [];
-		const customLevels = override?.thinkingLevels ?? (override?.thinkingLevel ? [override.thinkingLevel] : undefined);
-		const levels = (customLevels ?? knownLevels).filter((level) => level !== 'off'
-			&& (knownLevels.includes(level) || (override?.literalThinkingLevels && level !== 'minimal')));
-		if (!context && !output && !reasoning && !tools) return;
-		const meta = row.createDiv({ cls: 'scribe-model-panel-details' });
-		if (context) meta.createSpan({
-			text: `${this.text.contextWindow} ${formatContext(context)}`, attr: { title: `${this.text.contextWindow} ${context.toLocaleString()}` },
-		});
-		if (output) meta.createSpan({
-			text: `${this.text.maxOutputTokens} ${formatContext(output)}`, attr: { title: `${this.text.maxOutputTokens} ${output.toLocaleString()}` },
-		});
-		if (tools) meta.createSpan({ text: this.text.capabilityTools });
-		if (reasoning) meta.createSpan({ text: this.text.capabilityReasoning });
-		if (reasoning && levels.length) {
-			meta.createSpan({ text: `${this.text.thinkingLevel} ${levels.map((level) => thinkingLabel(this.text, level)).join(' / ')}` });
-		}
-	}
-
 	private renderPanelRows(): void {
 		const fetching = this.fetchController !== null;
-		this.fetchButton?.setDisabled(fetching).setButtonText(fetching ? this.text.refreshing : this.text.fetchModels);
+		this.fetchButton?.setDisabled(fetching).setButtonText(fetching ? this.text.loadingModels : this.text.fetchModels);
 		const list = this.panelList;
 		if (!list) return;
 		list.empty();
 		const normalized = this.panelSearch?.value.trim().toLowerCase() ?? '';
 		const catalog = this.modelCatalog;
 		const status = fetching ? this.text.loadingModels
-			: this.catalogLoadFailed ? this.text.refreshModelsFailed
+			: this.catalogMessage ? this.catalogMessage
 			: catalog?.source === 'provider' ? this.text.modelsFromProvider
 			: catalog?.source === 'pi' ? this.text.modelsFromPi
 			: catalog ? this.text.modelsFromBundled : '';
-		this.panelStatus?.setText(status);
+		const checkedAt = catalog?.updatedAt ? new Date(catalog.updatedAt) : undefined;
+		const freshness = !fetching && catalog ? [catalog.stale && this.text.modelsStale,
+			checkedAt && Number.isFinite(checkedAt.getTime()) ? checkedAt.toLocaleString() : ''] : [];
+		this.panelStatus?.setText([status, ...freshness].filter(Boolean).join(' · '));
 		this.panelStatus?.toggleClass('scribe-hidden', !status);
 		const ids = catalog
 			? [...new Set([...this.draftModels, ...catalog.models, ...this.customIds])]
@@ -673,8 +622,8 @@ export class ConfigureProviderModal extends Modal {
 		const visible = ids.filter((model) => !normalized || model.toLowerCase().includes(normalized));
 		if (this.panelEmpty) {
 			this.panelEmpty.setText(normalized ? this.text.noModelsMatch
-				: catalog || this.catalogLoadFailed ? this.text.noModelsDiscovered : this.text.noModelsAdded);
-			this.panelEmpty.toggleClass('scribe-hidden', visible.length > 0 || fetching);
+				: catalog ? this.text.noModelsDiscovered : this.text.noModelsAdded);
+			this.panelEmpty.toggleClass('scribe-hidden', visible.length > 0 || fetching || Boolean(this.catalogMessage && !catalog));
 		}
 		for (const model of visible) {
 			const row = list.createDiv({ cls: 'scribe-model-panel-row', attr: { role: 'listitem' } });
@@ -689,7 +638,7 @@ export class ConfigureProviderModal extends Modal {
 			const summary = row.createDiv({ cls: 'scribe-model-panel-summary' });
 			const name = summary.createSpan({ cls: 'scribe-model-panel-name', text: model });
 			name.addEventListener('pointerenter', () => updateOverflowTitle(name));
-			this.renderModelDetails(summary, model);
+			renderModelCapabilityIcons(summary, this.modelDetails(model), this.text.modelCapabilityLabels, setIcon);
 			if (this.isAdded(model) && !catalog) {
 				const remove = row.createSpan({ cls: 'scribe-model-panel-remove' });
 				setIcon(remove, 'x');
@@ -712,14 +661,14 @@ export class ConfigureProviderModal extends Modal {
 		try {
 			const settings = this.plugin.services.settings;
 			const providerId = this.provider.id;
-			const firstProvider = this.options.mode === 'new' && !settings.providerId && !Object.keys(settings.providerModels).length;
 			settings.providerModels[providerId] = [...this.draftModels];
 			if (Object.keys(this.draftOverrides).length) settings.modelOverrides[providerId] = { ...this.draftOverrides };
 			else delete settings.modelOverrides[providerId];
-			if (firstProvider || settings.providerId === providerId) {
-				settings.model = this.draftModels.includes(this.draftActiveModel) ? this.draftActiveModel : (this.draftModels[0] ?? '');
-				settings.providerId = settings.model ? providerId : '';
+			if (settings.providerId === providerId && !this.draftModels.includes(settings.model)
+				&& this.draftModels.includes(this.draftActiveModel)) {
+				settings.model = this.draftActiveModel;
 			}
+			reconcileDefaultModel(settings);
 			if (custom) {
 				// 自建服务商没有目录，名称/地址/协议就是它的定义本身
 				settings.customProviders[providerId] = { label: name || this.provider.label, baseUrl, protocol };

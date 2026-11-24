@@ -1,9 +1,12 @@
-import { setIcon } from 'obsidian';
 import { providerIcon } from './providerIcons';
 
-/** 品牌图标优先，其次内置图标，最后退回首字母 */
+/** 加载随插件打包的品牌图标，自建服务商显示首字母。 */
 export function paintProviderIcon(el: HTMLElement, providerId: string, label: string): void {
 	const icon = providerIcon(providerId);
+	if (icon?.image) {
+		el.createEl('img', { attr: { src: icon.image, alt: '', draggable: 'false' } });
+		return;
+	}
 	if (icon?.svg) {
 		// 品牌 SVG 内联在代码里，这里只做解析和挂载，不发起网络请求
 		const parsed = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg">${icon.svg}</svg>`, 'image/svg+xml');
@@ -16,10 +19,6 @@ export function paintProviderIcon(el: HTMLElement, providerId: string, label: st
 			for (const child of Array.from(root.childNodes)) svg.appendChild(el.ownerDocument.importNode(child, true));
 			return;
 		}
-	}
-	if (icon?.icon) {
-		setIcon(el, icon.icon);
-		return;
 	}
 	el.setText((label.trim()[0] ?? '?').toUpperCase());
 }

@@ -2,6 +2,7 @@ import {
 	App,
 	ButtonComponent,
 	Modal,
+	Notice,
 	ToggleComponent,
 	setIcon,
 } from 'obsidian';
@@ -12,10 +13,12 @@ import { paintProviderIcon } from './paintProviderIcon';
 import type ScribeAiPlugin from '../main';
 import type { ModelProviderInfo } from '../types';
 import { confirmAction } from './ConfirmModal';
+import { modelCatalogAddress, modelDetailsForConnection, renderModelCapabilityIcons } from './modelCapabilityIcons';
 import { ScribeModelConfigModal } from './ModelConfigModal';
 import { ConfigureProviderModal } from './ProviderConfigModal';
 import { updateOverflowTitle } from './overflowTitle';
 import { removeProviderSettings } from './providerSettings';
+import { isProviderEnabled, reconcileDefaultModel } from '../orchestration/settings/modelAvailability';
 import type { UiText } from './uiText';
 
 /** 显示名可改，索引始终是 provider.id */
@@ -55,23 +58,32 @@ export function renderModelSettings(
 	const heading = header.createDiv({ cls: 'scribe-models-heading' });
 	heading.createDiv({ cls: 'scribe-models-title', text: text.modelsTitle });
 	heading.createDiv({ cls: 'scribe-models-description', text: text.modelsDescription });
+	const actions = header.createDiv({ cls: 'scribe-models-header-actions' });
 	// ButtonComponent 的 setButtonText 会清掉 setIcon 写入的图标，因此图标与文字各占一个子元素
-	const addProv = header.createEl('button', { cls: 'scribe-icon-text-button' });
+	const addProv = actions.createEl('button', { cls: 'scribe-icon-text-button', attr: { type: 'button' } });
 	const addProvIcon = addProv.createSpan({ cls: 'scribe-icon-text-icon' });
 	setIcon(addProvIcon, 'plus');
 	addProv.createSpan({ text: text.addProvider });
 	const rerender = () => renderModelSettings(app, panel, plugin, text, openState);
 	addProv.addEventListener('click', () => new AddProviderModal(app, plugin, text, rerender).open());
+	const refreshModels = new ButtonComponent(actions)
+		.setButtonText(text.refreshModels)
+		.setTooltip(text.refreshModelsDescription);
+	refreshModels.onClick(async () => {
+		refreshModels.setDisabled(true).setButtonText(text.refreshingModels);
+		try {
+			const { updated, failed } = await plugin.services.communication.modelCatalog.refresh();
+			new Notice(failed ? updated ? text.modelsRefreshPartial : text.refreshModelsFailed : text.modelsRefreshed);
+			if (panel.contains(actions)) rerender();
+		} catch {
+			new Notice(text.refreshModelsFailed);
+		} finally {
+			refreshModels.setDisabled(false).setButtonText(text.refreshModels);
+		}
+	});
 
 	const list = panel.createDiv({ cls: 'scribe-provider-list', attr: { role: 'list' } });
 	const empty = panel.createDiv({ cls: 'scribe-models-empty' });
-
-	const selectActive = async (providerId: string, model: string) => {
-		settings.providerId = providerId;
-		settings.model = model;
-		await plugin.saveSettings();
-		rerender();
-	};
 
 	const removeProvider = (provider: ModelProviderInfo) => {
 		confirmAction(app, {
@@ -117,18 +129,14 @@ export function renderModelSettings(
 		actions.addEventListener('click', (event) => event.stopPropagation());
 		actions.addEventListener('keydown', (event) => event.stopPropagation());
 		new ToggleComponent(actions)
-			.setValue(settings.providerId === provider.id && Boolean(settings.model))
+			.setValue(models.length > 0 && isProviderEnabled(settings, provider.id))
 			.setDisabled(!models.length)
 			.setTooltip(text.includeProviderModels)
 			.onChange(async (enabled) => {
-				if (enabled && models.length) {
-					await selectActive(provider.id, models[0] ?? '');
-					return;
-				}
-				if (!enabled && settings.providerId === provider.id) {
-					settings.providerId = '';
-					settings.model = '';
-					await plugin.saveSettings();
+				try {
+					await plugin.saveProviderAvailability(provider.id, enabled);
+				} catch (error) {
+					new Notice(`${text.saveFailed}: ${error instanceof Error ? error.message : String(error)}`);
 				}
 				rerender();
 			});
@@ -150,18 +158,21 @@ export function renderModelSettings(
 		const content = card.createDiv({ cls: 'scribe-provider-content scribe-provider-models' });
 		content.hidden = !isOpen;
 		card.toggleClass('is-open', isOpen);
+		const modelSummaries: Array<{ model: string; summary: HTMLDivElement }> = [];
 		if (models.length) {
 			for (const model of models) {
 				const row = content.createDiv({ cls: 'scribe-configured-model-row', attr: { role: 'listitem' } });
-				row.createSpan({ cls: 'scribe-configured-model-name', text: model });
+				const summary = row.createDiv({ cls: 'scribe-model-panel-summary' });
+				summary.createSpan({ cls: 'scribe-configured-model-name', text: model });
+				modelSummaries.push({ model, summary });
 				const modelActions = row.createDiv({ cls: 'scribe-model-row-actions' });
 				new ButtonComponent(modelActions)
 					.setIcon('pencil')
 					.setTooltip(text.configureModel)
 					.setClass('scribe-icon-button')
-					.onClick(() => new ScribeModelConfigModal(app, plugin, provider, model, text, {
+					.onClick(() => void ScribeModelConfigModal.openFor(app, plugin, provider, model, text, {
 						onSaved: rerender,
-					}).open());
+					}));
 				new ButtonComponent(modelActions)
 					.setIcon('x')
 					.setTooltip(text.removeModel)
@@ -181,8 +192,7 @@ export function renderModelSettings(
 								if (!Object.keys(overrides).length) delete settings.modelOverrides[provider.id];
 							}
 							if (settings.providerId === provider.id && settings.model === model) {
-								settings.model = remaining[0] ?? '';
-								if (!settings.model) settings.providerId = '';
+								reconcileDefaultModel(settings);
 							}
 							await plugin.saveSettings();
 							rerender();
@@ -193,6 +203,25 @@ export function renderModelSettings(
 			content.createDiv({ cls: 'scribe-models-empty', text: text.noModelsAdded });
 		}
 
+		const refreshCapabilities = async () => {
+			if (!modelSummaries.length) return;
+			const custom = settings.customProviders[provider.id];
+			const baseUrl = settings.communication.baseUrls[provider.id] || custom?.baseUrl || provider.baseUrl;
+			const protocol = settings.communication.protocols[provider.id] || custom?.protocol || provider.protocol;
+			const catalogAddress = modelCatalogAddress(provider, baseUrl, Boolean(custom));
+			const catalog = await plugin.services.communication.modelCatalog.read(provider.id, catalogAddress, credentialId,
+				custom || protocol !== provider.protocol ? protocol : '').catch(() => undefined);
+			if (!panel.contains(card)) return;
+			for (const { model, summary } of modelSummaries) {
+				summary.querySelector('.scribe-model-panel-capabilities')?.remove();
+				const details = modelDetailsForConnection(provider, model, {
+					baseUrl, protocol, catalogAddress, catalog, overrides: settings.modelOverrides[provider.id],
+				});
+				renderModelCapabilityIcons(summary, details, text.modelCapabilityLabels, setIcon);
+			}
+		};
+		if (isOpen) void refreshCapabilities();
+
 		const toggle = () => {
 			if (openState.has(provider.id)) openState.delete(provider.id);
 			else openState.add(provider.id);
@@ -200,6 +229,7 @@ export function renderModelSettings(
 			content.hidden = !nowOpen;
 			card.toggleClass('is-open', nowOpen);
 			cardHeader.setAttribute('aria-expanded', String(nowOpen));
+			if (nowOpen) void refreshCapabilities();
 		};
 		cardHeader.addEventListener('click', toggle);
 		cardHeader.addEventListener('keydown', (event) => {
@@ -265,24 +295,9 @@ class AddProviderModal extends Modal {
 		const empty = this.contentEl.createDiv({ cls: 'scribe-models-empty', text: this.text.noProvidersMatch });
 		empty.hidden = true;
 
-		const uniqueId = (prefix: string) => {
-			const settings = this.plugin.services.settings;
-			const existing = new Set([
-				settings.providerId,
-				...Object.keys(settings.customProviders),
-				...Object.keys(settings.providerModels),
-				...Object.keys(settings.modelOverrides),
-				...Object.keys(settings.communication.credentialIds),
-				...Object.keys(settings.communication.providerNames),
-				...Object.keys(settings.communication.baseUrls),
-				...Object.keys(settings.communication.protocols),
-			]);
-			let index = 1;
-			while (existing.has(`${prefix}-${index}`)) index += 1;
-			return `${prefix}-${index}`;
-		};
 		const openCustom = (kind: 'custom' | 'local') => {
-			const id = uniqueId(kind);
+			// 删除后新建的服务应有独立身份，旧聊天和角色仍引用原服务。
+			const id = `${kind}-${crypto.randomUUID()}`;
 			const provider: ModelProviderInfo = {
 				id,
 				label: kind === 'custom' ? this.text.customEndpoint : this.text.localModel,

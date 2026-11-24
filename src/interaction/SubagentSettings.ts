@@ -1,5 +1,6 @@
 import { ButtonComponent, DropdownComponent, Modal, Notice, Setting } from 'obsidian';
 import type ScribeAiPlugin from '../main';
+import { isModelAvailable } from '../orchestration/settings/modelAvailability';
 import { BUILTIN_SUBAGENT_ROLES, DEFAULT_SUBAGENT_SETTINGS, normalizeSubagentRole } from '../orchestration/settings/subagentSettings';
 import { chatModelKey } from '../orchestration/settings/thinking';
 import type { SubagentRole, SubagentSettings } from '../types';
@@ -128,7 +129,7 @@ function openRoleEditor(
 	}
 	if (draft.model) {
 		const key = chatModelKey(draft.model.providerId, draft.model.model);
-		if (!settings.providerModels[draft.model.providerId]?.includes(draft.model.model)) {
+		if (!isModelAvailable(settings, draft.model)) {
 			model.addOption(key, `${draft.model.model} · ${copy.unavailableModel}`);
 			const unavailable = model.selectEl.options[model.selectEl.options.length - 1];
 			if (unavailable) unavailable.disabled = true;
@@ -171,7 +172,7 @@ function openRoleEditor(
 			return;
 		}
 		const selection = normalized.model;
-		if (selection && !settings.providerModels[selection.providerId]?.includes(selection.model)) {
+		if (selection && !isModelAvailable(settings, selection)) {
 			new Notice(copy.unavailableModel);
 			return;
 		}

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { normalizeSettings } from '../../orchestration/settings/defaults';
+import { setProviderEnabled } from '../../orchestration/settings/modelAvailability';
 import { chatModelOptions } from '../useChatModel';
 
 void test('configured providers include empty model lists, and identical model IDs remain distinct across providers', () => {
@@ -32,4 +33,39 @@ void test('configured providers include empty model lists, and identical model I
 
 	delete settings.providerModels['local-2'];
 	assert.equal(chatModelOptions(settings, providers).value, '');
+	settings.providerId = 'local-1';
+	assert.equal(chatModelOptions(settings, providers, { providerId: 'local-2', model: 'model-a' }).value, groups[0]?.models[0]?.value);
+});
+
+void test('provider switches are independent of the default and keep disabled models configured', () => {
+	const settings = normalizeSettings({
+		providerId: 'second',
+		model: 'preferred',
+		providerModels: { first: ['fallback'], second: ['other', 'preferred'] },
+	});
+	const providers = () => [];
+	const groups = () => chatModelOptions(settings, providers).groups.map(({ id }) => id);
+	assert.deepEqual(groups(), ['first', 'second']);
+
+	setProviderEnabled(settings, 'first', false);
+	assert.deepEqual(groups(), ['second']);
+	assert.equal(settings.model, 'preferred');
+	setProviderEnabled(settings, 'first', true);
+	assert.deepEqual(groups(), ['first', 'second']);
+	assert.equal(settings.model, 'preferred');
+
+	setProviderEnabled(settings, 'second', false);
+	assert.deepEqual(groups(), ['first']);
+	assert.equal(settings.model, 'fallback');
+	assert.deepEqual(settings.providerModels.second, ['other', 'preferred']);
+	const preferred = { providerId: 'second', model: 'preferred' };
+	assert.equal(chatModelOptions(settings, providers, preferred).selection.model, 'fallback');
+	setProviderEnabled(settings, 'first', false);
+	assert.deepEqual(groups(), []);
+	assert.equal(settings.model, '');
+
+	setProviderEnabled(settings, 'second', true);
+	assert.deepEqual(groups(), ['second']);
+	assert.equal(settings.model, 'other');
+	assert.equal(chatModelOptions(settings, providers, preferred).selection.model, 'preferred');
 });

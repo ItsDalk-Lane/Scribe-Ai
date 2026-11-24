@@ -4,6 +4,7 @@ import { createTwoFilesPatch } from 'diff';
 import type { App, FileSystemAdapter } from 'obsidian';
 import { createRoot } from 'react-dom/client';
 import type ScribeAiPlugin from '../main';
+import { isModelAvailable } from '../orchestration/settings/modelAvailability';
 import { BUILTIN_SUBAGENT_ROLES, normalizeSubagentSettings } from '../orchestration/settings/subagentSettings';
 import { isWithinPath, normalizeVaultRelativePath } from '../tools/support/pathUtils';
 import { stripGoalReport } from './chatGoal';
@@ -65,7 +66,7 @@ function agentSlashTargets(plugin: ScribeAiPlugin): SlashTargetChoice[] {
 		target: { kind: 'agent', id: name, label: name },
 		description,
 		reason: mode === 'off' ? tr('子 Agent 已关闭。', 'Subagents are off.')
-			: model && !settings.providerModels[model.providerId]?.includes(model.model)
+			: model && !isModelAvailable(settings, model)
 				? tr('所选模型已不可用。', 'Configured model unavailable.') : undefined,
 	}));
 }
