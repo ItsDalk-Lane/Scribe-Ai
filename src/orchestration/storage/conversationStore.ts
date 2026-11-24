@@ -325,7 +325,7 @@ export function createConversationStore(directory: string): ConversationStore {
 			if (!entries.length) return;
 			let index = subagentIndexes.get(path);
 			try {
-				if (!index && entries.some((entry) => entry.type === 'subagent' || entry.type === 'subagent-report'
+				if (!index && entries.some((entry) => entry.type === 'subagent' || entry.type === 'subagent-report' || entry.type === 'auxiliary-usage'
 					|| (entry.type === 'messages' && entry.messages.some(({ deliveryAgents, subagentActivity }) => deliveryAgents || subagentActivity)))) {
 					index = await readSubagentIndex(path, id);
 				}

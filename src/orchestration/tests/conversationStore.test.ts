@@ -4,10 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
-import type { ConversationEntry, Message, QueuedMessage, SubagentRecord } from '../../types';
+import type { AuxiliaryUsage, ConversationEntry, Message, ModelService, QueuedMessage, SubagentRecord } from '../../types';
 import { createConversationStore } from '../storage/conversationStore';
 import { replayConversation } from '../storage/taskStore';
 import { conversationHistory } from '../context/conversationHistory';
+
+import { guardModelConnection } from '../settings/modelConnection';
+import { manualConversationSummary } from '../context/manualConversationSummary';
+import { createSubagentController } from '../subagents/controller';
+import { normalizeSettings } from '../settings/defaults';
+import { runUsage } from '../../interaction/chatMetrics';
 
 async function fixture(context: TestContext) {
 	const directory = await mkdtemp(join(tmpdir(), 'scribe-conversation-'));
@@ -151,6 +157,67 @@ void test('an automatic report is saved once after its receipt and all its child
 	await assert.rejects(store.append(id, [sendReport]), /任务或记录顺序无效/);
 	assert.equal((await reopened.load(id)).runs[0]?.subagentReport, undefined);
 	assert.deepEqual((await reopened.load(branch.id)).runs[0]?.subagentReport, sendReport.report);
+});
+
+void test('后台汇总、进展小结和分批整理共享同一用量记录，重开与复用不额外计数', { timeout: 5000 }, async (t) => {
+	const { store, directory } = await fixture(t);
+	const id = 'summary-chat';
+	const parent = start(id, 'main', '主题'.repeat(230));
+	const model = parent.model;
+	const origin = 'https://example.test';
+	await store.append(id, [parent,
+		subagent('worker', { kind: 'create', modelOrigin: origin, agent: { id: 'worker', rootTaskId: 'main', name: '资料', role: 'worker', model } }),
+		subagent('worker', { kind: 'run', entry: start(id, 'child', '查资料') }),
+		subagent('worker', { kind: 'run', entry: messages('child', { role: 'assistant', content: '已核对' }) }),
+		subagent('worker', { kind: 'run', entry: { type: 'finish', taskId: 'child', status: 'done', turn: 1 } }),
+		messages('main', { role: 'assistant', content: '收件回执', local: true, deliveryAgents: ['worker'] }),
+		{ type: 'finish', taskId: 'main', status: 'done', turn: 1 },
+	]);
+	const sent: string[] = [];
+	const service: Pick<ModelService, 'send' | 'modelOrigin' | 'contextLimits'> = {
+		modelOrigin: () => origin,
+		contextLimits: () => ({ contextWindow: 4096, maxTokens: 512 }),
+		async send(request) {
+			await request.beforeSend?.(origin + '/chat');
+			sent.push(request.messages[0]!.content);
+			return { content: '正式的汇总结论', toolCalls: [], stopReason: 'end', reportedUsage: { total: 10 },
+				raw: { role: 'assistant', provider: 'test', api: 'openai-completions', model: 'test', content: [], timestamp: 1, stopReason: 'stop',
+					usage: { input: 7, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 10, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } } };
+		},
+	};
+	const settings = normalizeSettings({ ...model, providerModels: { [model.providerId]: ['another', model.model] } });
+	const checkModel = guardModelConnection(settings, model);
+	const controller = createSubagentController(settings, store, () => assert.fail('不应重启已完成的子任务'), (value) => value, service);
+	t.after(() => controller.dispose());
+	const ready = new Promise<void>((resolve) => {
+		const unsubscribe = controller.controls.subscribe(id, () => {
+			if (controller.controls.snapshot(id).reports?.main) { unsubscribe(); resolve(); }
+		});
+	});
+	await controller.controls.load(id);
+	await ready;
+	const record = (taskId: string, usage: AuxiliaryUsage) => store.append(id, [{ type: 'auxiliary-usage', taskId, usage }]);
+	const snapshot = await store.load(id);
+	assert.equal(sent.length, 1);
+	const smallModel = { ...service, contextLimits: () => ({ contextWindow: 2300, maxTokens: 250 }) };
+	for (const mode of ['recap', 'compact'] as const) {
+		const before = sent.length;
+		await manualConversationSummary(snapshot, smallModel, model, mode, new AbortController().signal, record, checkModel);
+		assert.ok(sent.length - before > 1);
+		assert.match(sent.slice(before).join(''), /正式的汇总结论/u);
+		assert.doesNotMatch(sent.slice(before).join(''), /收件回执/u);
+	}
+	const reopened = (await createConversationStore(directory).load(id)).runs[0]!;
+	assert.equal(runUsage(reopened.state)?.byKind.summary?.count, sent.length);
+	assert.equal(runUsage(reopened.state)?.total, 10 * sent.length);
+	await controller.reload(id);
+	assert.equal(sent.length, reopened.state.auxiliaryUsage?.length);
+	settings.providerModels[model.providerId] = ['another'];
+	await assert.rejects(manualConversationSummary(snapshot, smallModel, model, 'compact', new AbortController().signal, record, checkModel), /连接设置已变更/u);
+	assert.equal(sent.length, reopened.state.auxiliaryUsage?.length);
+	await store.replaceFrom(id, 'main', [start(id, 'replacement', '更换原任务')]);
+	await assert.rejects(record('main', { kind: 'summary' }), /任务已变更/u);
+	assert.equal((await store.load(id)).runs[0]?.state.auxiliaryUsage, undefined);
 });
 
 void test('saved conversations can be listed, reopened and appended independently', async (t) => {

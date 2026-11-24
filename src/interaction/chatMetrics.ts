@@ -48,7 +48,7 @@ export interface UsageTotals {
 }
 
 export interface UsageBreakdown extends UsageTotals {
-	byKind: Record<'main' | AuxiliaryUsage['kind'], UsageTotals | undefined>;
+	byKind: Record<'main' | 'review' | 'summary', UsageTotals | undefined> & { video?: UsageTotals };
 }
 
 export interface ContextUsage {
@@ -97,11 +97,14 @@ function usageBreakdown(messages: readonly Message[], auxiliary: readonly Auxili
 	const main = messages.map(messageUsage);
 	const review: RequestUsage[] = [];
 	const summary: RequestUsage[] = [];
+	const video: RequestUsage[] = [];
+	const requests = { review, summary, video };
 	for (const { kind, reportedUsage, cost } of auxiliary) {
-		(kind === 'review' ? review : summary).push(normalizeUsage(reportedUsage, cost));
+		requests[kind].push(normalizeUsage(reportedUsage, cost));
 	}
-	const total = usageTotals([...main, ...review, ...summary]);
-	return total && { ...total, byKind: { main: usageTotals(main), review: usageTotals(review), summary: usageTotals(summary) } };
+	const total = usageTotals([...main, ...review, ...summary, ...video]);
+	const videoUsage = usageTotals(video);
+	return total && { ...total, byKind: { main: usageTotals(main), review: usageTotals(review), summary: usageTotals(summary), ...(videoUsage && { video: videoUsage }) } };
 }
 
 export function runUsage(state: RunState): UsageBreakdown | undefined {

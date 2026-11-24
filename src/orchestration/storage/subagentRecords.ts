@@ -20,6 +20,7 @@ export function createSubagentRecordIndex(conversationId: string) {
 				roots.set(item.task.id, {});
 				return;
 			}
+			if (item.type === 'auxiliary-usage' && !roots.has(item.taskId)) throw new Error('用量记录所属的任务已变更。');
 			if (item.type === 'messages') {
 				const root = roots.get(item.taskId);
 				for (const { deliveryAgents } of item.messages) {
