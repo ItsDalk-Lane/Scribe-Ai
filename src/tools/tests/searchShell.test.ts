@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink, utimes, writeFile } fr
 import { syncBuiltinESMExports } from 'node:module';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
@@ -15,6 +15,7 @@ import { createReadDelivery } from '../../runtime/readDelivery';
 import { createPermissionPolicy } from '../../orchestration/policies/permissions';
 import { createRunContext } from '../../orchestration/runContext';
 import { createConversationStore } from '../../orchestration/storage/conversationStore';
+import { scribeDataPaths } from '../../orchestration/storage/paths';
 import type { NoteRef, ShellOutputPreview, ToolApproval, ToolContext } from '../../types';
 import { createToolLayer } from '..';
 import { hasMacShellSandbox } from '../external/macosShellSandbox';
@@ -157,12 +158,16 @@ void test('macOS Bash restricts vault commands until a single escalation is appr
 }, async (t) => {
 	const { ctx, denied } = await fixture(t);
 	const config = join(ctx.cwd, 'plugin-config');
+	const data = scribeDataPaths(ctx.cwd);
 	const secret = join(denied, 'outside.txt');
-	await mkdir(config);
+	await Promise.all([mkdir(config), mkdir(data.cache, { recursive: true }), mkdir(data.skills, { recursive: true })]);
 	await Promise.all([
 		writeFile(secret, 'private'),
 		writeFile(join(config, 'private.txt'), 'config'),
 		writeFile(join(ctx.cwd, 'lines.txt'), 'first\nsecond\n'),
+		writeFile(data.settings, '{}'),
+		writeFile(join(data.cache, 'private.txt'), 'cache'),
+		writeFile(join(data.skills, 'example.md'), 'available skill'),
 	]);
 	ctx.task.request.refs.push({ path: 'lines.txt', lines: [1, 1] });
 	await symlink(secret, join(ctx.cwd, 'link.txt'));
@@ -185,9 +190,11 @@ void test('macOS Bash restricts vault commands until a single escalation is appr
 	const local = await execute(ctx, 'Bash', { command: 'printf work > note.md && cat note.md' });
 	assert.equal(local.isError, false, local.content);
 	assert.match(local.content, /work/);
-	for (const command of ['cat link.txt', 'printf changed > link.txt', 'cat plugin-config/private.txt', 'cat lines.txt', connect]) {
-		assert.equal((await execute(ctx, 'Bash', { command })).isError, true);
+	for (const command of ['cat link.txt', 'printf changed > link.txt', 'cat plugin-config/private.txt', 'cat lines.txt',
+		'cat .scribe-ai/settings.json', 'cat .scribe-ai/cache/private.txt', 'printf changed > .scribe-ai/state.json', connect]) {
+		assert.equal((await execute(ctx, 'Bash', { command })).isError, true, command);
 	}
+	assert.match((await execute(ctx, 'Bash', { command: 'cat .scribe-ai/skills/example.md' })).content, /available skill/);
 	assert.equal(await readFile(secret, 'utf8'), 'private');
 	assert.equal(approvals.length, 0);
 	assert.equal((await execute(ctx, 'Bash', { command: connect, elevated: true })).isError, true);
@@ -283,20 +290,25 @@ void test('shell previews batch bursts and cancel pending updates when the comma
 	assert.equal(output.text().stderr, '报错');
 });
 
-void test('model tool results keep a 12,500-token head and tail plus a full spill file', (t) => {
+void test('model tool results keep a 12,500-token preview and a full copy under the conversation cache', async (t) => {
+	const { ctx } = await fixture(t);
+	const cacheDirectory = scribeDataPaths(ctx.cwd).cache;
+	const location = { cacheDirectory, conversationId: 'test', subagentId: 'worker-one' };
 	const text = `开头\n${'界'.repeat(60_000)}\n末尾`;
 	assert.ok(estimateResultTokens(text) > MAX_INLINE_TOKENS);
-	const result = boundToolResult(text, 'Bash');
+	const result = boundToolResult(text, 'Bash', location);
 	assert.match(result, /开头/);
 	assert.match(result, /末尾/);
 	assert.match(result, /完整结果/);
 	assert.ok(estimateResultTokens(result) <= MAX_INLINE_TOKENS);
 	const path = /完整结果：([^。]+)/.exec(result)?.[1];
 	assert.ok(path);
+	assert.ok(path.startsWith(join(cacheDirectory, 'test', 'worker-one', 'scribe-ai-tools-')));
+	assert.equal(basename(path), 'result.txt');
 	assert.equal(fs.readFileSync(path, 'utf8'), text);
 	assert.equal(boundToolResult('short', 'Bash'), 'short');
-	assert.equal(boundToolResult(text, 'read'), text);
-	t.after(() => fs.rmSync(dirname(path), { recursive: true, force: true }));
+	assert.equal(boundToolResult(text, 'read', location), text);
+	assert.equal(boundToolResult(text, 'Bash', { ...location, conversationId: '../outside' }), text);
 });
 
 void test('spill cleanup removes files older than the retention period and prunes empty roots', async (t) => {
@@ -318,6 +330,29 @@ void test('spill cleanup removes files older than the retention period and prune
 	assert.equal(fs.existsSync(root), false);
 });
 
+void test('startup removes expired cache outputs for this vault and leaves fresh files and other vaults alone', async (t) => {
+	const { ctx, outside } = await fixture(t);
+	const cacheDirectory = scribeDataPaths(ctx.cwd).cache;
+	const text = '完整工具返回内容'.repeat(10_000);
+	const save = (directory: string, conversationId: string) => {
+		const path = /完整结果：([^。]+)/.exec(boundToolResult(text, 'Grep', { cacheDirectory: directory, conversationId }))?.[1];
+		assert.ok(path);
+		return path;
+	};
+	const old = save(cacheDirectory, 'old');
+	const fresh = save(cacheDirectory, 'new');
+	const other = save(scribeDataPaths(outside).cache, 'other');
+	const past = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+	await Promise.all([utimes(old, past, past), utimes(other, past, past)]);
+	const options = { cacheDirectory, baseDir: join(ctx.cwd, 'empty-legacy'), now: Date.now() };
+	sweepSpillFiles({ ...options, cleanupPeriodDays: 0 });
+	assert.equal(fs.existsSync(old), true);
+	sweepSpillFiles(options);
+	assert.equal(fs.existsSync(join(cacheDirectory, 'old')), false);
+	assert.equal(fs.existsSync(fresh), true);
+	assert.equal(fs.existsSync(other), true);
+});
+
 void test('background reads preserve split UTF-8, skip consumed bytes and mark gaps', () => {
 	const output = captureShellOutput();
 	const cursor = { stdout: 0, stderr: 0 };
@@ -334,8 +369,10 @@ void test('background reads preserve split UTF-8, skip consumed bytes and mark g
 	assert.equal(output.readSince(cursor, true).stdout, '');
 });
 
-void test('job output keeps a 256 KiB live window, 16 KiB settled tail and a bounded spill file', (t) => {
-	const ring = new JobOutputRing();
+void test('job output keeps a 256 KiB live window, 16 KiB settled tail and a bounded spill file', async (t) => {
+	const { ctx } = await fixture(t);
+	const cacheDirectory = scribeDataPaths(ctx.cwd).cache;
+	const ring = new JobOutputRing({ cacheDirectory, conversationId: 'job-fixture' });
 	t.after(() => ring.dispose());
 	const total = 300_000;
 	ring.appendText('stdout', 'a'.repeat(total));
@@ -356,9 +393,10 @@ void test('job output keeps a 256 KiB live window, 16 KiB settled tail and a bou
 	assert.ok(Buffer.byteLength(ring.text().stdout, 'utf8') <= 16_384 + 40);
 	const spill = ring.paths()[0];
 	assert.ok(spill);
+	assert.ok(spill.startsWith(join(cacheDirectory, 'job-fixture', 'root', 'scribe-ai-shell-')));
+	assert.equal(basename(spill), 'stdout.log');
 	ring.dispose();
 	assert.equal(fs.existsSync(spill), true);
-	fs.rmSync(dirname(spill), { recursive: true, force: true });
 });
 
 void test('background commands ignore the call timeout and keep running until stopped', { skip: !available('Bash') }, async (t) => {

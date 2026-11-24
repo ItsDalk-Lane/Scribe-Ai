@@ -184,7 +184,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		: busy || hasActiveAgents ? 'running' : (execution.state ?? lastRun?.state)?.status === 'failed' ? 'error' : undefined;
 	const tabHasDraft = dirty || Boolean(composerMode) || Boolean(editing) || Boolean(queue.rows.length);
 	const goal = useChatGoal({
-		app: services.app, store: services.orchestration.conversations, conversationId, isOpen: open,
+		app: services.app, store: services.orchestration.conversations, localState: services.localState, conversationId, isOpen: open,
 		canContinue: open && !busy && !loading && !managingHistory && !editing && !instruction.trim() && !target
 			&& !queue.rows.length && !hasActiveAgents && !chatModel.saving && !chatModel.selecting && Boolean(chatModel.choice) && !composerMode,
 		start: (value) => perform(undefined, undefined, undefined, {
@@ -848,8 +848,10 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				return controls.ui.show(tr('重试结果', 'Retry result'), [result.content]);
 			}
 			case 'presets': {
-				const result = command.presetIndex === undefined ? await showSlashPresets(app, controls.ui, tr, subcommand === 'new')
-					: readPresets(app)[command.presetIndex]?.content ?? false;
+				const result = command.presetIndex === undefined ? await showSlashPresets({
+					read: () => services.settings.slashPresets,
+					save: (update) => plugin.saveSlashPresets(update),
+				}, controls.ui, tr, subcommand === 'new') : services.settings.slashPresets?.[command.presetIndex]?.content ?? false;
 				if (typeof result !== 'string') return result;
 				if (!mounted.current || !visible.current) return false;
 				const preset = parseSlashCommand(result);
@@ -963,7 +965,8 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 					<path fill="currentColor" d="M72 10a8 8 0 0 1 11.3 0l6.7 6.7a8 8 0 0 1 0 11.3L39 79 17 84l5-22L72 10zm-3 14L29 64l-2 10 10-2 40-40-8-8zM13 90h74v6H13z" />
 				</svg>
 				{text.chatEmptyHeading}
-			</h1> : <ExecutionView key={conversationId} app={services.app} skills={services.orchestration.skills} execution={execution} liveRequest={liveRequest} liveModel={liveModel}
+			</h1> : <ExecutionView key={conversationId} app={services.app} localState={services.localState} skills={services.orchestration.skills}
+				execution={execution} liveRequest={liveRequest} liveModel={liveModel}
 				history={visibleHistory} reports={agentSnapshot.reports} loading={loading} conversationId={conversationId} editingId={editing?.taskId}
 				automaticReview={active.current?.executionMode === 'auto-review'}
 					submissions={agentSnapshot.submissions} inspectSubagent={openAgent} subagentNames={subagentNames}
@@ -1034,6 +1037,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				error={error}
 				instruction={instruction}
 				slashCommands={{ surface: 'main', goalActions: Boolean(goal.value), getSubcommands: getSlashSubcommands,
+					getPresets: () => readPresets(services.settings.slashPresets),
 					getTargets: () => getSlashTargets(plugin), subscribeTargets: subscribeSlashTargets, selectTarget: setTarget, unavailable: slashUnavailable, run: runSlash }}
 				onChange={(value, mentions, scope) => {
 					setInstruction(value); setSkillMentions(mentions);

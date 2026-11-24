@@ -5,7 +5,7 @@ import { TOOL_NOT_APPROVED } from '../types';
 import type { ToolExecutor, ToolRegistry } from '../types';
 
 /** 执行前校验、取得授权，再返回可直接配对的工具结果。 */
-export function createToolExecutor(registry: ToolRegistry): ToolExecutor {
+export function createToolExecutor(registry: ToolRegistry, cacheDirectory?: string): ToolExecutor {
 	return {
 		execute: async (call, ctx) => {
 			const { signal, approve, permissions, retryApproval } = ctx;
@@ -34,7 +34,9 @@ export function createToolExecutor(registry: ToolRegistry): ToolExecutor {
 				const text = typeof output === 'string' ? output : output.content;
 				// The tool's own cap runs first; the DSH inline budget then handles the surviving text.
 				const limited = truncate(text, tool.maxResultSizeChars ?? 300_000);
-				const content = boundToolResult(limited, tool.name);
+				const content = boundToolResult(limited, tool.name, cacheDirectory ? {
+					cacheDirectory, conversationId: ctx.task.request.conversationId, subagentId: ctx.subagentId,
+				} : undefined);
 				if (typeof output !== 'string' && 'shellStatus' in output) {
 					return { callId: call.id, content, isError: output.shellStatus !== 'success', shellStatus: output.shellStatus };
 				}

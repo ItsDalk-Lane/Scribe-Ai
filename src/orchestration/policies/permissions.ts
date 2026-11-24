@@ -2,6 +2,7 @@ import { skillWriteProtected } from '../../skills/library/writeProtection';
 import { realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { ExecutionMode, NoteRef, PermissionPolicy } from '../../types';
+import { scribeDataPaths } from '../storage/paths';
 
 function includesPath(root: string, target: string): boolean {
 	const child = relative(root, target);
@@ -31,6 +32,9 @@ export async function createPermissionPolicy(
 	const roots = [cwd, vaultRoot];
 	const protectedRoots = roots.map((root) => resolve(root, configDir));
 	protectedRoots.push(await canonicalPath(resolve(vaultRoot, configDir)));
+	const privateRoots = roots.map((root) => scribeDataPaths(root).root);
+	const actualPrivateRoot = await canonicalPath(scribeDataPaths(vaultRoot).root);
+	if (!includesPath(actualPrivateRoot, vaultRoot)) privateRoots.push(actualPrivateRoot);
 	const inVault = (path: string) => roots.some((root) => includesPath(root, path));
 	const explicit = (await Promise.all(refs.map(async (ref) => {
 		const path = resolve(cwd, ref.path);
@@ -45,8 +49,16 @@ export async function createPermissionPolicy(
 			ref.kind === 'folder' ? includesPath(item, path) : relative(item, path) === ''
 	)));
 	const isProtected = (path: string) => protectedRoots.some((root) => includesPath(root, path));
+	const pathKey = (path: string) => process.platform === 'darwin' || process.platform === 'win32' ? path.toLowerCase() : path;
+	const isScribePrivate = (path: string, forWrite = false) => privateRoots.some((root) => {
+		const target = pathKey(path);
+		const base = pathKey(root);
+		if (target === base) return forWrite;
+		return includesPath(base, target) && !includesPath(resolve(base, 'skills'), target);
+	});
 
 	function access(path: string, forWrite: boolean): boolean {
+		if (isScribePrivate(path, forWrite)) return false;
 		if (forWrite && executionMode !== 'full-access' && roots.some((root) =>
 			includesPath(root, path) && skillWriteProtected(vaultRoot, resolve(vaultRoot, relative(root, path))))) return false;
 		const matches = matchingReferences(path);
@@ -62,7 +74,8 @@ export async function createPermissionPolicy(
 	return {
 		executionMode,
 		canRequestPath: executionMode && executionMode !== 'full-access'
-			? (path) => !inVault(path) && !isProtected(path) && !matchingReferences(path).some(({ ref }) => ref.lines)
+			? (path, operation) => !inVault(path) && !isProtected(path) && !isScribePrivate(path, operation === 'write')
+				&& !matchingReferences(path).some(({ ref }) => ref.lines)
 			: undefined,
 		canRead: (path) => access(path, false),
 		readLines: (path) => {

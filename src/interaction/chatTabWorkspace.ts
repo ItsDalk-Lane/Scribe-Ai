@@ -1,20 +1,3 @@
-import type { App } from 'obsidian';
-import type { ExecutionMode } from '../types';
-
-export function executionModeKey(conversationId?: string): string {
-	return conversationId ? `scribe-ai:execution-mode:${conversationId}` : 'scribe-ai:last-execution-mode';
-}
-
-export function loadExecutionMode(app: Pick<App, 'loadLocalStorage'>, conversationId?: string): ExecutionMode {
-	try {
-		const mode: unknown = app.loadLocalStorage(executionModeKey(conversationId));
-		if (mode === 'ask' || mode === 'auto-review' || mode === 'full-access') return mode;
-	} catch {
-		// 损坏的模式记录按缺失处理。
-	}
-	return 'ask';
-}
-
 export interface TabPaneState {
 	conversation: { id: string; runs: readonly unknown[]; queue?: readonly unknown[]; hasGoal?: true };
 	open: boolean;

@@ -2,12 +2,13 @@ import assert from 'node:assert/strict';
 import fs, { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { App, TFile } from 'obsidian';
 import type { Message, ToolApproval, ToolContext } from '../../types';
 import { createPermissionPolicy } from '../../orchestration/policies/permissions';
+import { scribeDataPaths } from '../../orchestration/storage/paths';
 import { createReadDelivery } from '../../runtime/readDelivery';
 import { createToolExecutor } from '../executor';
 import { createToolRegistry } from '../index';
@@ -127,6 +128,45 @@ void test('read approval stays bound to the resolved file if a link is retargete
 	const result = await executor.execute({ name: 'Read', id: 'read', input: { file_path: link } }, context);
 	assert.equal(result.isError, true);
 	assert.equal(context.readFiles.has(other), false);
+});
+
+void test('normal tools hide plugin data and only open explicit cached outputs for the current chat', async (testContext) => {
+	const { cwd, context, run, prepare } = await fileToolsFixture(testContext);
+	const paths = scribeDataPaths(cwd);
+	const own = join(paths.cache, context.task.request.conversationId, 'root', 'scribe-ai-tools-Ab12Cd', 'result.txt');
+	const child = join(paths.cache, context.task.request.conversationId, 'child', 'scribe-ai-shell-Ab12Cd', 'stdout.log');
+	const other = join(paths.cache, 'other', 'root', 'scribe-ai-tools-Ab12Cd', 'result.txt');
+	const skill = join(paths.skills, 'writing', 'SKILL.md');
+	const migration = join(paths.migration, 'staged.json');
+	const conversation = join(paths.conversations, 'test.jsonl');
+	for (const file of [own, child, other, skill, migration, conversation, paths.settings, paths.state]) {
+		await mkdir(dirname(file), { recursive: true });
+		await writeFile(file, 'sample output');
+	}
+	const references = [{ path: paths.root, kind: 'folder' } as const];
+	context.permissions = await createPermissionPolicy(cwd, context.app.vault.configDir, references, () => true, 'ask');
+	for (const file of [paths.settings, paths.state, conversation, migration, other, join(own, '..')]) {
+		await assert.rejects(run('Read', { file_path: file }), /未包含/u);
+		await assert.rejects(prepare('Write', { file_path: file, content: 'new' }), /未包含/u);
+	}
+	assert.match(await run('Read', { file_path: skill }), /sample output/u);
+	assert.match(await run('Read', { file_path: own }), /sample output/u);
+	assert.match(await run('Read', { file_path: child }), /sample output/u);
+	context.subagentId = 'child';
+	assert.match(await run('Read', { file_path: child }), /sample output/u);
+	await assert.rejects(run('Read', { file_path: own }), /未包含/u);
+	if (process.platform !== 'win32') {
+		const alias = join(cwd, 'history.jsonl');
+		await symlink(conversation, alias);
+		await assert.rejects(run('Read', { file_path: alias }), /未包含/u);
+	}
+	const executor = createToolExecutor(createToolRegistry([searchTools]));
+	const search = (name: string, input: Record<string, string>) => executor.execute({ id: name, name, input }, context);
+	const global = await search('Grep', { pattern: 'sample output' });
+	assert.match(global.content, /SKILL\.md/u);
+	assert.doesNotMatch(global.content, /result\.txt|stdout\.log|settings\.json|state\.json|\.jsonl|staged\.json/u);
+	assert.match((await search('Grep', { path: child, pattern: 'sample output' })).content, /stdout\.log/u);
+	assert.equal((await search('Grep', { path: paths.cache, pattern: 'sample output' })).isError, true);
 });
 
 void test('File tools read and write vault files and authorized external files', async (testContext) => {

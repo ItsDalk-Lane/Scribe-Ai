@@ -1,8 +1,9 @@
 import { Buffer } from 'node:buffer';
-import { chmodSync, closeSync, mkdtempSync, openSync, unlinkSync, writeSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { closeSync, openSync, unlinkSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { createSpillDirectory, SHELL_SPILL_PREFIX } from '../support/resultSpill';
+import type { SpillLocation } from '../support/resultSpill';
 import type { ShellOutputCursor } from './shellOutput';
 
 type Channel = keyof ShellOutputCursor;
@@ -138,10 +139,11 @@ class JobSpill {
 		stdout: { path: undefined, fd: undefined, pending: [], pendingBytes: 0, written: 0, broken: false },
 		stderr: { path: undefined, fd: undefined, pending: [], pendingBytes: 0, written: 0, broken: false },
 	};
+	constructor(private readonly location?: SpillLocation) {}
 
 	write(channel: Channel, buffer: Buffer): void {
 		const file = this.files[channel];
-		if (file.broken || buffer.length === 0) return;
+		if (!this.location || file.broken || buffer.length === 0) return;
 		if (file.written + file.pendingBytes + buffer.length > SPILL_STREAM_BYTES) {
 			this.breakFile(channel);
 			return;
@@ -151,8 +153,9 @@ class JobSpill {
 			file.pendingBytes += buffer.length;
 			if (file.pendingBytes <= SPILL_TRIGGER_BYTES) return;
 			try {
-				this.ensureDirectory();
-				file.path = join(this.directory!, `${channel}.log`);
+				this.directory ??= createSpillDirectory(this.location, SHELL_SPILL_PREFIX);
+				if (!this.directory) { this.breakFile(channel); return; }
+				file.path = join(this.directory, `${channel}.log`);
 				file.fd = openSync(file.path, 'wx', 0o600);
 				for (const pending of file.pending) writeSync(file.fd, pending);
 				file.written = file.pendingBytes;
@@ -189,12 +192,6 @@ class JobSpill {
 		return [this.files.stdout.path, this.files.stderr.path].filter((path): path is string => path !== undefined);
 	}
 
-	private ensureDirectory(): void {
-		if (this.directory !== undefined) return;
-		this.directory = mkdtempSync(join(tmpdir(), 'scribe-ai-shell-'));
-		chmodSync(this.directory, 0o700);
-	}
-
 	private breakFile(channel: Channel): void {
 		const file = this.files[channel];
 		if (file.fd !== undefined) {
@@ -216,7 +213,9 @@ class JobSpill {
 export class JobOutputRing {
 	private readonly stdout = new StreamRing();
 	private readonly stderr = new StreamRing();
-	private readonly spill = new JobSpill();
+	private readonly spill: JobSpill;
+
+	constructor(location?: SpillLocation) { this.spill = new JobSpill(location); }
 
 	appendBytes(channel: Channel, chunk: Buffer): void {
 		this.spill.write(channel, chunk);

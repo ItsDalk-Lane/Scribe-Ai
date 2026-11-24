@@ -5,7 +5,8 @@ import {
 	slashCommandMatches, slashCommandQuery, slashSearchMatch, slashTargetMatches,
 } from '../slashCommands';
 import { editSkillText, insertSkill, sliceSkillMentions } from '../components/skillMentionText';
-import { showSlashPresets } from '../slashPresets';
+import { clearLegacyPresets, readLegacyPresets, showSlashPresets } from '../slashPresets';
+import type { Preset } from '../slashPresets';
 
 void test('slash commands recognize aliases and keep the original argument offsets', () => {
 	const input = '/btw  先看 📓\n$edit ';
@@ -38,10 +39,10 @@ void test('localized command names parse and match without the English token', (
 });
 
 void test('the preset menu offers a clear first action and reopens saved presets', async () => {
-	let stored: unknown;
-	const app = {
-		loadLocalStorage: () => stored,
-		saveLocalStorage: (_key: string, value: unknown) => { stored = value; },
+	let stored: (Preset | null)[] | undefined;
+	const storage: Parameters<typeof showSlashPresets>[0] = {
+		read: () => stored,
+		save: (update) => { stored = update(stored ?? []); return Promise.resolve(); },
 	};
 	const menus: string[][] = [];
 	const selections = ['新建预设', '2 · 总结笔记', '运行'];
@@ -60,18 +61,18 @@ void test('the preset menu offers a clear first action and reopens saved presets
 		confirm: async () => false,
 	};
 	const tr = (zh: string) => zh;
-	assert.equal(await showSlashPresets(app, ui, tr), true);
-	assert.equal(await showSlashPresets(app, ui, tr), '请总结这篇笔记。');
+	assert.equal(await showSlashPresets(storage, ui, tr), true);
+	assert.equal(await showSlashPresets(storage, ui, tr), '请总结这篇笔记。');
 	assert.deepEqual(menus, [['新建预设'], ['新建预设', '1 · 已有命令', '2 · 总结笔记'], ['运行', '编辑', '删除']]);
 });
 
 void test('the direct new preset shortcut opens its form and uses the latest free slot', async () => {
 	const existing = { label: '已有预设', content: '/warnings' };
 	const concurrent = { label: '同时保存的预设', content: '/skills' };
-	let stored: unknown = [existing];
-	const app = {
-		loadLocalStorage: () => stored,
-		saveLocalStorage: (_key: string, value: unknown) => { stored = value; },
+	let stored: (Preset | null)[] = [existing];
+	const storage: Parameters<typeof showSlashPresets>[0] = {
+		read: () => stored,
+		save: (update) => { stored = update(stored); return Promise.resolve(); },
 	};
 	const ui: Parameters<typeof showSlashPresets>[1] = {
 		choose: async () => assert.fail('Direct creation must skip the presets picker'),
@@ -83,10 +84,23 @@ void test('the direct new preset shortcut opens its form and uses the latest fre
 		confirm: async () => false,
 	};
 	const tr = (zh: string) => zh;
-	assert.equal(await showSlashPresets(app, ui, tr, true), true);
-	assert.deepEqual((stored as unknown[]).slice(0, 3), [existing, concurrent, { label: '整理内容', content: '请整理这段内容。' }]);
+	assert.equal(await showSlashPresets(storage, ui, tr, true), true);
+	assert.deepEqual(stored.slice(0, 3), [existing, concurrent, { label: '整理内容', content: '请整理这段内容。' }]);
 	stored = Array.from({ length: 10 }, () => existing);
-	await assert.rejects(() => showSlashPresets(app, { ...ui, prompt: async () => assert.fail('No preset slot is free') }, tr, true), /预设已满/u);
+	await assert.rejects(() => showSlashPresets(storage, { ...ui, prompt: async () => assert.fail('No preset slot is free') }, tr, true), /预设已满/u);
+});
+
+void test('旧预设导入保留原槽位，清理前仍可重复读取', () => {
+	const preset = { label: '曾保存的预设', content: '/warnings' };
+	let stored: unknown = [null, preset, null, { content: 123 }];
+	const app = {
+		loadLocalStorage: () => stored,
+		saveLocalStorage: (_key: string, value: unknown) => { stored = value; },
+	};
+	assert.deepEqual(readLegacyPresets(app).slice(0, 4), [null, preset, null, null]);
+	assert.deepEqual(stored, [null, preset, null, { content: 123 }]);
+	clearLegacyPresets(app);
+	assert.deepEqual(readLegacyPresets(app), Array.from({ length: 10 }, () => null));
 });
 
 void test('model and permissions are not slash commands', () => {

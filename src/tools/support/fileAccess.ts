@@ -38,7 +38,8 @@ async function readDiskFile(ctx: ToolContext, path: ResolvedToolPath): Promise<B
 	const file = await open(path.absolutePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
 	try {
 		const current = await file.stat();
-		if (!current.isFile() || current.ino !== path.stat?.ino || current.dev !== path.stat?.dev) {
+		if (!current.isFile() || current.ino !== path.stat?.ino || current.dev !== path.stat?.dev
+			|| (path.cacheOutput && current.nlink !== 1)) {
 			throw new Error('文件位置或状态已变化，请重新确认。');
 		}
 		if (current.size > MAX_TEXT_BYTES) throw new Error('文件超过 2 MB 的文本处理限制。');
@@ -52,7 +53,7 @@ export async function readToolFile(ctx: ToolContext, path: ResolvedToolPath): Pr
 	if (!path.stat?.isFile()) throw new Error('请选择一个文件。');
 	if (path.stat.size > MAX_TEXT_BYTES) throw new Error('文件超过 2 MB 的文本处理限制。');
 	ctx.signal.throwIfAborted();
-	const file = path.vaultPath ? ctx.app.vault.getFileByPath(path.vaultPath) : null;
+	const file = !path.cacheOutput && path.vaultPath ? ctx.app.vault.getFileByPath(path.vaultPath) : null;
 	const bytes = file
 		? await ctx.app.vault.readBinary(file)
 		: await readDiskFile(ctx, path);

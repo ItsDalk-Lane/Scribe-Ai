@@ -73,7 +73,7 @@ export class ShellJobs {
 	private revision = 0;
 	private disposed = false;
 
-	constructor(private readonly history?: ShellJobHistory) {}
+	constructor(private readonly history?: ShellJobHistory, private readonly cacheDirectory?: string) {}
 
 	start(
 		conversationId: string, name: ShellJobView['name'], output: ShellOutputCapture,
@@ -99,7 +99,7 @@ export class ShellJobs {
 		const controller = new AbortController();
 		const abort = () => controller.abort(signal.reason);
 		signal.addEventListener('abort', abort, { once: true });
-		const ring = new JobOutputRing();
+		const ring = this.outputRing(owner, subagentId);
 		const stopObserving = output.observe((channel, chunk) => ring.appendBytes(channel, chunk));
 		let promoted = false;
 		let wait: ReturnType<typeof setTimeout> | undefined;
@@ -141,6 +141,10 @@ export class ShellJobs {
 		return [...this.jobs.values()].filter(({ view }) => view.content === undefined).length < MAX_RUNNING;
 	}
 
+	private outputRing(conversationId: string, subagentId?: string): JobOutputRing {
+		return new JobOutputRing(this.cacheDirectory ? { cacheDirectory: this.cacheDirectory, conversationId, subagentId } : undefined);
+	}
+
 	private track(
 		owner: string, name: ShellJobView['name'], command: string | undefined, output: ShellOutputCapture,
 		controller: AbortController, result: Promise<ShellJobResult>, subagentId?: string,
@@ -148,7 +152,7 @@ export class ShellJobs {
 	): string {
 		const id = randomUUID();
 		const startedAt = Date.now();
-		const ring = prepared?.ring ?? new JobOutputRing();
+		const ring = prepared?.ring ?? this.outputRing(owner, subagentId);
 		const stopObserving = prepared?.stopObserving
 			?? output.observe((channel, chunk) => ring.appendBytes(channel, chunk));
 		if (prepared === undefined) {

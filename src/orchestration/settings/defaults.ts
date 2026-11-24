@@ -3,6 +3,7 @@ import { normalizeMcpSettings } from '../../tools/external/mcpConfig';
 import { normalizeVaultRelativePath } from '../../tools/support/pathUtils';
 import { DEFAULT_SUBAGENT_SETTINGS, normalizeSubagentSettings } from './subagentSettings';
 import { chatModelKey, isThinkingLevel } from './thinking';
+import { normalizePresets } from '../../interaction/slashPresets';
 
 export function normalizeSkillSettings(raw?: Partial<SkillSettings>): SkillSettings {
 	const strings = (items: unknown) => Array.isArray(items) ? [...new Set(items.filter((x): x is string => typeof x === 'string' && Boolean(x.trim())))] : [];
@@ -124,6 +125,7 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 		subagents: normalizeSubagentSettings(stored.subagents),
 		skillSettings: normalizeSkillSettings(stored.skillSettings),
 		mcp: normalizeMcpSettings(stored.mcp),
+		...(stored.slashPresets !== undefined ? { slashPresets: normalizePresets(stored.slashPresets) } : {}),
 		...(writingRules ? { writingRules } : {}),
 		...(writingRulesBackup ? { writingRulesBackup } : {}),
 		communication: {

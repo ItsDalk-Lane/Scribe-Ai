@@ -1,4 +1,5 @@
 import { skillWriteLocations } from '../../skills/library/writeProtection';
+import { scribeDataPaths } from '../../orchestration/storage/paths';
 import { accessSync, constants } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -19,6 +20,7 @@ export function hasMacShellSandbox(): boolean {
 
 export async function macShellSandboxArgs(ctx: ToolContext): Promise<string[]> {
 	const vault = await realpath(ctx.cwd);
+	const data = scribeDataPaths(vault);
 	const protectedPaths = new Set([resolve(vault, ctx.app.vault.configDir)]);
 	for (const ref of ctx.task.request.refs) {
 		const path = resolve(vault, ref.path);
@@ -54,6 +56,9 @@ export async function macShellSandboxArgs(ctx: ToolContext): Promise<string[]> {
 		(allow file-write* (subpath (param "VAULT")))
 		(deny file-write* ${restrictedWrites.map(({ scope, key }) => `(${scope} (param "${key}"))`).join(' ')})
 		(deny file-read* file-write* ${parameters.map(({ key }) => `(subpath (param "${key}"))`).join(' ')})
+		(deny file-read* file-write* (require-all (subpath (param "SCRIBE_DATA"))
+			(require-not (subpath (param "SCRIBE_SKILLS")))))
 	`;
-	return ['-D', `VAULT=${vault}`, ...[...parameters,...restrictedWrites].flatMap(({ key, path }) => ['-D', `${key}=${path}`]), '-p', profile];
+	return ['-D', `VAULT=${vault}`, '-D', `SCRIBE_DATA=${data.root}`, '-D', `SCRIBE_SKILLS=${data.skills}`,
+		...[...parameters,...restrictedWrites].flatMap(({ key, path }) => ['-D', `${key}=${path}`]), '-p', profile];
 }

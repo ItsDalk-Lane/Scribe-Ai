@@ -9,7 +9,7 @@ import type { SlashCommand, SlashCommandName, SlashCommandSurface, SlashSubcomma
 import type { SlashUi } from '../slashUi';
 import { slashCommandText } from '../slashCommandText';
 import { tr } from '../skills/dialog';
-import { readPresets } from '../slashPresets';
+import type { Preset } from '../slashPresets';
 import { uiText } from '../uiText';
 import type { ChatModelGroup } from '../useChatModel';
 import ChatIcon from './ChatIcon';
@@ -67,6 +67,7 @@ interface TaskInputProps {
 	slashCommands?: {
 		surface: SlashCommandSurface;
 		goalActions?: boolean;
+		getPresets?: () => readonly (Preset | undefined)[];
 		getSubcommands?: () => readonly SlashSubcommand[];
 		getTargets?: () => readonly SlashTargetChoice[];
 		subscribeTargets?: (listener: () => void) => (() => void) | undefined;
@@ -248,7 +249,7 @@ export default function TaskInput({
 					slash={slashCommands && !commandRunning ? {
 						surface: slashCommands.surface, run: (value, ui, preserveDraft) => void runSlash(value, ui, preserveDraft),
 						unavailable: commandUnavailable,
-						getPresets: () => readPresets(context.app), goalActions: slashCommands.goalActions,
+						getPresets: slashCommands.getPresets, goalActions: slashCommands.goalActions,
 						getSubcommands: slashCommands.getSubcommands,
 						getTargets: slashCommands.getTargets, selectTarget: selectSlashTarget,
 						focusInput,

@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { Notice } from 'obsidian';
 import type { App } from 'obsidian';
+import type { LocalState } from '../../orchestration/storage/localState';
 import type { SavedRun, SkillRegistry, SubagentSnapshot, TaskRequest } from '../../types';
 import { chatTurnPreview } from '../chatTurnContent';
-import { restoredTimelineExpansion, toggleTimelineExpansion } from '../chatTimeline';
+import { toggleTimelineExpansion } from '../chatTimeline';
 import { restoreExecution } from '../context';
 import type { ChatExecution, DisplayedRun } from '../context';
 import { uiText } from '../uiText';
@@ -12,8 +14,6 @@ import ChatIcon from './ChatIcon';
 import type { InspectSubagent } from './SubagentsPanel';
 import TranscriptSelection from './TranscriptSelection';
 import TurnNavigator from './TurnNavigator';
-
-const expansionKey = 'scribe-ai:timeline-expanded';
 
 function turnAtScroll(column: HTMLDivElement | null, top: number) {
 	const rows = column?.children;
@@ -29,11 +29,12 @@ function turnAtScroll(column: HTMLDivElement | null, top: number) {
 }
 
 export default function ExecutionView({
-	app, skills, execution, history, reports, loading, conversationId, liveRequest, liveModel, editingId, onEdit, onFork,
+	app, localState, skills, execution, history, reports, loading, conversationId, liveRequest, liveModel, editingId, onEdit, onFork,
 	onQuoteSelection, onSideChatSelection, temporary = false, automaticReview = false, renderActivity,
 	submissions, inspectSubagent, subagentNames,
 }: {
 	app: App; skills: SkillRegistry; execution: ChatExecution; history: DisplayedRun[]; loading: boolean; conversationId: string | null;
+	localState?: LocalState;
 	liveRequest?: TaskRequest; liveModel?: SavedRun['model']; editingId?: string;
 	reports?: SubagentSnapshot['reports'];
 	onEdit?: (taskId: string) => void; onFork?: (taskId: string) => void;
@@ -48,8 +49,16 @@ export default function ExecutionView({
 	const jumpedTop = useRef<number | undefined>(undefined);
 	const [away, setAway] = useState(false);
 	const [current, setCurrent] = useState<string>();
-	const [expanded, setExpanded] = useState(() => restoredTimelineExpansion(temporary ? undefined : app.loadLocalStorage(expansionKey)));
-	const toggleExpanded = useCallback((id: string) => setExpanded((previous) => toggleTimelineExpansion(previous, id)), []);
+	const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => localState?.timelineExpanded() ?? new Set());
+	const toggleExpanded = useCallback((id: string) => {
+		if (!localState) {
+			setExpanded((previous) => toggleTimelineExpansion(previous, id));
+			return;
+		}
+		const next = toggleTimelineExpansion(localState.timelineExpanded(), id);
+		setExpanded(next);
+		void localState.saveTimelineExpanded(next).catch(() => new Notice(text.saveFailed));
+	}, [localState, text.saveFailed]);
 	const restored = useMemo(() => history.map((run) => ({
 		id: run.state.taskId, execution: restoreExecution(run), request: run.request, step: run.step, model: run.model,
 		subagentReport: run.subagentReport,
@@ -63,10 +72,6 @@ export default function ExecutionView({
 	const entries = liveId
 		? [...savedEntries, { id: liveId, ...chatTurnPreview(execution, liveRequest?.instruction, liveReport) }]
 		: savedEntries;
-
-	useEffect(() => {
-		if (!temporary) app.saveLocalStorage(expansionKey, [...expanded]);
-	}, [app, expanded, temporary]);
 
 	useLayoutEffect(() => {
 		follow.current = true;

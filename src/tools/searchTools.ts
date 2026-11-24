@@ -191,7 +191,7 @@ async function prepareSearch(
 	ctx: ToolContext, path: string | undefined, title: string, pattern: string,
 	run: (target: ResolvedToolPath | undefined) => Promise<string>,
 ): Promise<PreparedTool> {
-	const target = path === undefined ? undefined : await resolveToolPath(ctx, path, 'read', { requestApproval: true });
+	const target = path === undefined ? undefined : await resolveToolPath(ctx, path, 'read', { requestApproval: true, readCache: true });
 	return {
 		approval: target?.requiresApproval ? {
 			kind: 'access', title, target: target.absolutePath, reason: `${title}。匹配模式为 ${JSON.stringify(pattern)}。`,

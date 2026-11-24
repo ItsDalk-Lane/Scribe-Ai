@@ -24,7 +24,7 @@ export const readTools: ToolModule = () => [{
 		const file = requiredText(args, 'file_path');
 		const offset = positiveInteger(args.offset, 'offset', 0) ?? 1;
 		const limit = positiveInteger(args.limit, 'limit', 1);
-		const target = await resolveToolPath(ctx, file, 'read', { requestApproval: true });
+		const target = await resolveToolPath(ctx, file, 'read', { requestApproval: true, readCache: true });
 		return {
 			approval: target.requiresApproval ? {
 				kind: 'access', title: '读取库外文件', target: target.absolutePath,

@@ -5,13 +5,12 @@ import type ScribeAiPlugin from '../main';
 import { MissingConversationError } from '../types';
 import type { ConversationSnapshot, ConversationSummary, ExecutionMode } from '../types';
 import App from './App';
-import { executionModeKey, loadExecutionMode, replaceActiveTabPane } from './chatTabWorkspace';
+import { replaceActiveTabPane } from './chatTabWorkspace';
 import type { HistoryTrigger } from './components/ChatNavigation';
 import ChatTabBar from './components/ChatTabBar';
 import { subagentIsActive } from './components/SubagentsPanel';
 import { uiText } from './uiText';
 import type { SkillDraft } from './components/skillMentionText';
-import { clearChatGoal } from './useChatGoal';
 
 export interface ChatTabActivity {
 	status?: 'running' | 'attention' | 'error';
@@ -45,7 +44,7 @@ export default function ChatTabs({ plugin, registerTabOpener, historyTrigger }: 
 	historyTrigger: HistoryTrigger;
 }) {
 	const text = uiText();
-	const app = plugin.app;
+	const { localState } = plugin.services;
 	const { conversations, sessions } = plugin.services.orchestration;
 	const [workspace, setWorkspace] = useState<Workspace>();
 	const [index, setIndex] = useState<ConversationSummary[]>([]);
@@ -67,13 +66,13 @@ export default function ChatTabs({ plugin, registerTabOpener, historyTrigger }: 
 			const conversation = history.status === 'fulfilled' && history.value.some(({ id, archived }) => id === recent?.id && archived)
 				? undefined : recent;
 			const savedId = conversation && (conversation.runs.length || conversation.queue?.length || conversation.hasGoal) ? conversation.id : undefined;
-			const pane = newPane(loadExecutionMode(app, savedId), conversation);
+			const pane = newPane(localState.loadExecutionMode(savedId), conversation);
 			if (history.status === 'rejected' || last.status === 'rejected') pane.initialError = text.chatHistoryError;
 			if (!conversation) unopenedPane.current = pane.conversation.id;
 			setWorkspace({ activeId: pane.conversation.id, panes: [pane] });
 		});
 		return () => { closed = true; mounted.current = false; };
-	}, [app, sessions, text.chatHistoryError]);
+	}, [localState, sessions, text.chatHistoryError]);
 
 	const activeId = workspace?.activeId;
 	useLayoutEffect(() => { latestWorkspace.current = workspace; }, [workspace]);
@@ -96,13 +95,8 @@ export default function ChatTabs({ plugin, registerTabOpener, historyTrigger }: 
 	const hasSavedConversation = Boolean(active && (active.title || active.conversation.runs.length || active.conversation.queue?.length || active.conversation.hasGoal));
 	useLayoutEffect(() => {
 		if (!activeId || !activeMode) return;
-		try {
-			app.saveLocalStorage(executionModeKey(), activeMode);
-			if (hasSavedConversation) app.saveLocalStorage(executionModeKey(activeId), activeMode);
-		} catch {
-			new Notice(text.saveFailed);
-		}
-	}, [activeId, activeMode, app, hasSavedConversation, text.saveFailed]);
+		void localState.saveExecutionMode(activeMode, hasSavedConversation ? activeId : undefined).catch(() => new Notice(text.saveFailed));
+	}, [activeId, activeMode, localState, hasSavedConversation, text.saveFailed]);
 	const remember = activeId !== unopenedPane.current || Boolean(active?.status || active?.title);
 	useEffect(() => {
 		if (activeId && remember) void conversations.setLastOpened(activeId).catch(() => {
@@ -139,7 +133,7 @@ export default function ChatTabs({ plugin, registerTabOpener, historyTrigger }: 
 	}
 
 	function titledPane(title?: string) {
-		const pane = newPane(activeMode ?? loadExecutionMode(app));
+		const pane = newPane(activeMode ?? localState.loadExecutionMode());
 		if (title) {
 			pane.customTitle = title;
 			pendingTitles.current.set(pane.conversation.id, title);
@@ -168,12 +162,12 @@ export default function ChatTabs({ plugin, registerTabOpener, historyTrigger }: 
 			setIndex((previous) => previous.filter((row) => row.id !== id));
 			throw new MissingConversationError(text.chatHistoryError);
 		}
-		show(newPane(loadExecutionMode(app, id), snapshot));
+		show(newPane(localState.loadExecutionMode(id), snapshot));
 	}
 
 	function close(id: string, remove = false) {
 		selection.current++;
-		const fallback = newPane(activeMode ?? loadExecutionMode(app));
+		const fallback = newPane(activeMode ?? localState.loadExecutionMode());
 		setWorkspace((current) => {
 			if (!current) return current;
 			const open = current.panes.filter((pane) => pane.open);
@@ -238,8 +232,7 @@ export default function ChatTabs({ plugin, registerTabOpener, historyTrigger }: 
 		await sessions.deleteConversation(id);
 		plugin.subagentTabs.closeConversation(id);
 		try {
-			app.saveLocalStorage(executionModeKey(id), null);
-			clearChatGoal(app, id);
+			await localState.forgetConversation(id);
 		} catch {
 			new Notice(text.saveFailed);
 		}

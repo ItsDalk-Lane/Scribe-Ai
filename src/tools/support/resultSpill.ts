@@ -1,7 +1,8 @@
 import { Buffer } from 'node:buffer';
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { lstatSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, sep } from 'node:path';
+import { scribeCacheScope } from '../../orchestration/storage/paths';
+import { hasFileErrorCode } from './pathUtils';
 
 /** DSH's base `maxInlineTokens`: estimated tokens a single model-facing tool result may keep inline. */
 export const MAX_INLINE_TOKENS = 12_500;
@@ -10,8 +11,39 @@ const BLOCK_OVERHEAD = 4;
 const GAP = '\n…（输出中间已省略）…\n';
 const RETRIEVAL = '用 Read 工具按 offset/limit 读取，或用 Grep 搜索。';
 
-let directory: string | undefined;
-let sequence = 0;
+export const TOOL_SPILL_PREFIX = 'scribe-ai-tools-';
+export const SHELL_SPILL_PREFIX = 'scribe-ai-shell-';
+
+export interface SpillLocation {
+	cacheDirectory: string;
+	conversationId: string;
+	subagentId?: string;
+}
+
+export function ownedPrivateDirectory(path: string): boolean {
+	try {
+		const stat = lstatSync(path);
+		const uid = process.getuid?.();
+		return stat.isDirectory() && (stat.mode & 0o022) === 0 && (uid === undefined || stat.uid === uid);
+	} catch {
+		return false;
+	}
+}
+
+export function createSpillDirectory(location: SpillLocation, prefix: string): string | undefined {
+	const { cacheDirectory, conversationId, subagentId } = location;
+	const scope = scribeCacheScope(cacheDirectory, conversationId, subagentId);
+	if (!scope) return;
+	const vault = dirname(dirname(cacheDirectory));
+	let path = realpathSync(vault);
+	for (const part of relative(vault, scope).split(sep)) {
+		path = join(path, part);
+		try { mkdirSync(path, { mode: 0o700 }); }
+		catch (error) { if (!hasFileErrorCode(error, 'EEXIST')) throw error; }
+		if (!ownedPrivateDirectory(path)) return;
+	}
+	return mkdtempSync(join(path, prefix));
+}
 
 /** Heuristic token price used by DSH: text density plus one block overhead. */
 export function estimateResultTokens(text: string): number {
@@ -32,14 +64,13 @@ function safeTail(text: string, chars: number): string {
 	return text.slice(start);
 }
 
-function saveResult(text: string): string | undefined {
+function saveResult(text: string, location: SpillLocation | undefined): string | undefined {
+	if (!location) return;
 	try {
-		if (directory === undefined) {
-			directory = mkdtempSync(join(tmpdir(), 'scribe-ai-tools-'));
-			chmodSync(directory, 0o700);
-		}
-		const path = join(directory, `result-${process.pid}-${sequence++}.txt`);
-		writeFileSync(path, text, { mode: 0o600 });
+		const directory = createSpillDirectory(location, TOOL_SPILL_PREFIX);
+		if (!directory) return;
+		const path = join(directory, 'result.txt');
+		writeFileSync(path, text, { flag: 'wx', mode: 0o600 });
 		return path;
 	} catch {
 		return undefined;
@@ -51,9 +82,9 @@ function saveResult(text: string): string | undefined {
  * text keeps ordered head and tail previews and stores the full result in a
  * private file whose path the model can read.
  */
-export function boundToolResult(text: string, toolName: string): string {
+export function boundToolResult(text: string, toolName: string, location?: SpillLocation): string {
 	if (toolName.toLowerCase() === 'read' || estimateResultTokens(text) <= MAX_INLINE_TOKENS) return text;
-	const path = saveResult(text);
+	const path = saveResult(text, location);
 	if (path === undefined) return text;
 	const totalBytes = Buffer.byteLength(text, 'utf8');
 	const worstNotice = `\n\n（已省略 ${totalBytes} 字节。完整结果：${path}。${RETRIEVAL}）`;

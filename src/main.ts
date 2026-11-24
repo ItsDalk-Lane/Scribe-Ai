@@ -8,9 +8,8 @@ import { SubagentView } from './interaction/SubagentView';
 import { SubagentTabs } from './interaction/subagentTabs';
 import { ScribeAiSettingTab } from './interaction/SettingsTab';
 import { uiText } from './interaction/uiText';
-import { migrateWritingRules } from './orchestration/context/writingRules';
-import { normalizeSettings } from './orchestration/settings/defaults';
 import { updateChatThinking } from './orchestration/settings/thinking';
+import { initializePluginStorage } from './orchestration/storage/pluginStorage';
 import { createServices } from './services';
 import { sweepSpillFiles } from './tools/support/spillCleanup';
 import type { McpSettings } from './tools/external/mcpConfig';
@@ -21,30 +20,28 @@ export default class ScribeAiPlugin extends Plugin {
 	subagentTabs = new SubagentTabs(this.app.workspace);
 	private settingsSave = Promise.resolve();
 	private settingsListeners = new Set<() => void>();
+	private writeSettings!: (settings: ScribeSettings) => Promise<void>;
 
 	async onload() {
-		let settings = normalizeSettings((await this.loadData()) as Partial<ScribeSettings> | null);
-		if (settings.writingRules) {
-			const { writingRules, ...migrated } = settings;
-			const backup = await migrateWritingRules(this.app.vault, writingRules);
-			if (backup) migrated.writingRulesBackup = {
-				vault: backup.vault || migrated.writingRulesBackup?.vault || '',
-				folders: { ...migrated.writingRulesBackup?.folders, ...backup.folders },
-			};
-			try {
-				await this.saveData(migrated);
-				settings = migrated;
-			} catch {
-				// 保留旧配置供重试。已创建的文档将在下次被识别。
-			}
+		const storage = await initializePluginStorage(this).catch((error: unknown) => {
+			new Notice('新存储位置打不开，已保留旧数据。');
+			throw error;
+		});
+		const { settings, conversations, localState, cache } = storage;
+		this.writeSettings = storage.writeSettings;
+		try {
+			await storage.complete();
+		} catch (error) {
+			console.error('Scribe Ai 无法完成旧数据清理。', error);
+			new Notice('旧数据暂时无法清理，下次启动时会重试。');
 		}
-		this.services = createServices(this.app, settings, this.manifest, () => this.saveSettings(), {
+		this.services = createServices(this.app, settings, this.manifest, conversations, localState, cache, () => this.saveSettings(), {
 			draft: (...args) => openSkillDraftReview(this.app, ...args),
 			install: (...args) => openGithubSkillReview(this.app, ...args),
 		}, (next) => this.saveMcpSettings(next));
 		this.app.workspace.onLayoutReady(() => this.services?.tools.mcp?.reconcile());
 		queueMicrotask(() => {
-			try { sweepSpillFiles({ cleanupPeriodDays: settings.spillCleanupDays }); } catch { /* Cleanup is best effort. */ }
+			try { sweepSpillFiles({ cacheDirectory: cache, cleanupPeriodDays: settings.spillCleanupDays }); } catch { /* 清理失败时留待下次。 */ }
 		});
 
 		this.registerView(CHAT_VIEW_TYPE, (leaf) => new ChatView(leaf, this));
@@ -133,7 +130,7 @@ export default class ScribeAiPlugin extends Plugin {
 				: settings.thinkingByModel;
 			const selected = selection?.keepDefault ? { ...current, thinkingByModel }
 				: { providerId: target.providerId, model: target.model, thinkingByModel };
-			await this.saveData({ ...settings, ...selected });
+			await this.writeSettings({ ...settings, ...selected });
 			// 写入期间如有更新的设置操作，保留其选择。
 			if (selection?.keepDefault && hasModel()) {
 				settings.thinkingByModel = thinkingByModel;
@@ -143,10 +140,19 @@ export default class ScribeAiPlugin extends Plugin {
 		});
 	}
 
+	async saveSlashPresets(update: (current: NonNullable<ScribeSettings['slashPresets']>) => NonNullable<ScribeSettings['slashPresets']>): Promise<void> {
+		await this.enqueueSettingsSave(async () => {
+			const { settings } = this.services;
+			const slashPresets = update(settings.slashPresets?.slice() ?? []);
+			await this.writeSettings({ ...settings, slashPresets });
+			settings.slashPresets = slashPresets;
+		});
+	}
+
 	private async saveMcpSettings(mcp: McpSettings): Promise<void> {
 		await this.enqueueSettingsSave(async () => {
 			const { settings } = this.services;
-			await this.saveData({ ...settings, mcp });
+			await this.writeSettings({ ...settings, mcp });
 			settings.mcp = mcp;
 		});
 	}

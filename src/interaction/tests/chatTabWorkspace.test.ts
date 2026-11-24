@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import type { ViewState, Workspace } from 'obsidian';
-import { executionModeKey, loadExecutionMode, replaceActiveTabPane } from '../chatTabWorkspace';
+import { initializeLocalState, executionModeKey } from '../../orchestration/storage/localState';
+import type { ChatGoal } from '../chatGoal';
+import { replaceActiveTabPane } from '../chatTabWorkspace';
 import { readSubagentTabState, SubagentTabs } from '../subagentTabs';
 
 void test('同一子聊天重复打开时复用右栏标签，不同会话独立，删除仅关闭对应会话', async () => {
@@ -70,16 +75,51 @@ void test('a queued message keeps the previous conversation recoverable', () => 
 	]);
 });
 
-void test('execution mode records restore each conversation and the latest mode independently', () => {
+void test('本机状态和旧目标迁移后可重开，验证之前保留旧副本', async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), 'scribe-state-test-'));
+	t.after(() => rm(directory, { force: true, recursive: true }));
+	const path = join(directory, 'state.json');
+	const goal: ChatGoal = { objective: '保存旧目标', status: 'active', maxRounds: 2, usedRounds: 0, totalRounds: 0 };
 	const entries = new Map<string, unknown>([
 		[executionModeKey(), 'full-access'],
 		[executionModeKey('older'), 'auto-review'],
 		[executionModeKey('invalid'), { mode: 'full-access' }],
+		['scribe-ai:timeline-expanded', ['tool:1']],
+		['oauth-device-id', 'previous-device'],
+		['scribe-ai:chat-goal:older', goal],
+		['scribe-ai:chat-goal:unavailable', goal],
 	]);
-	const app = { loadLocalStorage: (key: string) => entries.get(key) };
-	assert.equal(loadExecutionMode(app), 'full-access');
-	assert.equal(loadExecutionMode(app, 'older'), 'auto-review');
-	assert.equal(loadExecutionMode(app, 'invalid'), 'ask');
-	assert.equal(loadExecutionMode(app, 'missing'), 'ask');
-	assert.equal(loadExecutionMode({ loadLocalStorage: () => { throw new SyntaxError('invalid local record'); } }), 'ask');
+	const app = { loadLocalStorage: (key: string) => entries.get(key), saveLocalStorage: (key: string) => { entries.delete(key); } };
+	const goals = new Map<string, ChatGoal | null>();
+	const store = {
+		loadGoal: (id: string) => Promise.resolve(goals.get(id)),
+		saveGoal: (id: string, value: ChatGoal | null) => { goals.set(id, value); return Promise.resolve(); },
+	};
+	const ids = ['older', 'invalid'];
+	const state = await initializeLocalState(path, app, ids);
+	await state.migrateLegacyGoals(store);
+	assert.equal(state.loadExecutionMode(), 'full-access');
+	assert.equal(state.loadExecutionMode('older'), 'auto-review');
+	assert.equal(state.loadExecutionMode('invalid'), 'ask');
+	assert.equal(state.loadExecutionMode('missing'), 'ask');
+	assert.equal(await state.getOAuthDeviceId(), 'previous-device');
+	assert.deepEqual([...state.timelineExpanded()], ['tool:1']);
+	assert.deepEqual(goals.get('older'), { ...goal, status: 'paused', reason: 'closed' });
+	assert.equal(entries.size, 7);
+
+	await state.saveExecutionMode('ask', 'older');
+	const reopened = await initializeLocalState(path, app, ids);
+	assert.equal(reopened.loadExecutionMode('older'), 'ask');
+	const raw = await readFile(path, 'utf8');
+	await writeFile(path, JSON.stringify({ device: 'incomplete' }));
+	await assert.rejects(reopened.clearLegacy(store), /无法确认/u);
+	assert.equal(entries.size, 7);
+	await writeFile(path, raw);
+	await reopened.clearLegacy(store);
+	assert.deepEqual([...entries.keys()], ['scribe-ai:chat-goal:unavailable']);
+	const saved: unknown = JSON.parse(raw);
+	await writeFile(path, JSON.stringify({ ...saved as object, device: 'another-device', lastExecutionMode: 'full-access' }));
+	const otherDevice = await initializeLocalState(path, app, ids);
+	assert.equal(otherDevice.loadExecutionMode(), 'ask');
+	assert.notEqual(await otherDevice.getOAuthDeviceId(), 'previous-device');
 });

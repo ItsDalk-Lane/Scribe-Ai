@@ -23,8 +23,8 @@ export function createToolRegistry(modules: ToolModule[]): ToolRegistry {
 }
 
 /** 工具层的统一出口：能力清单 + 统一执行入口 */
-export function createToolLayer(history?: ShellJobHistory, mcp?: McpManager): ToolLayer {
-	const shellJobs = new ShellJobs(history);
+export function createToolLayer(history?: ShellJobHistory, mcp?: McpManager, cacheDirectory?: string): ToolLayer {
+	const shellJobs = new ShellJobs(history, cacheDirectory);
 	const external = { web: webTools, shell: () => shellTools(shellJobs), mcp: () => mcp ? createMcpTools(mcp) : [] };
 	const registry = createToolRegistry([
 		readTools,
@@ -38,5 +38,5 @@ export function createToolLayer(history?: ShellJobHistory, mcp?: McpManager): To
 		external.shell,
 		external.mcp,
 	]);
-	return { registry, executor: createToolExecutor(registry), external, shellJobs, mcp };
+	return { registry, executor: createToolExecutor(registry, cacheDirectory), external, shellJobs, mcp };
 }

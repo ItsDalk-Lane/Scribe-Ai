@@ -17,6 +17,7 @@ import { createRunContext } from '../../orchestration/runContext';
 import { createSessionController } from '../../orchestration/sessionController';
 import { normalizeSettings } from '../../orchestration/settings/defaults';
 import { createConversationStore } from '../../orchestration/storage/conversationStore';
+import { scribeDataPaths } from '../../orchestration/storage/paths';
 import { createTask } from '../../orchestration/taskManager';
 import { createToolLayer, createToolRegistry } from '../../tools';
 import { createToolExecutor } from '../../tools/executor';
@@ -1114,7 +1115,7 @@ void test('a background command releases the chat and only its owner can read in
 	skip: !shellTools().find(({ name }) => name === 'Bash')?.isAvailable?.(),
 }, async (t) => {
 	const { app, cwd } = await fixture(t);
-	const layer = createToolLayer();
+	const layer = createToolLayer(undefined, undefined, scribeDataPaths(cwd).cache);
 	const owner = 'background-owner';
 	let pending: ToolCall[] = [];
 	let approvals = 0;

@@ -9,28 +9,43 @@ export interface Preset {
 
 const storageKey = 'scribe-ai:slash-presets';
 const presetLimit = 10;
-type PresetStorage = Pick<App, 'loadLocalStorage' | 'saveLocalStorage'>;
+type StoredPresets = (Preset | null)[];
+interface PresetStorage {
+	read(): StoredPresets | undefined;
+	save(update: (current: StoredPresets) => StoredPresets): Promise<void>;
+}
 
-export function readPresets(app: PresetStorage): (Preset | undefined)[] {
-	const stored: unknown = app.loadLocalStorage(storageKey);
+export function normalizePresets(stored: unknown): StoredPresets {
 	return Array.from({ length: presetLimit }, (_, index) => {
 		const value: unknown = Array.isArray(stored) ? stored[index] : undefined;
-		if (!value || typeof value !== 'object') return;
+		if (!value || typeof value !== 'object') return null;
 		const { label, content } = value as Partial<Preset>;
-		if (typeof label === 'string' && typeof content === 'string' && content.trim() && content.length <= 12_000) return { label, content };
-		return undefined;
+		return typeof label === 'string' && typeof content === 'string' && content.trim() && content.length <= 12_000
+			? { label, content } : null;
 	});
+}
+
+export function readLegacyPresets(app: Pick<App, 'loadLocalStorage'>): StoredPresets {
+	return normalizePresets(app.loadLocalStorage(storageKey));
+}
+
+export function clearLegacyPresets(app: Pick<App, 'saveLocalStorage'>): void {
+	app.saveLocalStorage(storageKey, null);
+}
+
+export function readPresets(stored: unknown): (Preset | undefined)[] {
+	return normalizePresets(stored).map((preset) => preset ?? undefined);
 }
 
 export function presetLabel(preset: Preset): string {
 	return preset.label || preset.content.slice(0, 60);
 }
 
-export async function showSlashPresets(app: PresetStorage, ui: Pick<SlashUi, 'choose' | 'prompt' | 'confirm'>,
+export async function showSlashPresets(storage: PresetStorage, ui: Pick<SlashUi, 'choose' | 'prompt' | 'confirm'>,
 	tr: (zh: string, en: string) => string, createDirectly = false): Promise<string | boolean> {
-	const presets = readPresets(app);
+	const presets = normalizePresets(storage.read());
 	const choices = presets.flatMap((preset, index) => preset ? [index] : []);
-	const empty = presets.indexOf(undefined);
+	const empty = presets.indexOf(null);
 	const fullMessage = tr('预设已满，请先删除一条再新建。', 'Preset slots are full. Delete one before creating another.');
 	if (empty !== -1) choices.unshift(empty);
 	const index = createDirectly ? empty : await ui.choose(tr('命令预设', 'Presets'), choices, (index) => {
@@ -40,6 +55,13 @@ export async function showSlashPresets(app: PresetStorage, ui: Pick<SlashUi, 'ch
 	if (index === undefined) return false;
 	if (index === -1) throw new Error(fullMessage);
 	const existing = presets[index];
+	const readCurrent = (value: StoredPresets) => {
+		const current = normalizePresets(value);
+		if (existing && (current[index]?.label !== existing.label || current[index]?.content !== existing.content)) {
+			throw new Error(tr('这条预设已更改，请重新打开。', 'This preset changed. Open it again.'));
+		}
+		return current;
+	};
 	if (existing) {
 		const action = await ui.choose(existing.label || existing.content, ['run', 'edit', 'delete'], (action) =>
 			action === 'run' ? tr('运行', 'Run') : action === 'edit' ? tr('编辑', 'Edit') : tr('删除', 'Delete'));
@@ -47,9 +69,11 @@ export async function showSlashPresets(app: PresetStorage, ui: Pick<SlashUi, 'ch
 		if (action === 'run') return existing.content;
 		if (action === 'delete') {
 			if (!await ui.confirm(tr('删除预设', 'Delete preset'), existing.label || existing.content, tr('删除', 'Delete'))) return false;
-			const current = readPresets(app);
-			current[index] = undefined;
-			app.saveLocalStorage(storageKey, current);
+			await storage.save((value) => {
+				const current = readCurrent(value);
+				current[index] = null;
+				return current;
+			});
 			return true;
 		}
 	}
@@ -63,10 +87,12 @@ export async function showSlashPresets(app: PresetStorage, ui: Pick<SlashUi, 'ch
 	}
 	const label = await ui.prompt(tr('命名预设（可留空）', 'Name the preset (optional)'), existing?.label);
 	if (label === undefined) return false;
-	const current = readPresets(app);
-	const target = existing ? index : current.indexOf(undefined);
-	if (target === -1) throw new Error(fullMessage);
-	current[target] = { label: label.slice(0, 80), content };
-	app.saveLocalStorage(storageKey, current);
+	await storage.save((value) => {
+		const current = readCurrent(value);
+		const target = existing ? index : current.indexOf(null);
+		if (target === -1) throw new Error(fullMessage);
+		current[target] = { label: label.slice(0, 80), content };
+		return current;
+	});
 	return true;
 }

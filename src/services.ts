@@ -1,4 +1,3 @@
-import { join, resolve } from 'node:path';
 import type { App, FileSystemAdapter, PluginManifest } from 'obsidian';
 import { nodeRequire } from './communication/nodeRequire';
 import { createCredentialStore } from './communication/credentials';
@@ -8,7 +7,7 @@ import { createContextBuilder } from './orchestration/context/contextBuilder';
 import type { SkillReviewActions } from './orchestration/context/skills';
 import { createSkillRegistry } from './orchestration/context/skills';
 import { createSessionController } from './orchestration/sessionController';
-import { createConversationStore } from './orchestration/storage/conversationStore';
+import type { LocalState } from './orchestration/storage/localState';
 import { createAgentLoop } from './runtime/agentLoop';
 import { bindAgent } from './runtime/createAgent';
 import { createModelCoordinator } from './runtime/modelCoordinator';
@@ -20,6 +19,7 @@ import { normalizeMcpSettings } from './tools/external/mcpConfig';
 import type { McpSettings } from './tools/external/mcpConfig';
 import type {
 	CommunicationLayer,
+	ConversationStore,
 	OrchestrationLayer,
 	RuntimeLayer,
 	ScribeServices,
@@ -28,10 +28,9 @@ import type {
 
 /** 根级依赖组装：只负责按层创建服务并把它们连起来，业务留在各层 */
 export function createServices(app: App, settings: ScribeSettings, manifest: PluginManifest,
+	conversations: ConversationStore, localState: LocalState, cacheDirectory: string,
 	saveSettings: () => Promise<void>, skillReview: SkillReviewActions, saveMcp: (settings: McpSettings) => Promise<void>): ScribeServices {
 	const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
-	const pluginDirectory = manifest.dir ?? join(app.vault.configDir, 'plugins', manifest.id);
-	const conversations = createConversationStore(resolve(cwd, pluginDirectory, 'conversations'));
 	// 第四层：工具层（模型通信之外的执行能力）
 	const mcp = createMcpManager({
 		settings: () => settings.mcp ?? normalizeMcpSettings(undefined), commit: saveMcp,
@@ -47,7 +46,7 @@ export function createServices(app: App, settings: ScribeSettings, manifest: Plu
 			activeWindow.open(url, '_blank', 'noopener');
 		},
 	});
-	const tools = createToolLayer(conversations.shellJobHistory, mcp);
+	const tools = createToolLayer(conversations.shellJobHistory, mcp, cacheDirectory);
 
 	// 第五层：通信层（仅负责模型服务接入）
 	const credentials = createCredentialStore(app, settings.communication);
@@ -90,5 +89,5 @@ export function createServices(app: App, settings: ScribeSettings, manifest: Plu
 		conversations,
 	};
 
-	return { app, settings, communication, tools, orchestration, runtime };
+	return { app, settings, localState, communication, tools, orchestration, runtime };
 }

@@ -2,6 +2,7 @@ import type { Stats } from 'node:fs';
 import { lstat, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, posix, relative, resolve, sep, win32 } from 'node:path';
 import type { ToolContext } from '../../types';
+import { isScribeCacheOutput, scribeDataPaths } from '../../orchestration/storage/paths';
 
 export interface ResolvedToolPath {
 	requestedPath: string;
@@ -10,6 +11,7 @@ export interface ResolvedToolPath {
 	displayPath: string;
 	stat?: Stats;
 	requiresApproval?: boolean;
+	cacheOutput?: true;
 }
 
 /** 目录范围按路径段判断，避免同名前缀混入。 */
@@ -44,10 +46,17 @@ export async function resolveToolPath(
 	ctx: ToolContext,
 	input: string,
 	operation: 'read' | 'write',
-	options?: { allowMissing?: boolean; requestApproval?: boolean; approvedRoot?: string },
+	options?: { allowMissing?: boolean; requestApproval?: boolean; approvedRoot?: string; readCache?: boolean },
 ): Promise<ResolvedToolPath> {
 	ctx.signal.throwIfAborted();
 	const requestedPath = toolAbsolutePath(ctx.cwd, input);
+	const canonicalVault = await realpath(ctx.cwd);
+	const cacheVault = operation === 'read' && options?.readCache && !ctx.task.request.intent
+		? [ctx.cwd, canonicalVault].find((root) => isScribeCacheOutput(scribeDataPaths(root).cache,
+			requestedPath, ctx.task.request.conversationId, ctx.subagentId))
+		: undefined;
+	// 缓存只按当前对话显示的完整文件路径读取，不授予整个目录的访问权限。
+	const cachePath = cacheVault && resolve(canonicalVault, relative(cacheVault, requestedPath));
 	let requiresApproval = false;
 	const checkPermission = (target: string) => {
 		const allowed = operation === 'read' ? ctx.permissions.canRead(target) : ctx.permissions.canWrite(target);
@@ -59,14 +68,16 @@ export async function resolveToolPath(
 		}
 		throw new Error('此路径未包含在本次任务授权的资料中。');
 	};
-	checkPermission(requestedPath);
-	const canonicalVault = await realpath(ctx.cwd);
+	if (!cachePath) checkPermission(requestedPath);
 	let absolutePath: string;
 	let fileStat: Stats | undefined;
 	try {
 		absolutePath = await realpath(requestedPath);
-		checkPermission(absolutePath);
+		if (cachePath) {
+			if (relative(cachePath, absolutePath) !== '') throw new Error('缓存文件的位置已变化。');
+		} else checkPermission(absolutePath);
 		fileStat = await stat(absolutePath);
+		if (cachePath && (!fileStat.isFile() || fileStat.nlink !== 1)) throw new Error('缓存文件的位置无效。');
 	} catch (error) {
 		if (!hasFileErrorCode(error, 'ENOENT')) throw error;
 		if (!options?.allowMissing) throw new Error('指定的文件或文件夹不存在。');
@@ -85,13 +96,16 @@ export async function resolveToolPath(
 	const vaultPath = isWithinPath(canonicalVault, absolutePath)
 		? relative(canonicalVault, absolutePath).split(sep).join('/')
 		: undefined;
-	return { requestedPath, absolutePath, vaultPath, displayPath: vaultPath || absolutePath, stat: fileStat, requiresApproval };
+	return { requestedPath, absolutePath, vaultPath, displayPath: vaultPath || absolutePath, stat: fileStat, requiresApproval,
+		...(cachePath && { cacheOutput: true }) };
 }
 
 export async function recheckToolPath(
 	ctx: ToolContext, path: ResolvedToolPath, operation: 'read' | 'write', options?: { allowMissing?: boolean },
 ): Promise<ResolvedToolPath> {
-	const current = await resolveToolPath(ctx, path.requestedPath, operation, { ...options, requestApproval: path.requiresApproval });
+	const current = await resolveToolPath(ctx, path.requestedPath, operation, {
+		...options, requestApproval: path.requiresApproval, readCache: path.cacheOutput,
+	});
 	if (current.absolutePath !== path.absolutePath || current.stat?.ino !== path.stat?.ino || current.stat?.dev !== path.stat?.dev) {
 		throw new Error('文件或文件夹的位置或状态已变化，请重新确认。');
 	}

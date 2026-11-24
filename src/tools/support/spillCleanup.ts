@@ -1,33 +1,21 @@
 import { lstatSync, readdirSync, rmdirSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { ownedPrivateDirectory, SHELL_SPILL_PREFIX, TOOL_SPILL_PREFIX } from './resultSpill';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-/** Prefixes this plugin uses for private spill roots under the OS temp directory. */
-const ROOT_PREFIXES = ['scribe-ai-shell-', 'scribe-ai-tools-'];
+const ROOT_PREFIXES = [SHELL_SPILL_PREFIX, TOOL_SPILL_PREFIX];
 /** DSH's local spill default: files older than this are reclaimed on the next start. */
 export const CLEANUP_PERIOD_DAYS = 30;
 
 export interface SpillSweepOptions {
-	/** Directory scanned for spill roots; defaults to the OS temp directory. */
+	cacheDirectory?: string;
+	/** 旧输出所在的系统临时目录，测试可覆盖。 */
 	baseDir?: string;
 	/** Age cutoff in days; `0` disables cleanup. */
 	cleanupPeriodDays?: number;
 	/** Clock override for tests. */
 	now?: number;
-}
-
-function ownedPrivateDirectory(path: string): boolean {
-	try {
-		const stat = lstatSync(path);
-		if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
-		// Never delete a root another local user could replace or modify.
-		if ((stat.mode & 0o022) !== 0) return false;
-		const uid = process.getuid?.();
-		return uid === undefined || stat.uid === uid;
-	} catch {
-		return false;
-	}
 }
 
 function removableFile(path: string): number | undefined {
@@ -40,48 +28,55 @@ function removableFile(path: string): number | undefined {
 	}
 }
 
+function listEntries(root: string) {
+	try { return readdirSync(root, { withFileTypes: true }); }
+	catch { return []; }
+}
+
+function pruneEmpty(path: string): void {
+	// 保留非空目录，其他进程也可能正在写入。
+	try { rmdirSync(path); } catch { /* 下次启动时再清理。 */ }
+}
+
 function sweepRoot(root: string, cutoffMs: number): void {
-	let entries;
-	try {
-		entries = readdirSync(root, { withFileTypes: true });
-	} catch {
-		return;
-	}
-	for (const entry of entries) {
+	for (const entry of listEntries(root)) {
 		if (!entry.isFile()) continue;
 		const path = join(root, entry.name);
 		const mtime = removableFile(path);
 		if (mtime === undefined || mtime >= cutoffMs) continue;
 		try { unlinkSync(path); } catch { /* Best effort; leave the entry for a later sweep. */ }
 	}
-	try {
-		if (readdirSync(root).length === 0) rmdirSync(root);
-	} catch {
-		/* A concurrent write or a permission race leaves the empty directory. */
+	pruneEmpty(root);
+}
+
+function privateChildren(root: string): string[] {
+	return listEntries(root).flatMap((entry) => {
+		const path = join(root, entry.name);
+		return entry.isDirectory() && ownedPrivateDirectory(path) ? [path] : [];
+	});
+}
+
+function sweepSpillRoots(base: string, cutoffMs: number): void {
+	for (const entry of listEntries(base)) {
+		if (!entry.isDirectory() || !ROOT_PREFIXES.some((prefix) => entry.name.startsWith(prefix))) continue;
+		const root = join(base, entry.name);
+		if (ownedPrivateDirectory(root)) sweepRoot(root, cutoffMs);
 	}
 }
 
-/**
- * DSH-style one-shot startup sweep: remove regular files older than the
- * configured retention from private spill roots, then prune empty roots.
- * Symlinks, foreign-owned roots and group/other-writable roots are untouched.
- */
+/** 启动时按保留期清理本库输出，同时让旧会话中的系统临时路径自然过期。 */
 export function sweepSpillFiles(options: SpillSweepOptions = {}): void {
 	const days = options.cleanupPeriodDays ?? CLEANUP_PERIOD_DAYS;
 	if (days <= 0) return;
 	const cutoffMs = (options.now ?? Date.now()) - days * MS_PER_DAY;
-	const base = options.baseDir ?? tmpdir();
-	let roots;
-	try {
-		roots = readdirSync(base, { withFileTypes: true });
-	} catch {
-		return;
-	}
-	for (const entry of roots) {
-		if (!entry.isDirectory()) continue;
-		if (!ROOT_PREFIXES.some((prefix) => entry.name.startsWith(prefix))) continue;
-		const root = join(base, entry.name);
-		if (!ownedPrivateDirectory(root)) continue;
-		sweepRoot(root, cutoffMs);
+	sweepSpillRoots(options.baseDir ?? tmpdir(), cutoffMs);
+	const { cacheDirectory } = options;
+	if (!cacheDirectory || !ownedPrivateDirectory(dirname(cacheDirectory)) || !ownedPrivateDirectory(cacheDirectory)) return;
+	for (const conversation of privateChildren(cacheDirectory)) {
+		for (const owner of privateChildren(conversation)) {
+			sweepSpillRoots(owner, cutoffMs);
+			pruneEmpty(owner);
+		}
+		pruneEmpty(conversation);
 	}
 }

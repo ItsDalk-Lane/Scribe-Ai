@@ -935,6 +935,7 @@ export interface ScribeSettings {
 	mcp?: McpSettings;
 	skillSettings?: SkillSettings;
 	subagents?: SubagentSettings;
+	slashPresets?: Array<{ label: string; content: string } | null>;
 	/** 当前生效的模型；providerId + model 指向同一个服务商 */
 	providerId: string;
 	model: string;
@@ -959,6 +960,7 @@ export interface ScribeSettings {
 export interface ScribeServices {
 	app: App;
 	settings: ScribeSettings;
+	localState: import('./orchestration/storage/localState').LocalState;
 	communication: CommunicationLayer;
 	tools: ToolLayer;
 	orchestration: OrchestrationLayer;

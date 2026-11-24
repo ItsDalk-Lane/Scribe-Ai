@@ -16,6 +16,7 @@ const suites = {
 		'src/tools/tests/mcpConnection.test.ts',
 		'src/tools/tests/mcp.test.ts',
 		'src/orchestration/tests/conversationStore.test.ts',
+		'src/orchestration/tests/vaultStorage.test.ts',
 		'src/orchestration/tests/sessionController.test.ts',
 		'src/orchestration/tests/subagentSettings.test.ts',
 		'src/orchestration/tests/subagentSession.test.ts',

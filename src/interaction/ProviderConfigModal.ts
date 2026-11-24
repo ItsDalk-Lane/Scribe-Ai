@@ -425,15 +425,10 @@ export class ConfigureProviderModal extends Modal {
 		button?.setDisabled(true).setButtonText(this.text.oauthLoggingIn);
 		const interaction = createOAuthInteraction(this.app, this.text, controller.signal);
 		try {
+			const deviceId = await this.plugin.services.localState.getOAuthDeviceId();
 			await this.createDraftService(credentialId).login(providerId, interaction, {
 				agentName: 'Scribe AI',
-				getDeviceId: () => {
-					const stored: unknown = this.app.loadLocalStorage('oauth-device-id');
-					if (typeof stored === 'string' && stored) return stored;
-					const id = crypto.randomUUID();
-					this.app.saveLocalStorage('oauth-device-id', id);
-					return id;
-				},
+				getDeviceId: () => deviceId,
 			});
 			if (!controller.signal.aborted && this.provider.id === providerId) {
 				this.draftCredentialId = credentialId;

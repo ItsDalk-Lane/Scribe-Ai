@@ -1,18 +1,13 @@
 import { getLanguage, Modal, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
+import type { LocalState } from '../orchestration/storage/localState';
 import type { ConversationStore, RunState } from '../types';
 import { DEFAULT_GOAL_ROUNDS, finishGoalRound, MAX_GOAL_CRITERIA, MAX_GOAL_LENGTH, MAX_GOAL_ROUNDS, parseChatGoal,
-	restoreChatGoal, setGoalWorkClock, validGoalCriteria, validGoalRounds } from './chatGoal';
+	setGoalWorkClock, validGoalCriteria, validGoalRounds } from './chatGoal';
 import type { ChatGoal, GoalPause, GoalWorkClock } from './chatGoal';
 import { confirmAction } from './ConfirmModal';
 import type { SlashUi } from './slashUi';
-
-const goalKey = (conversationId: string) => `scribe-ai:chat-goal:${conversationId}`;
-
-export function clearChatGoal(app: App, conversationId: string): void {
-	app.saveLocalStorage(goalKey(conversationId), null);
-}
 
 export function goalText() {
 	const chinese = getLanguage().toLowerCase().startsWith('zh');
@@ -112,6 +107,7 @@ function confirmGoal(app: App, message: string, confirmText: string, ui?: SlashU
 interface GoalOptions {
 	app: App;
 	store: Pick<ConversationStore, 'loadGoal' | 'saveGoal'>;
+	localState: LocalState;
 	conversationId: string;
 	isOpen: boolean;
 	canContinue: boolean;
@@ -120,7 +116,7 @@ interface GoalOptions {
 	onDefinitionChange: () => void;
 }
 
-export function useChatGoal({ app, store, conversationId, isOpen, canContinue, start, stopRunning, onDefinitionChange }: GoalOptions) {
+export function useChatGoal({ app, store, localState, conversationId, isOpen, canContinue, start, stopRunning, onDefinitionChange }: GoalOptions) {
 	const [goal, setGoal] = useState<ChatGoal>();
 	const [ready, setReady] = useState(false);
 	const [opened, setOpened] = useState(false);
@@ -162,15 +158,9 @@ export function useChatGoal({ app, store, conversationId, isOpen, canContinue, s
 		let disposed = false;
 		void (async () => {
 			try {
-				const recorded = await store.loadGoal(conversationId);
+				const { goal: value, migrated } = await localState.restoreGoal(store, conversationId);
 				if (disposed) return;
-				const value = restoreChatGoal(recorded === undefined ? app.loadLocalStorage(goalKey(conversationId)) : recorded);
-				if (recorded === undefined && value) {
-					await store.saveGoal(conversationId, value);
-					if (disposed) return;
-					try { clearChatGoal(app, conversationId); } catch { /* 新记录优先。 */ }
-					refreshIndex();
-				}
+				if (migrated) refreshIndex();
 				current.current = saved.current = value;
 				updateClock({ workedMs: value?.workedMs ?? 0 });
 				setGoal(value);
@@ -180,7 +170,7 @@ export function useChatGoal({ app, store, conversationId, isOpen, canContinue, s
 			}
 		})();
 		return () => { disposed = true; mounted.current = false; onDispose(); };
-	}, [app, conversationId, store]);
+	}, [conversationId, localState, store]);
 
 	async function save(next: ChatGoal | undefined): Promise<boolean> {
 		const version = ++revision.current;
