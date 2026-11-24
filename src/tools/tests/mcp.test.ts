@@ -62,6 +62,7 @@ void test('MCP 按需发现保留原参数，遵循聊天权限模式并复核�
 		enabled: true, secrets: { bearerToken: 'token-fixture' }, required: true }]);
 	const server = settings.servers[0]!;
 	assert.equal(server.enabled, false);
+	assert.equal(manager.isConnected('Example'), false);
 	assert.doesNotMatch(JSON.stringify(settings), /token-fixture/);
 	assert.equal(manager.draft(server.id)?.url, 'https://example.test/mcp');
 	assert.equal(secrets.get(server.secretRefs?.bearerToken ?? ''), 'token-fixture');
@@ -86,6 +87,8 @@ void test('MCP 按需发现保留原参数，遵循聊天权限模式并复核�
 		executor.execute({ id: 'call', name, input }, { ...run, app, approve, readDelivery: createReadDelivery() });
 
 	let request = await prepare();
+	assert.equal(manager.isConnected('example'), true);
+	assert.equal(manager.isConnected('other'), false);
 	assert.ok(request.tools.some(({ name }) => name === 'search_mcp_tools'));
 	const alias = createMcpTools(manager).find(({ name }) => name.includes('__record_'))!.name;
 	assert.equal(request.tools.some(({ name }) => name === alias), false);
@@ -123,6 +126,7 @@ void test('MCP 按需发现保留原参数，遵循聊天权限模式并复核�
 	assert.equal(blocked.isError, true);
 	assert.equal(calls, 2);
 	assert.equal(closing, 1);
+	assert.equal(manager.isConnected('Example'), false);
 	assert.equal((await prepare()).tools.length, 0);
 
 	await manager.setEnabled(server.id, true);
@@ -173,6 +177,13 @@ void test('MCP 按需发现保留原参数，遵循聊天权限模式并复核�
 		assert.equal(result?.isError, !allow);
 		assert.equal(result?.approvalReview, mode === 'auto-review' ? allow ? 'approved' : 'denied' : undefined);
 	}
+	const resource = (await prepare()).tools.find(({ name }) => name.includes('__list_resources_'));
+	assert.ok(resource);
+	await manager.save({ ...manager.draft(server.id)!, toolTimeout: 18 });
+	await manager.waitForServer(server.id, signal);
+	assert.equal((await invoke(resource.name, {}, async () => true)).isError, true);
+	await prepare();
+	assert.equal((await invoke(resource.name, {}, async () => true)).content, 'resource template');
 });
 
 void test('点选 MCP 后仅公开该服务器的工具，溢出搜索、审批和工具开关仍生效', async (t) => {

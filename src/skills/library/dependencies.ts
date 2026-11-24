@@ -17,11 +17,15 @@ async function executable(name: string): Promise<string | undefined> {
 	}
 	return undefined;
 }
-export async function checkDependency(dependency: LibraryDependency, pluginVersion?: (id: string) => string | undefined) {
+export interface DependencyChecks {
+	pluginVersion?: (id: string) => string | undefined;
+	mcpConnected?: (name: string) => boolean;
+}
+export async function checkDependency(dependency: LibraryDependency, checks: DependencyChecks) {
 	let result: string | undefined;
 	switch (dependency.type) {
 		case 'command': result = await executable(dependency.name); break;
-		case 'obsidian-plugin': result = pluginVersion?.(dependency.name); break;
+		case 'obsidian-plugin': result = checks.pluginVersion?.(dependency.name); break;
 		case 'python-package': {
 			const python = await executable('python3');
 			if (python) result = await promisify(execFile)(python,
@@ -29,7 +33,7 @@ export async function checkDependency(dependency: LibraryDependency, pluginVersi
 				{ timeout: 5000, maxBuffer: 8192 }).then(({ stdout }) => stdout.trim(), () => undefined);
 			break;
 		}
-		case 'mcp': break;
+		case 'mcp': result = checks.mcpConnected?.(dependency.name) ? '已连接' : undefined; break;
 	}
 	return { name: dependency.name, ready: Boolean(result), detail: result ?? dependency.note ?? '未发现所需工具' };
 }

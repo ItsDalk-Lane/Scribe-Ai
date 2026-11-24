@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { realpath } from 'node:fs/promises';
 import type { App, FileSystemAdapter } from 'obsidian';
 import { createSkillLibrary } from '../../skills/library';
+import { checkDependency } from '../../skills/library/dependencies';
 import type { ImportPreview } from '../../skills/library/contracts';
 import { createLiveSkillCache, discoverLiveSkills, skillDirectory, skillNotePaths, skillScope, skillText } from '../../skills/discovery';
 import type { DiscoveredSkill, SkillScanIssue } from '../../skills/discovery';
@@ -28,12 +29,14 @@ async function waitForSkillReview(work: ((active: boolean) => void) | undefined,
 	}
 }
 
-export function createSkillRegistry(app: App, settings: ScribeSettings, save: () => Promise<void>, review: SkillReviewActions) {
+export function createSkillRegistry(app: App, settings: ScribeSettings, save: () => Promise<void>, review: SkillReviewActions,
+	mcpConnected?: (name: string) => boolean) {
 	const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
-	const library = createSkillLibrary(cwd, { pluginVersion(id) {
+	const pluginVersion = (id: string) => {
 		const plugins = (app as App & { plugins?: { enabledPlugins?: Set<string>; manifests?: Record<string, { version: string }> } }).plugins;
 		return plugins?.enabledPlugins?.has(id) ? plugins.manifests?.[id]?.version : undefined;
-	} });
+	};
+	const library = createSkillLibrary(cwd, { pluginVersion, mcpConnected });
 	const options = () => settings.skillSettings ??= normalizeSkillSettings();
 	const listeners = new Set<() => void>();
 	let budget: { listed?: number; shortened: boolean; omitted: string[] } = { shortened: false, omitted: [] as string[] };
@@ -59,7 +62,7 @@ export function createSkillRegistry(app: App, settings: ScribeSettings, save: ()
 		const local: DiscoveredSkill[] = managed.filter((item) => !item.error).map((s) => ({
 			id: s.path, name: s.name, managed: s.name, description: s.description, sourceLabel: labels[s.source.kind],
 			displayName: s.displayName, defaultPrompt: s.defaultPrompt,
-			enabled: s.enabled, manual: s.userInvocable, implicit: s.allowImplicit, paths: s.paths,
+			enabled: s.enabled, manual: s.userInvocable, implicit: s.allowImplicit, paths: s.paths, dependencies: s.dependencies,
 		}));
 		const ids = new Set(local.map((item) => item.id));
 		const items: DiscoveredSkill[] = [...local, ...live.filter((item) => !ids.has(item.id)), {
@@ -78,11 +81,13 @@ export function createSkillRegistry(app: App, settings: ScribeSettings, save: ()
 		}
 		return skill.managed ? library.readFile(skill.managed, file) : skillText(skillDirectory(skill), file);
 	}
-	async function modelText(skill: DiscoveredSkill, file: string, source: string): Promise<string> {
+	async function modelText(skill: DiscoveredSkill, file: string, source: string, legacy = false): Promise<string> {
 		if (file !== 'SKILL.md' || skill.id === INSTALLER_ID) return source;
-		const missing = skill.dependencies?.map((service) => `外部工具服务 ${service} 尚未连接。`) ?? [];
-		if (skill.managed) for (const dep of await library.checkDependencies(skill.managed)) missing.push(`${dep.name}：${dep.detail}`);
-		return [source, missing.length ? '当前依赖状态\n' + missing.join('\n') : ''].filter(Boolean).join('\n\n');
+		const statuses = await Promise.all((skill.dependencies ?? []).map(async (dependency) => {
+			const status = await checkDependency(dependency, { pluginVersion, mcpConnected: legacy ? undefined : mcpConnected });
+			return skill.managed ? `${status.name}：${status.detail}` : `外部工具服务 ${status.name} ${status.ready ? '已连接' : '尚未连接'}。`;
+		}));
+		return statuses.length ? source + '\n\n当前依赖状态\n' + statuses.join('\n') : source;
 	}
 	async function sharedDirectory(path: string) {
 		const actual = await realpath(path);
@@ -139,7 +144,7 @@ export function createSkillRegistry(app: App, settings: ScribeSettings, save: ()
 			if (!skill) throw new Error('技能已停用或不在当前授权范围内。');
 			const source = await readSource(skill, receipt.file);
 			// 老记录的摘要包含依赖提示。新记录按原文件核对，不受之后依赖状态变化影响。
-			const checked = receipt.fileDigest === undefined ? await modelText(skill, receipt.file, source) : source;
+			const checked = receipt.fileDigest === undefined ? await modelText(skill, receipt.file, source, true) : source;
 			if (skillReadDigest(checked) !== (receipt.fileDigest ?? receipt.digest)) throw new Error('技能文件已变化。');
 			return source;
 		},

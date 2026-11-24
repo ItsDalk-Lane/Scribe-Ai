@@ -34,7 +34,9 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 	}
 	const app = { vault: { adapter: { getBasePath: () => vault }, configDir: '.test-settings' },
 		workspace: { getActiveFile: () => ({ path: '小说/第一章.md' }) } } as unknown as App;
-	const registry = createSkillRegistry(app, config, () => Promise.resolve(), { draft: async () => false, install: async () => false });
+	let connected = false;
+	const registry = createSkillRegistry(app, config, () => Promise.resolve(), { draft: async () => false, install: async () => false },
+		(name) => name === 'example' && connected);
 	const list = await registry.list();
 	const options = list.filter((s) => s.name === 'outline');
 	assert.equal(options.length, 2);
@@ -78,6 +80,9 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 	assert.notEqual(fileDigest, skillReceipt.digest);
 	assert.equal(skillReadName(skillResult, oldReceipt), 'outline');
 	assert.equal(await registry.readRecorded(oldReceipt, request.skillScope!), localText);
+	connected = true;
+	assert.match(await registry.read(personal), /外部工具服务 example 已连接/u);
+	assert.equal(await registry.readRecorded(oldReceipt, request.skillScope!), localText);
 	assert.equal(await registry.readRecorded(skillReceipt, request.skillScope!), localText);
 	await assert.rejects(registry.readRecorded(skillReceipt, []), /不在当前授权范围/u);
 	await writeFile(local.id, localText + '\n修改后的内容');
@@ -102,6 +107,13 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 	await symlink(join(root, 'outside'), join(shared, 'outline/outside.md'));
 	await writeFile(join(root, 'outside'), '外部文件');
 	await assert.rejects(runtime.read(personal.id, 'outside.md', 0), /授权目录/);
+	await registry.library.install(await registry.library.previewLocal(join(vault, '小说', '.agents', 'skills', 'outline')));
+	const managed = (await registry.list()).find((skill) => skill.managed === 'outline')!;
+	assert.match(await registry.read(managed), /example：已连接/u);
+	assert.equal((await registry.library.checkDependencies('outline'))[0]?.ready, true);
+	connected = false;
+	assert.equal((await registry.library.checkDependencies('outline'))[0]?.ready, false);
+	assert.match(await registry.read(personal), /外部工具服务 example 尚未连接/u);
 	config.skillSettings!.sharedDirectories = [];
 	await assert.rejects(runtime.read(personalReference, 'SKILL.md', 0), /不在本轮/);
 	await registry.setEnabled(local.id, false);

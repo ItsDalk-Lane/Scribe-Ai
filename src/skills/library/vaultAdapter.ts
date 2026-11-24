@@ -4,8 +4,9 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { hasFileErrorCode } from '../../tools/support/pathUtils';
+import { SKILL_LIBRARY } from '../../orchestration/storage/paths';
 
-const libraryPrefix = '.scribe-ai/skills';
+const operations = SKILL_LIBRARY + '/.operations';
 const bytesLimit = 50 * 1024 * 1024;
 export function safeResourcePath(path: string): boolean {
 	return path.length > 0 && path.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..'
@@ -13,7 +14,7 @@ export function safeResourcePath(path: string): boolean {
 		&& !/^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/iu.test(part));
 }
 async function safePath(root: string, path: string): Promise<string> {
-	if (!safeResourcePath(path) || (path !== libraryPrefix && !path.startsWith(libraryPrefix + '/'))) throw new Error('路径超出当前库的技能目录。');
+	if (!safeResourcePath(path) || (path !== SKILL_LIBRARY && !path.startsWith(SKILL_LIBRARY + '/'))) throw new Error('路径超出当前库的技能目录。');
 	let current = await realpath(root);
 	for (const part of path.split('/')) {
 		current = join(current, part);
@@ -72,7 +73,7 @@ export function createLibraryVault(root: string) {
 		write, writeBinary: write,
 		rename: async (from: string, to: string) => rename(await safePath(root, from), await safePath(root, to)),
 		rmdir: async (path: string, recursive: boolean) => {
-			if (!/^\.scribe-ai\/skills\/\.operations\/[a-f0-9-]{36}$/u.test(path)) throw new Error('无效的临时操作目录。');
+			if (!path.startsWith(operations + '/') || !/^[a-f0-9-]{36}$/u.test(path.slice(operations.length + 1))) throw new Error('无效的临时操作目录。');
 			await rm(await safePath(root, path), { recursive });
 		},
 	} };
@@ -86,9 +87,8 @@ export async function ensureFolderExists(vault: LibraryVault, path: string) {
 export async function writeVaultFile(vault: LibraryVault, path: string, value: string, expected: string | null) {
 	await safePath(vault.root, path);
 	if (expected === null) { await vault.adapter.write(path, value); return; }
-	const recovery = libraryPrefix + '/.operations';
-	await ensureFolderExists(vault, recovery);
-	const temporary = await safePath(vault.root, recovery + '/.writing-' + randomUUID());
+	await ensureFolderExists(vault, operations);
+	const temporary = await safePath(vault.root, operations + '/.writing-' + randomUUID());
 	const file = await open(temporary, 'wx', 0o600);
 	try {
 		try { await file.writeFile(value); } finally { await file.close(); }

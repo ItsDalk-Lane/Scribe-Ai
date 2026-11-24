@@ -11,7 +11,7 @@ import { prepareSkillImportDescription, readSkillPackage } from './skillImport';
 import { searchSystemSkills } from './systemSkillSearch';
 import { githubPackage } from './github';
 import { editOpenAiMetadata, parseOpenAiMetadata } from './openAiMetadata';
-import { checkDependency } from './dependencies';
+import { checkDependency, type DependencyChecks } from './dependencies';
 import type { BuiltinStatus, ImportPreview, LibrarySkill, ManagedSkillLibrary, SkillPackage, SkillSource } from './contracts';
 export type * from './contracts';
 export { parseSkillFile, serializeSkillFile } from './skillFormat';
@@ -32,7 +32,7 @@ function description(pkg: SkillPackage) {
 	return parseSkillFile(decoder.decode(main.data), pkg.name).frontmatter.description;
 }
 
-export function createSkillLibrary(vaultRoot: string, options: { pluginVersion?: (id: string) => string | undefined } = {}): ManagedSkillLibrary {
+export function createSkillLibrary(vaultRoot: string, options: DependencyChecks = {}): ManagedSkillLibrary {
 	const vault = createLibraryVault(vaultRoot);
 	const store = new SkillLibrary(vault);
 	const directory = join(vaultRoot, SKILL_LIBRARY);
@@ -234,7 +234,7 @@ export function createSkillLibrary(vaultRoot: string, options: { pluginVersion?:
 			await ensureFolderExists(vault, SKILL_LIBRARY);
 			await writeVaultFile(vault, usagePath, JSON.stringify(usage.value), usage.text);
 		}),
-		checkDependencies: (name) => queued(async () => Promise.all((await info(name)).dependencies.map((dep) => checkDependency(dep, options.pluginVersion)))),
+		checkDependencies: (name) => queued(async () => Promise.all((await info(name)).dependencies.map((dep) => checkDependency(dep, options)))),
 		saveMetadata: (name, patch, expected) => queued(async () => {
 			editable(name);
 			const files = await store.readFiles(name);

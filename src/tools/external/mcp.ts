@@ -86,6 +86,7 @@ async function waitForConnections(entries: readonly ConnectionEntry[], signal: A
 
 export interface McpLiveServer {
 	server: McpServer;
+	connectionKey: string;
 	connection: McpConnection;
 	signal: AbortSignal;
 	resources: boolean;
@@ -275,7 +276,7 @@ export function createMcpManager(options: ManagerOptions) {
 		const { catalog, connection } = entry;
 		if (!catalog || !connection || entry.refreshing || entry.state !== 'ready' || !server.enabled || connectionKey(server) !== entry.key) return;
 		return {
-			server, connection, signal: entry.controller.signal, resources: catalog.resources,
+			server, connectionKey: entry.key, connection, signal: entry.controller.signal, resources: catalog.resources,
 			tools: catalog.tools.filter(({ name }) => toolEnabled(server, name))
 				.map((tool) => ({ tool, signature: toolSignature(entry, tool) })),
 			verify(signature, name) {
@@ -289,6 +290,10 @@ export function createMcpManager(options: ManagerOptions) {
 	};
 	return {
 		settings, draft, reconcile,
+		isConnected(this: void, name: string): boolean {
+			const server = settings().servers.find((item) => item.name.toLowerCase() === name.trim().toLowerCase());
+			return Boolean(server?.enabled && entries.get(server.id)?.state === 'ready');
+		},
 		subscribe(listener: () => void) {
 			listeners.add(listener);
 			return () => { listeners.delete(listener); };

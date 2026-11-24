@@ -5,13 +5,14 @@ import { basename, dirname, isAbsolute, join, posix, relative, resolve, win32 } 
 import { parse } from 'yaml';
 import { safeResourcePath } from './library/vaultAdapter';
 import { parseOpenAiMetadata } from './library/openAiMetadata';
+import type { LibraryDependency } from './library/contracts';
 import { parseSkillPaths } from './library/skillFormat';
 import type { NoteRef, SkillInfo } from '../types';
 import { hasFileErrorCode, isWithinPath } from '../tools/support/pathUtils';
 
 export interface DiscoveredSkill extends SkillInfo {
 	managed?: string;
-	dependencies?: string[];
+	dependencies?: LibraryDependency[];
 	paths?: string[];
 }
 
@@ -179,7 +180,7 @@ async function loadMetadata(directory: string, cache: DiscoveryOptions['cache'])
 			value.displayName = metadata.fields.displayName ?? value.displayName;
 			value.defaultPrompt = metadata.fields.defaultPrompt;
 			value.implicit &&= metadata.implicit;
-			value.dependencies = metadata.dependencies.map((dep) => dep.name);
+			value.dependencies = metadata.dependencies;
 		} catch (error) { entry.warning = reason(error); }
 	}
 	if (cache) {
