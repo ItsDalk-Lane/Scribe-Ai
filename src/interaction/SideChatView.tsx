@@ -6,6 +6,7 @@ import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { SIDE_CHAT_ICON, SIDE_CHAT_VIEW_TYPE } from '../constants';
 import type ScribeAiPlugin from '../main';
+import { isModelAvailable } from '../orchestration/settings/modelAvailability';
 import { chatModelKey } from '../orchestration/settings/thinking';
 import type { NoteRef, RunContext, SavedRun, SideChat, SkillMention } from '../types';
 import { composerShortcut } from './composerKeyboard';
@@ -18,13 +19,17 @@ import { emptyExecution, updateExecution } from './context';
 import type { DisplayedRun } from './context';
 import { uiText } from './uiText';
 import { useChatModel } from './useChatModel';
+import { imageLinkSource } from './composerImages';
+import { isImageFile } from '../tools/support/imageData';
 
 export interface SideChatOpening {
 	prompt?: string;
+	imageSourcePath?: string;
 	refs?: NoteRef[];
 	quotes?: string[];
 	skillMentions?: SkillMention[];
 	skillScope?: string[];
+	skillNotePaths?: string[];
 }
 
 interface SideChatHandle {
@@ -52,7 +57,7 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 		(value === localValue ? localEffort : undefined) ?? settings.thinkingByModel[value]) : { levels: [] };
 	const [draft, setDraft] = useState('');
 	const [skillMentions, setSkillMentions] = useState<SkillMention[]>([]);
-	const [parentScope, setParentScope] = useState<string[]>();
+	const [parentScope, setParentScope] = useState(chat.skillScope);
 	const [refs, setRefs] = useState<NoteRef[]>([]);
 	const skills = plugin.services.orchestration.skills;
 	const draftScope = parentScope && [...new Set([...parentScope, ...skills.scope(refs, '')])];
@@ -65,17 +70,18 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 	const mounted = useRef(false);
 	const running = useRef(false);
 	function requireModel() {
-		if (!model || !settings.providerModels[model.providerId]?.includes(model.model)) {
+		if (!model || !isModelAvailable(settings, model)) {
 			throw new SideChatHandoffError(text.chatModelMissing);
 		}
 		return model;
 	}
-	function submit(question: string, references: NoteRef[], excerpts: string[], mentions: SkillMention[], scope?: string[]) {
+	function submit(question: string, references: NoteRef[], excerpts: string[], mentions: SkillMention[], scope?: string[], skillNotePaths?: string[], imageSourcePath?: string) {
 		if (running.current) throw new SideChatHandoffError(text.sideChatBusy);
 		const selectedModel = requireModel();
 		let displayed = emptyExecution;
 		const run = chat.submit({ instruction: question, refs: references, chatQuotes: excerpts,
-			skillMentions: mentions, skillScope: scope ?? skills.scope(references),
+			imageSourcePath: imageLinkSource(plugin.app, question, imageSourcePath),
+			skillMentions: mentions, skillScope: scope, skillNotePaths,
 			model: { ...selectedModel, reasoning: thinking.level } }, { onEvent: (event) => {
 			if (!mounted.current) return;
 			displayed = updateExecution(displayed, event);
@@ -111,7 +117,7 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 			const { prompt = '', refs: incomingRefs = [], quotes: incomingQuotes = [] } = opening;
 			if (opening.skillScope) setParentScope(opening.skillScope);
 			if (prompt.trim()) {
-				submit(prompt, incomingRefs, incomingQuotes, opening.skillMentions ?? [], opening.skillScope);
+				submit(prompt, incomingRefs, incomingQuotes, opening.skillMentions ?? [], opening.skillScope, opening.skillNotePaths, opening.imageSourcePath);
 			} else {
 				if (incomingRefs.length) setRefs((previous) => Array.from(
 					new Map([...previous, ...incomingRefs].map((ref) => [ref.path, ref])).values()));
@@ -180,7 +186,7 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 						setDraft('');
 						setSkillMentions([]);
 						setQuotes([]);
-						setRefs((previous) => previous.filter(({ addedExternal }) => !addedExternal));
+						setRefs((previous) => previous.filter(({ addedExternal, path, kind }) => !addedExternal && (kind === 'folder' || !isImageFile(path))));
 					} catch (cause) {
 						setError(cause instanceof Error ? cause.message : text.chatFailed);
 					}
@@ -194,7 +200,6 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 export class SideChatView extends ItemView {
 	private root?: ReturnType<typeof createRoot>;
 	private chat?: SideChat;
-	private parentId?: string;
 	private handoff: RefObject<SideChatHandle | null> = { current: null };
 
 	constructor(leaf: WorkspaceLeaf, private plugin: ScribeAiPlugin) {
@@ -205,11 +210,8 @@ export class SideChatView extends ItemView {
 	override getDisplayText() { return uiText().sideChatTitle; }
 	override getIcon() { return SIDE_CHAT_ICON; }
 
-	belongsTo(conversationId: string) { return this.parentId === conversationId; }
-
-	showChat(chat: SideChat, parentId: string, initialModel?: RunContext['model']) {
+	showChat(chat: SideChat, initialModel?: RunContext['model']) {
 		this.chat = chat;
-		this.parentId = parentId;
 		this.root = createRoot(this.contentEl);
 		flushSync(() => this.root?.render(<SideChatPanel plugin={this.plugin} chat={chat} handoff={this.handoff}
 			initialModel={initialModel} onClose={() => this.leaf.detach()} />));
@@ -226,7 +228,7 @@ export class SideChatView extends ItemView {
 	override async onClose() {
 		this.chat?.close();
 		this.chat = undefined;
-		this.parentId = undefined;
+		this.plugin.conversationViews.sideChatParents.delete(this.leaf);
 		this.root?.unmount();
 		this.root = undefined;
 	}
@@ -234,21 +236,27 @@ export class SideChatView extends ItemView {
 
 export async function openSideChat(plugin: ScribeAiPlugin, parentId: string, parentRuns: SavedRun[], opening: SideChatOpening, model?: RunContext['model']) {
 	const workspace = plugin.app.workspace;
-	const existing = workspace.getLeavesOfType(SIDE_CHAT_VIEW_TYPE).find(({ view }) => view instanceof SideChatView && view.belongsTo(parentId));
-	if (existing?.view instanceof SideChatView) {
+	const { sideChatParents } = plugin.conversationViews;
+	const existing = [...sideChatParents].find(([, id]) => id === parentId)?.[0];
+	if (existing) {
+		if (!(existing.view instanceof SideChatView)) throw new SideChatHandoffError(uiText().sideChatBusy);
 		await existing.view.receiveDraft(opening);
 		return;
 	}
 	const leaf = workspace.getRightLeaf(false);
 	if (!leaf) throw new Error(uiText().sideChatOpenFailed);
+	sideChatParents.set(leaf, parentId);
 	try {
 		await leaf.setViewState({ type: SIDE_CHAT_VIEW_TYPE, active: true });
 		await leaf.loadIfDeferred();
 		if (!(leaf.view instanceof SideChatView)) throw new Error(uiText().sideChatOpenFailed);
-		leaf.view.showChat(plugin.services.orchestration.sessions.createSideChat(parentRuns), parentId, model);
+		const { sessions, conversations } = plugin.services.orchestration;
+		const { manualCompaction } = await conversations.load(parentId);
+		if (!sideChatParents.has(leaf)) throw new Error(uiText().sideChatOpenFailed);
+		leaf.view.showChat(sessions.createSideChat(parentRuns, manualCompaction), model);
 		await leaf.view.receiveDraft(opening);
 	} catch (error) {
-		leaf.detach();
+		if (sideChatParents.delete(leaf)) leaf.detach();
 		throw error;
 	}
 }

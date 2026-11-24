@@ -2,6 +2,7 @@ import { TOOL_NOT_APPROVED } from '../types';
 import type { Message, NoteRef, RunState, SkillMention } from '../types';
 import { isSkillMentionAt } from '../skills/mentions';
 import { safeResourcePath } from '../skills/library/vaultAdapter';
+import { isCachedImagePath } from '../orchestration/storage/paths';
 
 export const DEFAULT_GOAL_ROUNDS = 5;
 export const MAX_GOAL_ROUNDS = 50;
@@ -39,9 +40,11 @@ export interface ChatGoal {
 	evidence?: string;
 	criteria?: string[];
 	refs?: NoteRef[];
+	imageSourcePath?: string;
 	chatQuotes?: string[];
 	skillMentions?: SkillMention[];
 	skillScope?: string[];
+	skillNotePaths?: string[];
 	plan?: string;
 	progress?: GoalProgress;
 }
@@ -88,6 +91,7 @@ function notePaths(value: unknown): value is string[] {
 export function validGoalRef(ref: unknown): ref is NoteRef {
 	return record(ref) && vaultPath(ref.path)
 		&& (ref.kind === undefined || ref.kind === 'file' || ref.kind === 'folder') && ref.addedExternal === undefined
+		&& (ref.pastedImage === undefined || (ref.pastedImage === true && isCachedImagePath(ref.path)))
 		&& (ref.lines === undefined || (Array.isArray(ref.lines) && ref.lines.length === 2
 			&& count(ref.lines[0]) && count(ref.lines[1]) && ref.lines[0] >= 1 && ref.lines[0] <= ref.lines[1]));
 }
@@ -127,16 +131,19 @@ function goalSkillMentions(value: unknown, objective: string): value is SkillMen
 export function parseChatGoal(value: unknown): ChatGoal | undefined {
 	if (!record(value)) return;
 	const { objective, maxRounds, usedRounds, totalRounds, workedMs, status, reason, evidence, criteria,
-		refs, chatQuotes, skillMentions, skillScope, plan, progress } = value;
+		refs, imageSourcePath, chatQuotes, skillMentions, skillScope, skillNotePaths, plan, progress } = value;
 	if (!text(objective, MAX_GOAL_LENGTH) || !validGoalRounds(maxRounds) || !count(totalRounds) || !count(usedRounds)
 		|| (workedMs !== undefined && !count(workedMs))
 		|| (status !== 'active' && status !== 'paused' && status !== 'complete')
 		|| (criteria !== undefined && !validGoalCriteria(criteria))
 		|| (refs !== undefined && (!Array.isArray(refs) || !refs.every(validGoalRef)))
+		|| (imageSourcePath !== undefined && !vaultPath(imageSourcePath))
 		|| (chatQuotes !== undefined && !textList(chatQuotes, 100, MAX_GOAL_PLAN_LENGTH))
 		|| (skillMentions !== undefined && !goalSkillMentions(skillMentions, objective))
 		|| (skillScope !== undefined && (!Array.isArray(skillScope)
 			|| !skillScope.every((folder: unknown): folder is string => text(folder, 4_096) && safeResourcePath(folder))))
+		|| (skillNotePaths !== undefined && (!Array.isArray(skillNotePaths)
+			|| !skillNotePaths.every((path: unknown): path is string => text(path, 4_096) && safeResourcePath(path.replace(/\/$/u, '')))))
 		|| (plan !== undefined && !text(plan, MAX_GOAL_PLAN_LENGTH))
 		|| (progress !== undefined && !savedProgress(progress, criteria ?? [objective]))) return;
 	return {
@@ -145,7 +152,9 @@ export function parseChatGoal(value: unknown): ChatGoal | undefined {
 		...(reason === 'manual' || reason === 'plan' || reason === 'closed' || reason === 'limit' || reason === 'failed' || reason === 'blocked' ? { reason } : {}),
 		...(typeof evidence === 'string' && { evidence: evidence.slice(0, maxEvidenceLength) }),
 		...(criteria && { criteria }), ...(refs && { refs }), ...(chatQuotes && { chatQuotes }),
-		...(skillMentions && { skillMentions }), ...(skillScope && { skillScope }), ...(plan && { plan }), ...(progress && { progress }),
+		...(imageSourcePath && { imageSourcePath }),
+		...(skillMentions && { skillMentions }), ...(skillScope && { skillScope }), ...(skillNotePaths && { skillNotePaths }),
+		...(plan && { plan }), ...(progress && { progress }),
 	};
 }
 

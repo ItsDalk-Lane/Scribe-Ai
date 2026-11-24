@@ -4,6 +4,7 @@ import type {
 	AuthInteraction,
 	Credential,
 	CredentialStore as PiCredentialStore,
+	ImageContent,
 	LoginOptions,
 	ThinkingLevel,
 	Usage,
@@ -13,6 +14,8 @@ import type { ChatGoal } from './interaction/chatGoal';
 import type { McpManager } from './tools/external/mcp';
 import type { McpSettings } from './tools/external/mcpConfig';
 import type { McpRun } from './tools/external/mcpTools';
+import type { WebSearchService } from './tools/external/webTools';
+import type { WebSearchSettings } from './tools/external/webSearchSettings';
 import type { ShellJobHistory, ShellJobs } from './tools/external/shellJobs';
 
 /** 占位骨架期各层尚未实现的统一信号 */
@@ -46,6 +49,7 @@ export interface ModelMetrics {
 
 export interface ReportedUsage {
 	prompt?: number;
+	videoInput?: number;
 	input?: number;
 	cacheRead?: number;
 	cacheWrite?: number;
@@ -59,10 +63,11 @@ export interface ModelUsageReceipt {
 }
 
 export interface AuxiliaryUsage extends ModelUsageReceipt {
-	kind: 'review' | 'summary';
+	kind: 'review' | 'summary' | 'video';
 }
 
 export interface Message {
+	imageRefs?: ImageReference[];
 	skillInputLength?: number;
 	skillMentions?: SkillMention[];
 	skillScope?: string[];
@@ -109,6 +114,7 @@ export interface Message {
 export interface NoteRef {
 	path: string;
 	kind?: 'file' | 'folder';
+	pastedImage?: true;
 	/** 本次任务显式提交的库外资料，用于恢复任务时校验授权来源。 */
 	addedExternal?: true;
 	/** 选区起止行，缺省表示整篇笔记 */
@@ -144,6 +150,9 @@ export interface TaskTarget {
 }
 
 export interface TaskRequest {
+	imageSourcePath?: string;
+	/** Limit image link extraction to the user's portion of a generated request. */
+	imageLinkEnd?: number;
 	target?: TaskTarget;
 	intent?: 'plan' | 'review';
 	reviewMaterial?: string;
@@ -227,6 +236,7 @@ export interface ToolResult {
 	shellStatus?: ShellStatus;
 	approvalReview?: ToolReviewStatus;
 	noteChange?: NoteChange;
+	imageRefs?: ImageReference[];
 }
 
 export type ShellStatus = 'success' | 'failed' | 'timed-out' | 'stopped' | 'start-failed';
@@ -273,16 +283,22 @@ export interface ToolApproval {
 	target: string;
 	before?: string;
 	after?: string;
-	kind?: 'shell' | 'access' | 'mcp';
+	kind?: 'shell' | 'access' | 'mcp' | 'web-search' | 'web-image';
 	reason?: string;
 	background?: true;
+}
+
+export interface ImageToolOutput {
+	content: string;
+	isError?: boolean;
+	images?: ImageContent[];
 }
 
 export interface PreparedTool {
 	approval?: ToolApproval;
 	approvalIdentity?: string;
 	independent?: true;
-	run(): Promise<string | { content: string; fileRead: FileReadPage } | { content: string; shellStatus: ShellStatus } | { content: string; noteChange: NoteChange } | { content: string; isError: boolean }> | string;
+	run(): Promise<string | { content: string; fileRead: FileReadPage } | { content: string; shellStatus: ShellStatus } | { content: string; noteChange: NoteChange } | ImageToolOutput> | string;
 }
 
 export interface ToolDefinition extends ToolSpec {
@@ -309,12 +325,31 @@ export interface ModelRequest {
 	reasoning?: string | null;
 	sessionId?: string;
 	maxRetries?: number;
+	/** 本次请求的最终答复需要遵循的 JSON Schema。 */
+	responseSchema?: Record<string, unknown>;
+	/** Explicitly attached to a user message. Binary data is loaded for this request only. */
+	video?: { messageIndex: number; hasFiles: boolean; load: (signal: AbortSignal) => Promise<ModelVideo[]> };
+	images?: {
+		required: boolean;
+		references: ReadonlyMap<number, readonly ImageReference[]>;
+		load: (signal: AbortSignal) => Promise<Map<number, ImageContent[]>>;
+	};
 }
+
+export type ImageReference =
+	| { kind: 'file'; path: string }
+	| { kind: 'vault-link'; path: string; sourcePath?: string }
+	| { kind: 'url'; path: string }
+	| { kind: 'pasted' | 'tool'; path: string };
+
+export type ModelVideo = { mimeType: string } & ({ data: string; url?: never } | { url: string; data?: never });
+export type VideoSourceKind = 'file' | 'link';
 
 export type StopReason = 'end' | 'tool-calls' | 'limit';
 
 export interface ModelResponse {
 	id?: string;
+	structuredOutput?: true;
 	content: string;
 	thinking?: string;
 	toolCalls: ToolCall[];
@@ -417,6 +452,8 @@ export interface ResumeReview {
 /* ───────────── 第五层：通信层接口 ───────────── */
 
 export type ModelModality = 'text' | 'image';
+/** 配置中记录模型能力，当前 SDK 传输所用的 ModelModality 仍是文本和图像。 */
+export type ModelInputModality = ModelModality | 'audio' | 'video' | 'pdf';
 
 export interface CustomProviderSettings {
 	label: string;
@@ -455,7 +492,7 @@ export interface ModelOverride {
 	protocol?: string;
 	contextWindow?: number;
 	maxTokens?: number;
-	input?: ModelModality[];
+	input?: ModelInputModality[];
 	output?: ModelModality[];
 	capabilities?: {
 		reasoning?: boolean;
@@ -485,6 +522,7 @@ export interface ModelProviderInfo {
 }
 
 export interface ModelCatalogDetails {
+	connectionProtocol?: string;
 	contextWindow?: number;
 	maxTokens?: number;
 	reasoning?: boolean;
@@ -492,18 +530,43 @@ export interface ModelCatalogDetails {
 	thinkingLevels?: readonly string[];
 	reportedThinkingLevels?: readonly string[];
 	inputModalities?: readonly string[];
+	videoInput?: boolean;
 	outputModalities?: readonly string[];
 	structuredOutput?: boolean;
+	/** The catalog advertises structured JSON without specifying a schema contract. */
+	jsonOutput?: boolean;
+	evidence?: Partial<Record<ModelCatalogField, ModelCatalogEvidence>>;
+}
+
+export type ModelCatalogField = Exclude<keyof ModelCatalogDetails, 'evidence'>;
+export interface ModelCatalogEvidence {
+	source: 'provider' | 'docs' | 'models.dev' | 'pi' | 'bundled';
+	checkedAt?: string;
+	conflict?: true;
 }
 
 export interface ModelCatalogResult {
 	models: string[];
 	source: 'provider' | 'pi' | 'bundled';
 	details?: ReadonlyMap<string, ModelCatalogDetails>;
+	updatedAt?: string;
+	stale?: true;
+}
+
+export type ModelConnectionIssue = 'unknown-provider' | 'missing-protocol' | 'unsupported-protocol' | 'missing-address' | 'invalid-address' | 'incompatible-address';
+
+export interface ModelConnection {
+	api: string;
+	baseUrl: string;
+	source: 'catalog' | 'compatible' | 'configured' | 'unresolved';
+	issue?: ModelConnectionIssue;
+	addressFromAuth?: true;
 }
 
 export interface ModelService {
 	providers(): ModelProviderInfo[];
+	modelConnection(this: void, providerId: string, model: string): ModelConnection;
+	modelCapabilities?(this: void, providerId: string, model: string): { structuredOutput: boolean; tools?: boolean; imageInput?: boolean; videoAnalysis?: VideoSourceKind };
 	thinkingOptions(this: void, model: Pick<ModelRequest, 'providerId' | 'model'>, preferred?: string): {
 		levels: string[];
 		level?: string;
@@ -511,7 +574,7 @@ export interface ModelService {
 	modelOrigin?(model: RunContext['model']): string | undefined;
 	contextLimits?(model: RunContext['model']): Pick<ProviderModelInfo, 'contextWindow' | 'maxTokens'> | undefined;
 	login(providerId: string, interaction: AuthInteraction, options?: LoginOptions): Promise<Credential>;
-	listProviderModels(providerId: string, signal?: AbortSignal): Promise<ModelCatalogResult>;
+	listProviderModels(providerId: string, signal?: AbortSignal, sharedPublicCatalog?: Promise<unknown>, sharedPiCatalog?: () => Promise<unknown>): Promise<ModelCatalogResult>;
 	/** 自建/本地服务商：直接向它的 /models 查询模型清单 */
 	listCustomModels(providerId: string, baseUrl: string, signal?: AbortSignal): Promise<Omit<ModelCatalogResult, 'source'> & { baseUrl: string }>;
 	send(request: ModelRequest, onUsage?: (usage: ModelUsageReceipt) => void): Promise<ModelResponse>;
@@ -543,6 +606,7 @@ export type CredentialStore = PiCredentialStore;
 
 export interface CommunicationLayer {
 	models: ModelService;
+	modelCatalog: import('./orchestration/storage/modelCatalogStore').ModelCatalogStore;
 	transport: Transport;
 	credentials: CredentialStore;
 }
@@ -620,6 +684,7 @@ export type MainConversationEntry =
 	| { type: 'retry'; taskId: string; retry: SavedRetry }
 	| { type: 'history-summary'; taskId: string; summary: HistorySummary }
 	| { type: 'run-summary'; taskId: string; summary: RunSummary }
+	| { type: 'video-analysis'; taskId: string; content: string; sources?: VideoSourceKind[] }
 	| { type: 'context-compaction'; taskId: string; compaction: ContextCompaction }
 	| { type: 'auxiliary-usage'; taskId: string; usage: AuxiliaryUsage }
 	| { type: 'finish'; taskId: string; status: TerminalRunStatus; turn: number; error?: string; partial?: string; resumed?: boolean; finishedAt?: number };
@@ -645,6 +710,8 @@ export interface SavedRun {
 	retries?: SavedRetry[];
 	historySummary?: HistorySummary;
 	runSummary?: RunSummary;
+	videoAnalysis?: string;
+	videoAnalysisSources?: VideoSourceKind[];
 }
 
 export interface SubagentRole {
@@ -774,7 +841,7 @@ export interface SessionController {
 	forkConversation(id: string, taskId: string, rememberConversation?: boolean): Promise<ConversationSnapshot>;
 	renameConversation(id: string, title: string): Promise<void>;
 	deleteConversation(id: string): Promise<void>;
-	createSideChat(parentRuns: SavedRun[]): SideChat;
+	createSideChat(parentRuns: SavedRun[], manualCompaction?: HistorySummary): SideChat;
 	submit(request: TaskRequest, observer?: RunObserver, replaceFromTaskId?: string, options?: SessionRunOptions): { taskId: string; result: Promise<RunState> };
 	submitQueued(message: QueuedMessage, observer: RunObserver, onStarted: () => void, options?: SessionRunOptions): { taskId: string; result: Promise<RunState> };
 	canSteer(conversationId: string, taskId: string): boolean;
@@ -787,7 +854,8 @@ export interface SessionController {
 
 export interface SideChat {
 	id: string;
-	submit(draft: Pick<TaskRequest, 'instruction' | 'chatQuotes' | 'skillMentions' | 'skillScope'> & { refs?: NoteRef[]; model?: RunContext['model'] }, observer?: RunObserver): {
+	skillScope?: string[];
+	submit(draft: Pick<TaskRequest, 'instruction' | 'chatQuotes' | 'skillMentions' | 'skillScope' | 'skillNotePaths' | 'imageSourcePath'> & { refs?: NoteRef[]; model?: RunContext['model'] }, observer?: RunObserver): {
 		taskId: string; request: TaskRequest; model: SavedRun['model']; result: Promise<RunState>;
 	};
 	stop(): void;
@@ -823,6 +891,7 @@ export interface PermissionPolicy {
 
 export interface RunContext {
 	mcpRun?: McpRun;
+	videoAnalysis?: { sources: readonly VideoSourceKind[]; read(): Promise<string> };
 	manualSummary?: string;
 	skillRun?: SkillRun;
 	subagents?: SubagentToolAccess;
@@ -933,14 +1002,18 @@ export interface LegacyWritingRules {
 
 export interface ScribeSettings {
 	mcp?: McpSettings;
+	webSearch?: WebSearchSettings;
+	videoModel?: Pick<ModelRequest, 'providerId' | 'model'>;
+	videoLinkModel?: ScribeSettings['videoModel'] | null;
 	skillSettings?: SkillSettings;
 	subagents?: SubagentSettings;
 	slashPresets?: Array<{ label: string; content: string } | null>;
-	/** 当前生效的模型；providerId + model 指向同一个服务商 */
+	/** 聊天默认模型；服务商是否启用单独保存 */
 	providerId: string;
 	model: string;
 	/** 每个已添加服务商的模型列表，键是内部服务商 ID */
 	providerModels: Record<string, string[]>;
+	disabledProviderIds: string[];
 	chatLocation: ChatLocation;
 	/** Days before the one-shot startup cleanup removes spill files; 0 disables cleanup. */
 	spillCleanupDays: number;
@@ -963,6 +1036,7 @@ export interface ScribeServices {
 	localState: import('./orchestration/storage/localState').LocalState;
 	communication: CommunicationLayer;
 	tools: ToolLayer;
+	webSearch: WebSearchService;
 	orchestration: OrchestrationLayer;
 	runtime: RuntimeLayer;
 }

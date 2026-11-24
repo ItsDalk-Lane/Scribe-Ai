@@ -5,9 +5,12 @@ import { pauseRun } from '../orchestration/runResume';
 import { SkillSteeringError } from '../skills/mentions';
 import type { McpManager } from '../tools/external/mcp';
 import { createMcpRun } from '../tools/external/mcpTools';
+import { webSearchToolName } from '../tools/external/webTools';
+import { readOnlySkillTools } from '../tools/skillTools';
 import { isWithinPath, toolAbsolutePath } from '../tools/support/pathUtils';
 import { toolSignature } from '../tools/support/toolSignature';
 import type { AgentLoop, Message, ModelCoordinator, ModelResponse, NoteRef, RunContext, RunEvent, RunState, SubagentNote, ToolApproval, ToolCall, ToolCoordinator, ToolResult } from '../types';
+import { isCachedImagePath } from '../orchestration/storage/paths';
 import { latestIncompleteReply, mayHaveStoppedEarly, newContinuationText } from './continuationText';
 import { InitialContextBudgetError } from './modelCoordinator';
 import { explicitNoteTargets } from './noteTargets';
@@ -18,7 +21,7 @@ const MAX_TOOL_CALLS = 256;
 const MAX_UNCHANGED_RESULTS = 3;
 const MAX_OUTPUT_CONTINUATIONS = 2;
 const fileChangeTools = new Set(['Write', 'Edit', 'NotebookEdit']);
-const resumeTools = new Set(['Read', 'Glob', 'Grep', ...fileChangeTools, 'list_agents', 'send_message', 'wait_agent', 'interrupt_agent', 'close_agent',
+const resumeTools = new Set(['Read', 'Glob', 'Grep', webSearchToolName, ...readOnlySkillTools, ...fileChangeTools, 'list_agents', 'send_message', 'wait_agent', 'interrupt_agent', 'close_agent',
 	'ask_parent', 'answer_subagent', 'review_subagent_result', 'read_subagent_result']);
 const repeatedToolsError = '工具多次返回相同结果，已停止重复操作。';
 const pendingResume = '退出前未执行。继续任务时请补做此步骤，修改文件仍需重新请求确认。';
@@ -97,8 +100,9 @@ function fileChangeSignature(call: ToolCall, path: string): string {
 
 async function canSteerWithRefs(ctx: RunContext, refs: NoteRef[]): Promise<boolean> {
 	const { cwd, permissions } = ctx;
-	const readable = await Promise.all(refs.map(async ({ path, lines }) => {
+	const readable = await Promise.all(refs.map(async ({ path, lines, pastedImage }) => {
 		try {
+			if (pastedImage && !lines) return isCachedImagePath(path, ctx.task.request.conversationId);
 			const absolute = toolAbsolutePath(cwd, path);
 			if (!permissions.canRead(absolute)) return false;
 			const canonical = await realpath(absolute);
@@ -371,7 +375,7 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					if (inbox?.length) await ctx.acceptInbox?.(inbox.map(({ id }) => id));
 
 					if (truncated) {
-						if (continuations < MAX_OUTPUT_CONTINUATIONS && state.turn < MAX_TURNS) {
+						if (!response.structuredOutput && continuations < MAX_OUTPUT_CONTINUATIONS && state.turn < MAX_TURNS) {
 							continuations++;
 							outputSoFar = (outputSoFar ?? '') + content;
 							continue;
@@ -420,6 +424,7 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 							...(result.shellStatus && { shellStatus: result.shellStatus }),
 							...(result.approvalReview && { approvalReview: result.approvalReview }),
 							...(result.noteChange && !skipped && !result.isError && { noteChange: result.noteChange }),
+							...(result.imageRefs?.length && !skipped && !result.isError && { imageRefs: result.imageRefs }),
 						};
 						if (result.fileRead) ctx.readDelivery.remember(message, result.fileRead);
 						await update({

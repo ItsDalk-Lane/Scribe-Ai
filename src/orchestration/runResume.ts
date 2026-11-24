@@ -1,6 +1,11 @@
-import type { ModelRequest, ResumeReview, RunCheckpoint, RunObserver, SavedRun, TaskRequest } from '../types';
+import { isAbsolute } from 'node:path';
+import type { ModelRequest, NoteRef, ResumeReview, RunCheckpoint, RunObserver, SavedRun, TaskRequest } from '../types';
 
 export const pauseRun = Symbol('pause run');
+
+export function wasSharedRef(ref: NoteRef): boolean {
+	return !isAbsolute(ref.path) || ref.addedExternal === true;
+}
 
 export class ResumeThinkingUnavailable extends Error {
 	constructor(readonly level: string) {

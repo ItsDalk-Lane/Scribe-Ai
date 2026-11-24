@@ -1,9 +1,11 @@
 import type { CustomProviderSettings, LegacyWritingRules, ModelOverride, ScribeSettings, SkillSettings } from '../../types';
 import { normalizeMcpSettings } from '../../tools/external/mcpConfig';
+import { normalizeWebSearchSettings } from '../../tools/external/webSearchSettings';
 import { normalizeVaultRelativePath } from '../../tools/support/pathUtils';
 import { DEFAULT_SUBAGENT_SETTINGS, normalizeSubagentSettings } from './subagentSettings';
 import { chatModelKey, isThinkingLevel } from './thinking';
 import { normalizePresets } from '../../interaction/slashPresets';
+import { isProviderEnabled, reconcileDefaultModel } from './modelAvailability';
 
 export function normalizeSkillSettings(raw?: Partial<SkillSettings>): SkillSettings {
 	const strings = (items: unknown) => Array.isArray(items) ? [...new Set(items.filter((x): x is string => typeof x === 'string' && Boolean(x.trim())))] : [];
@@ -21,6 +23,7 @@ export const DEFAULT_SETTINGS: ScribeSettings = {
 	providerId: '',
 	model: '',
 	providerModels: {},
+	disabledProviderIds: [],
 	modelOverrides: {},
 	thinkingByModel: {},
 	customProviders: {},
@@ -29,6 +32,8 @@ export const DEFAULT_SETTINGS: ScribeSettings = {
 	subagents: DEFAULT_SUBAGENT_SETTINGS,
 	skillSettings: normalizeSkillSettings(),
 	mcp: normalizeMcpSettings(undefined),
+	webSearch: normalizeWebSearchSettings(),
+	videoLinkModel: null,
 	communication: { credentialIds: {}, proxyUrl: '', providerNames: {}, baseUrls: {}, protocols: {} },
 };
 
@@ -52,6 +57,10 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 	};
 	const writingRules = legacyRules(stored.writingRules);
 	const writingRulesBackup = legacyRules(stored.writingRulesBackup);
+	const validVideoModel = (selection: ScribeSettings['videoLinkModel']) =>
+		typeof selection?.providerId === 'string' && selection.providerId.trim() && typeof selection.model === 'string' && selection.model.trim()
+			? { providerId: selection.providerId, model: selection.model } : undefined;
+	const videoModel = validVideoModel(stored.videoModel);
 	const providerId = stored.providerId ?? DEFAULT_SETTINGS.providerId;
 	const model = stored.model ?? DEFAULT_SETTINGS.model;
 	const providerModels: Record<string, string[]> = {};
@@ -92,7 +101,7 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 			};
 		}
 	}
-	// 每模型覆盖配置：只保留对象形态，字段在读取时再逐项使用
+	// 每模型覆盖配置：忽略无效条目，移除已退役的能力设置。
 	const modelOverrides: ScribeSettings['modelOverrides'] = {};
 	const rawOverrides = stored.modelOverrides as unknown;
 	if (rawOverrides && typeof rawOverrides === 'object' && !Array.isArray(rawOverrides)) {
@@ -100,15 +109,26 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 			if (!perProvider || typeof perProvider !== 'object' || Array.isArray(perProvider)) continue;
 			const models: Record<string, ModelOverride> = {};
 			for (const [modelId, override] of Object.entries(perProvider as Record<string, unknown>)) {
-				if (override && typeof override === 'object' && !Array.isArray(override)) models[modelId] = override;
+				if (!override || typeof override !== 'object' || Array.isArray(override)) continue;
+				const modelOverride = { ...override as ModelOverride };
+				const current = modelOverride.capabilities;
+				if (current && typeof current === 'object' && 'nativeWebSearch' in current) {
+					const { nativeWebSearch: _removed, ...capabilities } = current;
+					if (Object.keys(capabilities).length) modelOverride.capabilities = capabilities;
+					else delete modelOverride.capabilities;
+				}
+				if (Object.keys(modelOverride).length) models[modelId] = modelOverride;
 			}
 			if (Object.keys(models).length) modelOverrides[providerId] = models;
 		}
 	}
-	return {
+	const settings: ScribeSettings = {
 		providerId,
 		model,
 		providerModels,
+		disabledProviderIds: Array.isArray(stored.disabledProviderIds)
+			? [...new Set(stored.disabledProviderIds.filter((id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(providerModels, id)))]
+			: [],
 		modelOverrides,
 		thinkingByModel,
 		customProviders,
@@ -125,6 +145,9 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 		subagents: normalizeSubagentSettings(stored.subagents),
 		skillSettings: normalizeSkillSettings(stored.skillSettings),
 		mcp: normalizeMcpSettings(stored.mcp),
+		webSearch: normalizeWebSearchSettings(stored.webSearch),
+		...(videoModel && { videoModel }),
+		videoLinkModel: (stored.videoLinkModel === undefined ? videoModel : validVideoModel(stored.videoLinkModel)) ?? null,
 		...(stored.slashPresets !== undefined ? { slashPresets: normalizePresets(stored.slashPresets) } : {}),
 		...(writingRules ? { writingRules } : {}),
 		...(writingRulesBackup ? { writingRulesBackup } : {}),
@@ -136,4 +159,6 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 			protocols: strings(stored.communication?.protocols),
 		},
 	};
+	if ((!providerId && !model) || !isProviderEnabled(settings, providerId)) reconcileDefaultModel(settings);
+	return settings;
 }

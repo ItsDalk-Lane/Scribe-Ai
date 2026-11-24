@@ -5,19 +5,21 @@ import { skillNameTokens } from './skills/mentions';
 import { ChatView } from './interaction/ChatView';
 import { SideChatView } from './interaction/SideChatView';
 import { SubagentView } from './interaction/SubagentView';
-import { SubagentTabs } from './interaction/subagentTabs';
+import { ConversationViews } from './interaction/conversationViews';
 import { ScribeAiSettingTab } from './interaction/SettingsTab';
 import { uiText } from './interaction/uiText';
+import { isModelAvailable, reconcileDefaultModel, setProviderEnabled } from './orchestration/settings/modelAvailability';
 import { updateChatThinking } from './orchestration/settings/thinking';
 import { initializePluginStorage } from './orchestration/storage/pluginStorage';
 import { createServices } from './services';
 import { sweepSpillFiles } from './tools/support/spillCleanup';
 import type { McpSettings } from './tools/external/mcpConfig';
-import type { ScribeServices, ScribeSettings } from './types';
+import { normalizeWebSearchSettings, type WebSearchSettings } from './tools/external/webSearchSettings';
+import type { ScribeServices, ScribeSettings, VideoSourceKind } from './types';
 
 export default class ScribeAiPlugin extends Plugin {
 	services!: ScribeServices;
-	subagentTabs = new SubagentTabs(this.app.workspace);
+	conversationViews = new ConversationViews(this.app.workspace);
 	private settingsSave = Promise.resolve();
 	private settingsListeners = new Set<() => void>();
 	private writeSettings!: (settings: ScribeSettings) => Promise<void>;
@@ -27,7 +29,7 @@ export default class ScribeAiPlugin extends Plugin {
 			new Notice('新存储位置打不开，已保留旧数据。');
 			throw error;
 		});
-		const { settings, conversations, localState, cache } = storage;
+		const { settings, conversations, localState, cache, modelCatalog } = storage;
 		this.writeSettings = storage.writeSettings;
 		try {
 			await storage.complete();
@@ -35,11 +37,21 @@ export default class ScribeAiPlugin extends Plugin {
 			console.error('Scribe Ai 无法完成旧数据清理。', error);
 			new Notice('旧数据暂时无法清理，下次启动时会重试。');
 		}
-		this.services = createServices(this.app, settings, this.manifest, conversations, localState, cache, () => this.saveSettings(), {
+		this.services = await createServices(this.app, settings, this.manifest, conversations, localState, cache, modelCatalog, () => this.saveSettings(), {
 			draft: (...args) => openSkillDraftReview(this.app, ...args),
 			install: (...args) => openGithubSkillReview(this.app, ...args),
-		}, (next) => this.saveMcpSettings(next));
+		}, (next) => this.saveMcpSettings(next), async (id) => {
+			this.conversationViews.closeConversation(id);
+			try {
+				await localState.forgetConversation(id);
+			} catch {
+				new Notice(uiText().saveFailed);
+			}
+		});
 		this.app.workspace.onLayoutReady(() => this.services?.tools.mcp?.reconcile());
+		const catalog = this.services.communication.modelCatalog;
+		this.app.workspace.onLayoutReady(() => { void catalog.refresh().catch(() => {}); });
+		this.register(() => catalog.dispose());
 		queueMicrotask(() => {
 			try { sweepSpillFiles({ cacheDirectory: cache, cleanupPeriodDays: settings.spillCleanupDays }); } catch { /* 清理失败时留待下次。 */ }
 		});
@@ -71,7 +83,7 @@ export default class ScribeAiPlugin extends Plugin {
 	openSubagent(conversationId: string, agentId: string) {
 		const agent = this.services.orchestration.sessions.subagents?.snapshot(conversationId).agents.find(({ id }) => id === agentId);
 		const error = uiText().sideChatOpenFailed;
-		void this.subagentTabs.open({ conversationId, agentId, name: agent?.name ?? agentId }, error)
+		void this.conversationViews.openSubagent({ conversationId, agentId, name: agent?.name ?? agentId }, error)
 			.catch(() => new Notice(error));
 	}
 
@@ -121,7 +133,7 @@ export default class ScribeAiPlugin extends Plugin {
 			const { settings, communication } = this.services;
 			const target = selection ?? settings;
 			const current = { providerId: settings.providerId, model: settings.model };
-			const hasModel = () => settings.providerModels[target.providerId]?.includes(target.model);
+			const hasModel = () => isModelAvailable(settings, target);
 			if (selection && (!hasModel() || (!selection.keepDefault && selection.thinkingLevel !== undefined
 				&& (selection.providerId !== current.providerId || selection.model !== current.model)))) {
 				throw new Error(uiText().chatModelChanged);
@@ -140,6 +152,18 @@ export default class ScribeAiPlugin extends Plugin {
 		});
 	}
 
+	async saveProviderAvailability(providerId: string, enabled: boolean): Promise<void> {
+		await this.enqueueSettingsSave(async () => {
+			const { settings } = this.services;
+			const next = { ...settings };
+			setProviderEnabled(next, providerId, enabled);
+			if (next.disabledProviderIds === settings.disabledProviderIds) return;
+			await this.writeSettings(next);
+			settings.disabledProviderIds = next.disabledProviderIds;
+			reconcileDefaultModel(settings);
+		});
+	}
+
 	async saveSlashPresets(update: (current: NonNullable<ScribeSettings['slashPresets']>) => NonNullable<ScribeSettings['slashPresets']>): Promise<void> {
 		await this.enqueueSettingsSave(async () => {
 			const { settings } = this.services;
@@ -154,6 +178,30 @@ export default class ScribeAiPlugin extends Plugin {
 			const { settings } = this.services;
 			await this.writeSettings({ ...settings, mcp });
 			settings.mcp = mcp;
+		});
+	}
+
+	async saveWebSearchSettings(update: (current: WebSearchSettings) => WebSearchSettings): Promise<void> {
+		await this.enqueueSettingsSave(async () => {
+			const { settings } = this.services;
+			const webSearch = normalizeWebSearchSettings(update(normalizeWebSearchSettings(settings.webSearch)));
+			await this.writeSettings({ ...settings, webSearch });
+			settings.webSearch = webSearch;
+		});
+	}
+
+	async saveVideoModel(source: VideoSourceKind, videoModel: ScribeSettings['videoModel']): Promise<void> {
+		await this.enqueueSettingsSave(async () => {
+			const { settings, communication } = this.services;
+			if (videoModel) {
+				const input = communication.models.modelCapabilities?.(videoModel.providerId, videoModel.model).videoAnalysis;
+				if (!isModelAvailable(settings, videoModel) || !input || (source === 'file' && input !== 'file')) {
+					throw new Error('此模型连接无法用于所选的视频来源，请重新选择。');
+				}
+			}
+			const update = source === 'file' ? { videoModel } : { videoLinkModel: videoModel ?? null };
+			await this.writeSettings({ ...settings, ...update });
+			Object.assign(settings, update);
 		});
 	}
 

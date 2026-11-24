@@ -31,7 +31,7 @@ export async function externalReferenceAt(path: string, mode: ExternalReferenceM
 	const info = await stat(path);
 	const kind = info.isDirectory() ? 'folder' : info.isFile() ? 'file' : undefined;
 	if (!kind || (mode !== 'path' && mode !== kind)) throw new Error('路径必须指向所选类型的文件或文件夹。');
-	return { path, kind };
+	return { path, kind, addedExternal: true };
 }
 
 export async function pickExternalReference(document: Document, mode: ExternalReferenceMode, title: string): Promise<NoteRef | null> {

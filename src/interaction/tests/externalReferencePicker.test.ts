@@ -17,13 +17,13 @@ void test('external picker passes the composer window and returns only approved 
 		} } } },
 	} as unknown as Document;
 
-	assert.deepEqual(await pickExternalReference(document, 'file', 'Choose file'), { path: selectedPath, kind: 'file' });
+	assert.deepEqual(await pickExternalReference(document, 'file', 'Choose file'), { path: selectedPath, kind: 'file', addedExternal: true });
 	selectedPath = dirname(__filename);
-	assert.deepEqual(await pickExternalReference(document, 'folder', 'Choose folder'), { path: selectedPath, kind: 'folder' });
+	assert.deepEqual(await pickExternalReference(document, 'folder', 'Choose folder'), { path: selectedPath, kind: 'folder', addedExternal: true });
 	selectedPath = __filename;
-	assert.deepEqual(await pickExternalReference(document, 'path', 'Choose path'), { path: selectedPath, kind: 'file' });
+	assert.deepEqual(await pickExternalReference(document, 'path', 'Choose path'), { path: selectedPath, kind: 'file', addedExternal: true });
 	selectedPath = dirname(__filename);
-	assert.deepEqual(await pickExternalReference(document, 'path', 'Choose path'), { path: selectedPath, kind: 'folder' });
+	assert.deepEqual(await pickExternalReference(document, 'path', 'Choose path'), { path: selectedPath, kind: 'folder', addedExternal: true });
 	assert.deepEqual(calls, [
 		[owner, { title: 'Choose file', properties: ['openFile', 'dontAddToRecent'] }],
 		[owner, { title: 'Choose folder', properties: ['openDirectory', 'dontAddToRecent'] }],

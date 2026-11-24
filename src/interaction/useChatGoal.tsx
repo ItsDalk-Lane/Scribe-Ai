@@ -40,7 +40,7 @@ export function goalText() {
 	};
 }
 
-type GoalContext = Pick<ChatGoal, 'refs' | 'chatQuotes' | 'skillMentions' | 'skillScope'>;
+type GoalContext = Pick<ChatGoal, 'refs' | 'imageSourcePath' | 'chatQuotes' | 'skillMentions' | 'skillScope' | 'skillNotePaths'>;
 type GoalDraft = Pick<ChatGoal, 'objective' | 'criteria' | 'maxRounds'>;
 
 function editGoal(app: App, draft: GoalDraft, ui?: SlashUi) {

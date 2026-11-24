@@ -29,11 +29,13 @@ void test('goal work time accrues only while active and survives a pause and reo
 
 void test('a goal restores the selected skill source only when it matches its objective', () => {
 	const selected = { id: '/vault/skills/review/SKILL.md', name: 'review', start: 0, end: 7 };
-	const goal = { ...started, objective: '$review 检查纪要', skillMentions: [selected], skillScope: ['会议/2026'] };
+	const goal = { ...started, objective: '$review 检查纪要', skillMentions: [selected], skillScope: ['会议/2026'],
+		skillNotePaths: ['会议/2026/周会.md', '会议/资料/'] };
 	assert.deepEqual(parseChatGoal(goal), goal);
 	assert.equal(parseChatGoal({ ...goal, objective: '$other 检查纪要' }), undefined);
 	assert.equal(parseChatGoal({ ...goal, skillMentions: [selected, { ...selected, id: '/other/SKILL.md' }] }), undefined);
 	assert.equal(parseChatGoal({ ...goal, skillScope: ['../'] }), undefined);
+	assert.equal(parseChatGoal({ ...goal, skillNotePaths: ['../其他位置.md'] }), undefined);
 });
 
 void test('goal continuation stops on the selected cap, interruption or failure', () => {

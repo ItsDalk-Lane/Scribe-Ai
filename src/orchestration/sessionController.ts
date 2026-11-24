@@ -1,3 +1,5 @@
+import { guardModelConnection } from './settings/modelConnection';
+import { isModelAvailable, isProviderEnabled, videoModelFor } from './settings/modelAvailability';
 import { createSkillRun } from './context/skillRun';
 import { bindSkillMentions } from '../skills/mentions';
 import type { SkillRegistry } from './context/skills';
@@ -5,32 +7,36 @@ import { readOnlySkillTools } from '../tools/skillTools';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import type { App, FileSystemAdapter } from 'obsidian';
-import { reportedCost } from '../communication/reportedUsage';
+import { meteredService } from './meteredService';
+import { createVideoAnalysis } from './context/videoAnalysis';
+import { transcodableVideo } from './context/videoEncoding';
+import { videoSourceKind, videoSources } from './context/videoAttachments';
 import { conversationHistory, runsAfterManualCompaction } from './context/conversationHistory';
 import { createHistorySummarizer } from './context/historySummary';
 import { createRunSummarizer } from './context/runSummary';
 import { buildWritingRulesPrompt } from './context/writingRules';
 import { reviewToolApproval } from './policies/approvalReview';
 import { createRunContext } from './runContext';
-import { canResumeRun, createResumeReview, pauseRun, ResumeThinkingUnavailable } from './runResume';
+import { canResumeRun, createResumeReview, pauseRun, ResumeThinkingUnavailable, wasSharedRef } from './runResume';
 import { chatModelKey } from './settings/thinking';
 import { trackRun } from './storage/runTranscript';
 import { createTask } from './taskManager';
 import { createSubagentController } from './subagents/controller';
 import type { ChildRunOptions } from './subagents/controller';
 import { subagentToolNames } from '../tools/subagentTools';
+import { structuredOutputToolName } from '../tools/structuredOutputTool';
 import type { ShellJobs } from '../tools/external/shellJobs';
 import { MissingConversationError } from '../types';
 import type {
-	AuxiliaryUsage, ConversationSnapshot, ConversationStore, ExecutionMode, ModelService, ModelUsageReceipt, QueuedMessage, RunContext, RunObserver, RunState, RuntimeLayer, SavedRun, ScribeSettings, SessionController, SkillMention, Task, TaskRequest,
+	ConversationSnapshot, ConversationStore, ExecutionMode, ModelService, QueuedMessage, RunContext, RunObserver, RunState, RuntimeLayer, SavedRun, ScribeSettings, SessionController, SkillMention, Task, TaskRequest,
 } from '../types';
 
-type RunModels = Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin'>;
+type RunModels = Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin' | 'modelCapabilities'> & Partial<Pick<ModelService, 'modelConnection'>>;
 const readOnlyTools = new Set([...readOnlySkillTools, 'Read', 'Glob', 'Grep', ...subagentToolNames]);
 
 interface Steering {
 	accepting: boolean;
-	pending: Map<string, { message: QueuedMessage; resolve: () => void; reject: (reason: Error) => void }>;
+	pending: Map<string, { message: QueuedMessage; request: TaskRequest; resolve: () => void; reject: (reason: Error) => void }>;
 }
 
 function rejectSteering(steering: Steering, ids: Iterable<string>, reason = '当前任务无法接受这条插话。') {
@@ -40,26 +46,15 @@ function rejectSteering(steering: Steering, ids: Iterable<string>, reason = '当
 	}
 }
 
-function mainTask(request: TaskRequest): Task {
+function mainTask(request: TaskRequest, fromSaved = false): Task {
 	if (!request.instruction.trim()) throw new Error('请输入任务。');
 	if (request.intent && request.target) throw new Error('请在普通聊天中指定工具或子 Agent。');
-	const task = createTask({ ...request, approvalSource: undefined, subagentCallerTaskId: undefined, inheritedSkillIds: undefined, inheritedSkills: undefined });
+	const task = createTask({ ...request, refs: fromSaved ? request.refs.filter(wasSharedRef) : request.refs,
+		approvalSource: undefined, subagentCallerTaskId: undefined, inheritedSkillIds: undefined, inheritedSkills: undefined });
 	for (const ref of task.request.refs) {
 		if (isAbsolute(ref.path)) ref.addedExternal = true;
 	}
 	return task;
-}
-
-function connectionKey(settings: ScribeSettings, provider: string, model: string): string {
-	return JSON.stringify([
-		settings.customProviders[provider],
-		settings.communication.baseUrls[provider],
-		settings.communication.protocols[provider],
-		settings.communication.credentialIds[provider],
-		settings.communication.proxyUrl,
-		settings.modelOverrides[provider]?.[model],
-		settings.providerModels[provider]?.[0],
-	]);
 }
 
 function failedRun(task: Task, signal: AbortSignal, error: unknown): RunState {
@@ -73,32 +68,6 @@ function failedRun(task: Task, signal: AbortSignal, error: unknown): RunState {
 	};
 }
 
-function meteredService(service: Pick<ModelService, 'send' | 'contextLimits'>, kind: AuxiliaryUsage['kind'],
-	record: (usage: AuxiliaryUsage) => Promise<void>): Pick<ModelService, 'send' | 'contextLimits'> {
-	return {
-		contextLimits: (model) => service.contextLimits?.(model),
-		async send(request) {
-			request.signal?.throwIfAborted();
-			let receipt: ModelUsageReceipt = {};
-			let saved: Promise<void> | undefined;
-			const save = () => saved ??= record({ kind, ...receipt });
-			// 停止任务时审核可能仍在返回，先记下已取得的用量或未知状态。
-			const onAbort = () => { void save().catch(() => {}); };
-			request.signal?.addEventListener('abort', onAbort, { once: true });
-			try {
-				const response = await service.send(request, (usage) => { receipt = usage; });
-				const reportedUsage = response.reportedUsage ?? receipt.reportedUsage;
-				const cost = reportedCost(response.usage) ?? reportedCost(response.raw.usage) ?? receipt.cost;
-				receipt = { ...(reportedUsage !== undefined && { reportedUsage }), ...(cost !== undefined && { cost }) };
-				return response;
-			} finally {
-				request.signal?.removeEventListener('abort', onAbort);
-				await save();
-			}
-		},
-	};
-}
-
 async function runTask(
 	task: Task,
 	app: App,
@@ -108,30 +77,26 @@ async function runTask(
 	selection: RunContext['model'],
 	signal: AbortSignal,
 	observer: RunObserver,
-	{ restored, replaceFromTaskId, sideRuns, queued, steering, rememberConversation = true, executionMode, models, subagents, child, skills }: {
-		restored?: { run: SavedRun; conversation: ConversationSnapshot }; replaceFromTaskId?: string; sideRuns?: SavedRun[];
+	{ restored, replaceFromTaskId, sideSnapshot, queued, steering, rememberConversation = true, executionMode, models, subagents, child, skills }: {
+		restored?: { run: SavedRun; conversation: ConversationSnapshot }; replaceFromTaskId?: string; sideSnapshot?: ConversationSnapshot;
 		queued?: { message: QueuedMessage; onStarted: () => void }; steering?: Steering; rememberConversation?: boolean;
 		executionMode?: ExecutionMode; models?: RunModels; subagents?: ReturnType<typeof createSubagentController>; child?: ChildRunOptions; skills?: SkillRegistry;
 	} = {},
 ): Promise<RunState> {
 	const { providerId, model } = selection;
-	const toolsEnabled = () => settings.modelOverrides[providerId]?.[model]?.capabilities?.tools !== false;
+	const toolsEnabled = () => (settings.modelOverrides[providerId]?.[model]?.capabilities?.tools
+		?? models?.modelCapabilities?.(providerId, model).tools) !== false;
 	const toolsEnabledAtStart = toolsEnabled();
 	const { intent } = task.request;
 	const target = task.request.target;
-	const directAgent = !restored && !child && !sideRuns && !intent && target?.kind === 'agent' ? target : undefined;
+	const directAgent = !restored && !child && !sideSnapshot && !intent && target?.kind === 'agent' ? target : undefined;
 	if (skills && intent !== 'review') {
 		const { refs } = task.request;
-		const activeNote = child || sideRuns ? '' : undefined;
+		const activeNote = child || sideSnapshot ? '' : undefined;
 		task.request.skillScope ??= skills.scope(refs, activeNote);
 		task.request.skillNotePaths ??= skills.notePaths(refs, restored ? '' : activeNote);
 	}
-	const connection = connectionKey(settings, providerId, model);
-	const checkModel = () => {
-		if (connection !== connectionKey(settings, providerId, model)) {
-			throw new Error('运行期间模型连接设置已变更，请重新提交任务。');
-		}
-	};
+	const checkModel = guardModelConnection(settings, selection, models?.modelConnection);
 	let current: RunState | undefined;
 	const trackingObserver: RunObserver = {
 		...observer,
@@ -143,7 +108,7 @@ async function runTask(
 	const transcript = trackRun(child ? {
 		append: (_id, entries) => child.append(entries.flatMap((entry) =>
 			entry.type === 'subagent' || entry.type === 'subagent-report' || entry.type === 'queue-add' || entry.type === 'queue-edit' || entry.type === 'queue-delete' ? [] : [entry])),
-	} : sideRuns ? undefined : {
+	} : sideSnapshot ? undefined : {
 		async append(id, entries) {
 			if (entries[0]?.type === 'start') {
 				if (replaceFromTaskId !== undefined) return conversations.replaceFrom(id, replaceFromTaskId, entries);
@@ -180,14 +145,13 @@ async function runTask(
 	let state: RunState;
 	try {
 		const conversationId = task.request.conversationId;
-		const snapshot = sideRuns ? { id: conversationId, runs: sideRuns }
-			: restored?.conversation ?? child?.snapshot ?? await conversations.load(conversationId);
+		const snapshot = sideSnapshot ?? restored?.conversation ?? child?.snapshot ?? await conversations.load(conversationId);
 		const replaceAt = replaceFromTaskId === undefined ? undefined
 			: snapshot.runs.findIndex((run) => run.state.taskId === replaceFromTaskId);
 		if (replaceAt === -1) throw new Error('对话中找不到这条消息。');
 		const saved = restored || replaceAt !== undefined
 			? { ...snapshot, runs: snapshot.runs.slice(0, restored ? -1 : replaceAt) } : snapshot;
-		if (!child && !sideRuns && rememberConversation) await conversations.setLastOpened(conversationId);
+		if (!child && !sideSnapshot && rememberConversation) await conversations.setLastOpened(conversationId);
 		const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
 		let ctx: RunContext | undefined;
 		let directSkills: SkillMention[] = [];
@@ -209,11 +173,14 @@ async function runTask(
 				} : undefined,
 				record: review ? (event) => review.record(event) : transcript.record, resumeReview: review?.review,
 				...(steering ? {
-					takeSteering: () => Array.from(steering.pending.values(), ({ message }) => message),
+					takeSteering: () => Array.from(steering.pending.values(), ({ message, request }) => ({ id: message.id, request })),
 					rejectSteering: (ids: string[], reason?: string) => rejectSteering(steering, ids, reason),
 				} : {}),
 				...(intent !== 'review' && conversationHistory(saved)),
-			}, app.vault.configDir, () => toolsEnabledAtStart && toolsEnabled(), Boolean(sideRuns), executionMode);
+			}, app.vault.configDir, () => toolsEnabledAtStart && toolsEnabled(), Boolean(sideSnapshot), executionMode);
+			const runPermissions = ctx.permissions;
+			ctx.permissions = { ...runPermissions, canCallTool: (tool) => runPermissions.canCallTool(tool)
+				&& (tool.name !== structuredOutputToolName || models?.modelCapabilities?.(providerId, model).structuredOutput === true) };
 			if (skills && intent !== 'review') ctx.skillRun = createSkillRun(skills, task.request,
 				models?.contextLimits?.(selection)?.contextWindow, runSignal, task.id, observer.onWork && ((active) => observer.onWork?.(task.id, active)));
 			if (child) {
@@ -227,7 +194,7 @@ async function runTask(
 						canCallTool: (tool) => policy.canCallTool(tool) && readOnlyTools.has(tool.name) };
 				}
 			}
-			if (!sideRuns && intent !== 'review') {
+			if (!sideSnapshot && intent !== 'review') {
 				const summaryModels = sendingModels ? meteredService(sendingModels, 'summary', transcript.recordUsage) : undefined;
 				const save = (entries: Parameters<ChildRunOptions['append']>[0]) => child
 					? child.append(entries) : conversations.append(conversationId, entries);
@@ -250,7 +217,7 @@ async function runTask(
 			}
 		}
 		started = true;
-		if (ctx && subagents && !sideRuns && !intent) {
+		if (ctx && subagents && !sideSnapshot && !intent) {
 			if (replaceFromTaskId) await subagents.reload(conversationId);
 			else await subagents.controls.load(conversationId);
 			if (directAgent) {
@@ -259,6 +226,14 @@ async function runTask(
 			}
 			await subagents.connect(ctx, () => current, child?.agentId, child?.readOnly, directAgent && { role: directAgent.id, skills: directSkills });
 			if (child?.instructions) ctx.subagentPrompt = [ctx.subagentPrompt, child.instructions].filter(Boolean).join('\n');
+		}
+		const savedVideo = restored?.run.videoAnalysis;
+		if (ctx && savedVideo) {
+			ctx.videoAnalysis = { sources: restored.run.videoAnalysisSources ?? ['file', 'link'], read: () => Promise.resolve(savedVideo) };
+		} else if (ctx && models && !sideSnapshot && !child && !intent) {
+			ctx.videoAnalysis = createVideoAnalysis(ctx, settings, models, transcript.recordUsage,
+				(content, sources) => conversations.append(task.request.conversationId, [{ type: 'video-analysis', taskId: task.id, content, sources }]),
+				restored ? observer.confirmResume : undefined);
 		}
 		const agent = runtime.createAgent(ctx, restored?.run.state);
 		state = await agent.loop.run(ctx, agent.state);
@@ -297,6 +272,7 @@ export function createSessionController(
 	models?: RunModels,
 	shellJobs?: ShellJobs,
 	skills?: SkillRegistry,
+	onConversationDeleted?: (id: string) => Promise<void>,
 ): SessionController {
 	const active = new Map<string, { conversationId: string; controller: AbortController; steering: Steering }>();
 	const deleting = new Set<string>();
@@ -306,7 +282,7 @@ export function createSessionController(
 		return Array.from(active.values()).some(({ conversationId }) => conversationId === key);
 	}
 	function modelChoice(choice?: RunContext['model']): RunContext['model'] {
-		if (choice && !settings.providerModels[choice.providerId]?.includes(choice.model)) {
+		if (choice ? !isModelAvailable(settings, choice) : !isProviderEnabled(settings, settings.providerId)) {
 			throw new Error('所选模型已不可用，请重新选择。');
 		}
 		return choice ?? settings;
@@ -317,6 +293,12 @@ export function createSessionController(
 		const selection: RunContext['model'] = { providerId, model };
 		const preferred = reasoning === undefined ? settings.thinkingByModel[chatModelKey(providerId, model)] : reasoning;
 		selection.reasoning = preferred === null || !thinkingOptions ? preferred : thinkingOptions(selection, preferred).level ?? null;
+		return selection;
+	}
+	function restoredModel(selection: RunContext['model']): RunContext['model'] {
+		if (selection.reasoning && thinkingOptions && !thinkingOptions(selection).levels.includes(selection.reasoning)) {
+			throw new ResumeThinkingUnavailable(selection.reasoning);
+		}
 		return selection;
 	}
 	function launch(conversationId: string, taskId: string, run: (signal: AbortSignal, steering: Steering) => Promise<RunState>) {
@@ -338,7 +320,7 @@ export function createSessionController(
 		(task, model, signal, observer, executionMode, child) => runTask(task, app, settings, runtime, conversations, model, signal, observer, {
 			executionMode, child, models, subagents, skills,
 			restored: child.restored && { run: child.restored, conversation: child.snapshot },
-		}), selectedModel, models,
+		}), (model, restored) => restored ? restoredModel(modelChoice(model)) : selectedModel(model), models,
 		shellJobs && ((id, agents) => shellJobs.stopSubagents(id, agents)));
 	return {
 		subagents: subagents.controls,
@@ -382,17 +364,19 @@ export function createSessionController(
 				await conversations.delete(id);
 				subagents.forget(id);
 				shellJobs?.forgetConversation(id);
+				await onConversationDeleted?.(id);
 			} finally {
 				deleting.delete(key);
 			}
 		},
-		createSideChat(parentRuns) {
+		createSideChat(parentRuns, manualCompaction) {
 			if (disposed) throw new Error('插件已关闭。');
 			const id = randomUUID();
 			const runs = [...parentRuns];
-		const parent = parentRuns.at(-1)?.request;
-		const parentScope = parent?.skillScope ?? skills?.scope(parent?.refs);
-		const parentPaths = parent?.skillNotePaths ?? skills?.notePaths(parent?.refs);
+			const sideSnapshot = { id, runs, manualCompaction };
+			const parent = parentRuns.at(-1)?.request;
+			const parentScope = parent?.skillScope ?? skills?.scope(parent?.refs);
+			const parentPaths = parent?.skillNotePaths ?? skills?.notePaths(parent?.refs);
 			let running: AbortController | undefined;
 			let closed = false;
 			function close() {
@@ -404,22 +388,25 @@ export function createSessionController(
 			closeSideChats.add(close);
 			return {
 				id,
+				skillScope: parentScope,
 				submit(draft, observer = {}) {
-					const { instruction, refs = [], chatQuotes, skillScope, skillMentions, model: choice } = draft;
+					const { instruction, refs = [], chatQuotes, skillScope, skillNotePaths, skillMentions, imageSourcePath, model: choice } = draft;
 					if (closed) throw new Error('侧聊已关闭。');
 					if (running) throw new Error('侧聊正在回答。');
 					if ('target' in draft && draft.target) throw new Error('请在普通聊天中指定工具或子 Agent。');
 					if (!instruction.trim()) throw new Error('请输入问题。');
 					const model = selectedModel(choice);
-				const allowedRefs = refs.filter(({ path, kind, addedExternal }) => !isAbsolute(path) || (kind === 'file' && addedExternal === true));
-				const notePaths = skills?.notePaths(allowedRefs, '');
-				const task = createTask({ conversationId: id, instruction, skillMentions, skillScope: skillScope ?? (refs.length ? skills?.scope(refs) : parentScope),
-					skillNotePaths: notePaths?.length ? notePaths : parentPaths, refs: allowedRefs, chatQuotes });
+					const allowedRefs = refs.filter((ref) => !isAbsolute(ref.path) || (ref.kind === 'file' && wasSharedRef(ref)));
+					const notePaths = skills?.notePaths(allowedRefs, '');
+					const task = createTask({ conversationId: id, instruction, skillMentions,
+						imageSourcePath,
+						skillScope: skillScope ?? (notePaths?.length ? skills?.scope(allowedRefs, '') : parentScope),
+						skillNotePaths: skillNotePaths ?? (notePaths?.length ? notePaths : parentPaths), refs: allowedRefs, chatQuotes });
 					const request = task.request;
 					const controller = new AbortController();
 					running = controller;
 					const result = runTask(task, app, settings, runtime, conversations, model, controller.signal,
-						{ onEvent: observer.onEvent }, { sideRuns: runs, skills, models }).then((state) => {
+						{ onEvent: observer.onEvent }, { sideSnapshot, skills, models }).then((state) => {
 						// 关闭后，已取消的请求可以收尾，不能恢复已清空的对话。
 						if (!closed && state.messages.some(({ role }) => role === 'user')) {
 							runs.push({ request, model, state });
@@ -434,14 +421,14 @@ export function createSessionController(
 		},
 		submit(request, observer = {}, replaceFromTaskId, { model, rememberConversation, executionMode } = {}) {
 			const selection = selectedModel(model);
-			const task = mainTask(request);
+			const task = mainTask(request, replaceFromTaskId !== undefined);
 			if (replaceFromTaskId && subagents.busy(request.conversationId)) throw new Error('请先停止这段对话的子任务。');
 			return launch(request.conversationId, task.id, (signal, steering) =>
 				runTask(task, app, settings, runtime, conversations, selection, signal, observer, { replaceFromTaskId, steering, rememberConversation, executionMode, models, subagents, skills }));
 		},
 		submitQueued(message, observer, onStarted, { model, rememberConversation, executionMode } = {}) {
 			const selection = selectedModel(model);
-			const task = mainTask(message.request);
+			const task = mainTask(message.request, true);
 			return launch(message.request.conversationId, task.id, (signal, steering) =>
 				runTask(task, app, settings, runtime, conversations, selection, signal, observer, { queued: { message, onStarted }, steering, rememberConversation, executionMode, models, subagents, skills }));
 		},
@@ -453,6 +440,9 @@ export function createSessionController(
 		steer(taskId, message) {
 			if (message.request.selection) return Promise.reject(new Error('选区问答已停用，请新建普通提问。'));
 			if (message.request.target) return Promise.reject(new Error('指定了工具或子 Agent 的消息需要单独发送。'));
+			if (videoSources(message.request, transcodableVideo).some((source) => videoModelFor(settings, videoSourceKind(source)))) {
+				return Promise.reject(new Error('含视频的消息需作为独立任务发送，请等待队列自动发送。'));
+			}
 			const running = active.get(taskId);
 			if (!running || running.conversationId !== message.request.conversationId.toLowerCase()
 				|| !running.steering.accepting || running.controller.signal.aborted || running.steering.pending.has(message.id)) {
@@ -461,7 +451,7 @@ export function createSessionController(
 			return new Promise((resolve, reject) => {
 				const request = message.request.skillNotePaths || !skills ? message.request
 					: { ...message.request, skillNotePaths: skills.notePaths(message.request.refs, '') };
-				running.steering.pending.set(message.id, { message: { ...message, request }, resolve, reject });
+				running.steering.pending.set(message.id, { message, request, resolve, reject });
 			});
 		},
 		resume(conversationId, taskId, observer = {}, { model, rememberConversation, executionMode } = {}) {
@@ -473,12 +463,9 @@ export function createSessionController(
 				if (selection.providerId !== run.model.providerId || selection.model !== run.model.model) {
 					throw new Error(`请先选择原任务使用的模型 ${run.model.model}。`);
 				}
-				if (run.model.reasoning && thinkingOptions && !thinkingOptions(run.model).levels.includes(run.model.reasoning)) {
-					throw new ResumeThinkingUnavailable(run.model.reasoning);
-				}
-				const refs = run.request.refs.filter(({ path, addedExternal }) => !isAbsolute(path) || addedExternal === true);
+				const refs = run.request.refs.filter(wasSharedRef);
 				const task = { ...createTask({ ...run.request, refs }), id: taskId };
-				return runTask(task, app, settings, runtime, conversations, run.model, signal, observer, { restored: { run, conversation }, steering, rememberConversation, executionMode, models, subagents, skills });
+				return runTask(task, app, settings, runtime, conversations, restoredModel(run.model), signal, observer, { restored: { run, conversation }, steering, rememberConversation, executionMode, models, subagents, skills });
 			});
 		},
 		async cancel(taskId) {

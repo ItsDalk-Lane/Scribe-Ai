@@ -50,14 +50,16 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 				const stream = service.stream({
 					...input,
 					...(attempts === 0 ? {} : { maxRetries: 0 }),
-					...((review || ctx.destinationCheck || input.beforeSend) ? { beforeSend: async (address: string) => {
+					...((review || ctx.destinationCheck || input.beforeSend || (input.images && ctx.checkModel)) ? { beforeSend: async (address: string) => {
 						const waitingAt = performance.now();
 						const mayWaitForUser = Boolean(review || ctx.destinationCheck);
 						if (mayWaitForUser) work(false);
 						try {
+							ctx.checkModel?.();
 							await review?.beforeSend(address);
 							await ctx.destinationCheck?.(input, address);
 							await input.beforeSend?.(address);
+							ctx.checkModel?.();
 							transmitted = true;
 						} finally {
 							reviewMs += performance.now() - waitingAt;
@@ -111,7 +113,7 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 							firstDelta = performance.now();
 							firstDeltaMs = firstDelta - started - reviewMs;
 						}
-						if (event.type === 'text_delta' && event.delta) showText(event.contentIndex, event.delta);
+						if (!input.responseSchema && event.type === 'text_delta' && event.delta) showText(event.contentIndex, event.delta);
 						if (event.type === 'text_end' && event.contentIndex === firstTextIndex && textLead !== undefined) {
 							showText(event.contentIndex, '', true);
 						}

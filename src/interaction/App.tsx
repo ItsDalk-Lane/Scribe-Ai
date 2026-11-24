@@ -1,3 +1,4 @@
+import { guardModelConnection } from '../orchestration/settings/modelConnection';
 import { realpath } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import type { FileSystemAdapter } from 'obsidian';
@@ -31,6 +32,8 @@ import type { DisplayedRun } from './context';
 import { thinkingLabel, uiText } from './uiText';
 import { useChatModel } from './useChatModel';
 import { useMessageQueue } from './useMessageQueue';
+import { imageLinkSource } from './composerImages';
+import { isImageFile } from '../tools/support/imageData';
 import { chooseSlashAgent, chooseSlashMcp, exportSlash, getSlashTargets, openSlashSettings, reviewChanges,
 	showSlashDiff, showSlashSummary, showSlashWarnings, slashNoteChanges } from './slashActions';
 import { parseSlashCommand, readSlashDraft, slashCommandAcceptsArgs, slashGoalActions } from './slashCommands';
@@ -66,12 +69,14 @@ interface ComposerDraft extends SkillDraft {
 	refs: NoteRef[];
 	quotes: string[];
 	skillScope?: string[];
+	imageSourcePath?: string;
 }
 
 function draftRequest(draft: ComposerDraft, conversationId: string, intent?: TaskRequest['intent']): TaskRequest {
 	return {
 		conversationId,
 		instruction: draft.instruction,
+		...(draft.imageSourcePath && { imageSourcePath: draft.imageSourcePath }),
 		...(intent && { intent }),
 		...(!intent && draft.target && { target: draft.target }),
 		refs: draft.refs,
@@ -82,7 +87,7 @@ function draftRequest(draft: ComposerDraft, conversationId: string, intent?: Tas
 }
 
 function vaultRefs(refs: NoteRef[]): NoteRef[] {
-	return refs.filter(({ path }) => !isAbsolute(path));
+	return refs.filter(({ path, kind }) => !isAbsolute(path) && (kind === 'folder' || !isImageFile(path)));
 }
 
 interface ChatPaneProps {
@@ -186,10 +191,13 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 	const goal = useChatGoal({
 		app: services.app, store: services.orchestration.conversations, localState: services.localState, conversationId, isOpen: open,
 		canContinue: open && !busy && !loading && !managingHistory && !editing && !instruction.trim() && !target
+			&& !refs.some(({ path, kind }) => kind !== 'folder' && isImageFile(path))
 			&& !queue.rows.length && !hasActiveAgents && !chatModel.saving && !chatModel.selecting && Boolean(chatModel.choice) && !composerMode,
 		start: (value) => perform(undefined, undefined, undefined, {
 			goal: true, request: { conversationId, instruction: value.objective, refs: value.refs ?? [], chatQuotes: value.chatQuotes,
-				skillMentions: value.skillMentions, skillScope: value.skillScope, goalRound: true, goalContext: goalRoundInstruction(value) },
+				imageSourcePath: value.imageSourcePath,
+				skillMentions: value.skillMentions, skillScope: value.skillScope, skillNotePaths: value.skillNotePaths,
+				goalRound: true, goalContext: goalRoundInstruction(value) },
 		}),
 		stopRunning: () => { if (active.current?.goal) stop(); },
 		onDefinitionChange: () => { void refreshConversations(); },
@@ -216,6 +224,23 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		});
 		return () => { cancelled = true; };
 	}, [conversationId, subagents, text.chatHistoryError]);
+
+	useEffect(() => {
+		const reports = agentSnapshot.reports;
+		if (!reports || !history.some((run) => reports[run.state.taskId] && !run.subagentReport)) return;
+		let closed = false;
+		void services.orchestration.conversations.load(conversationId).then(({ runs }) => {
+			if (closed) return;
+			const reported = new Map(runs.filter((run) => run.subagentReport).map((run) => [run.state.taskId, run]));
+			if (!history.some((run) => !run.subagentReport && reported.has(run.state.taskId))) return;
+			setHistory((current) => current.map((run) => {
+				const saved = reported.get(run.state.taskId);
+				return saved && !run.subagentReport ? { ...run, subagentReport: saved.subagentReport,
+					state: { ...run.state, auxiliaryUsage: saved.state.auxiliaryUsage } } : run;
+			}));
+		}).catch(() => { if (!closed) setError(text.chatHistoryError); });
+		return () => { closed = true; };
+	}, [agentSnapshot.reports, conversationId, history, services, text.chatHistoryError]);
 
 	useEffect(() => {
 		mounted.current = true;
@@ -353,7 +378,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 			setSkillMentions(request.skillMentions ?? []);
 			setSkillScope(request.skillScope);
 			setTarget(request.target);
-			setRefs(request.refs);
+			setRefs(request.refs.filter(({ path }) => !isAbsolute(path)));
 			setQuotes(request.chatQuotes ?? []);
 			setExecution(emptyExecution);
 			setLiveRequest(undefined);
@@ -385,7 +410,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 
 	function clearDraft(draft: ComposerDraft, keepVaultRefs = false) {
 		setTarget((current) => current === draft.target ? undefined : current);
-		setInstruction((previous) => previous === draft.instruction ? '' : previous);
+		setInstruction((previous) => previous === draft.instruction || (previous === instruction && !previous.trim()) ? '' : previous);
 		setSkillMentions((previous) => previous === skillMentions || previous === draft.skillMentions ? [] : previous);
 		setSkillScope(undefined);
 		setRefs((previous) => previous === draft.refs ? keepVaultRefs ? vaultRefs(previous) : [] : previous);
@@ -413,9 +438,11 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 			const start = prompt === request.instruction ? 0 : Math.max(0, request.instruction.trimEnd().length - prompt.length);
 			await openSideChat(plugin, conversationId, parentRuns, {
 				prompt,
+				imageSourcePath: request.imageSourcePath,
 				skillScope: request.skillScope,
+				skillNotePaths: request.skillNotePaths,
 				skillMentions: sliceSkillMentions(request, start, start + prompt.length),
-				refs: request.refs.map((ref) => isAbsolute(ref.path) ? { ...ref, addedExternal: true } : ref),
+				refs: request.refs,
 				quotes: request.chatQuotes ?? [],
 			}, chatModel.choice);
 		} catch (cause) {
@@ -535,6 +562,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 			const request = resume?.request ?? queued?.request ?? command?.request ??
 				(draft && draftRequest(draft, conversationId, planned ? 'plan' : editIntent));
 			if (!request) return;
+			if (draft) request.skillNotePaths ??= services.orchestration.skills.notePaths(draft.refs);
 			const options = { model: choice, rememberConversation: false, executionMode: submission.executionMode };
 			const run = resume ? sessions.resume(conversationId, resume.state.taskId, observer, options)
 				: queued ? sessions.submitQueued(queued, observer, () => { if (active.current === submission) queue.remove(queued.id); }, options)
@@ -642,6 +670,8 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		const start = draft.instruction.length - draft.instruction.trimStart().length;
 		const created = await goal.create(objective, {
 			refs: draft.refs, chatQuotes: draft.quotes, skillScope: draft.skillScope,
+			imageSourcePath: draft.imageSourcePath,
+			skillNotePaths: services.orchestration.skills.notePaths(draft.refs),
 			skillMentions: sliceSkillMentions(draft, start, start + objective.length),
 		});
 		if (created && mounted.current) setComposerMode(undefined);
@@ -650,7 +680,9 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 
 	async function submitDraft(value: string, mentions: SkillMention[], scope: string[]) {
 		if (navigating.current) return;
-		const draft = { instruction: value, refs, quotes, skillMentions: mentions, skillScope: scope, target };
+		const imageSourcePath = imageLinkSource(services.app, value,
+			editing ? history.find(({ state }) => state.taskId === editing.taskId)?.request.imageSourcePath : undefined);
+		const draft = { instruction: value, refs, quotes, skillMentions: mentions, skillScope: scope, target, imageSourcePath };
 		if (value.trim()) {
 			if (composerMode === 'goal') {
 				if (await createGoal(draft) && mounted.current) clearDraft(draft, true);
@@ -713,6 +745,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		const fromInput = inputText === instruction;
 		return {
 			instruction: args, refs, quotes, skillScope,
+			imageSourcePath: imageLinkSource(services.app, args),
 			skillMentions: fromInput ? sliceSkillMentions({ instruction, skillMentions }, argsStart, argsStart + args.length) : [],
 		};
 	}
@@ -899,8 +932,13 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				if (!choice) throw new Error(text.chatModelMissing);
 				const summary = await runAuxiliary(async (signal) => {
 					const store = services.orchestration.conversations;
+					const checkModel = guardModelConnection(services.settings, choice, services.communication.models.modelConnection);
 					const snapshot = await store.load(conversationId);
-					const output = await manualConversationSummary(snapshot, services.communication.models, choice, name, signal);
+					const output = await manualConversationSummary(snapshot, services.communication.models, choice, name, signal, async (taskId, usage) => {
+						await store.append(conversationId, [{ type: 'auxiliary-usage', taskId, usage }]);
+						if (mounted.current) setHistory((runs) => runs.map((run) => run.state.taskId === taskId
+							? { ...run, state: { ...run.state, auxiliaryUsage: [...(run.state.auxiliaryUsage ?? []), usage] } } : run));
+					}, checkModel);
 					signal.throwIfAborted();
 					const boundary = snapshot.runs.filter(({ request }) => !request.selection).at(-1);
 					if (name === 'compact' && boundary) await store.saveManualCompaction(conversationId, {

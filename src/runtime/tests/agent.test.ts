@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { structuredOutputTool, structuredOutputToolName } from '../../tools/structuredOutputTool';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -83,7 +84,7 @@ function fakeStream(response: ModelResponse, signal?: AbortSignal): ModelStream 
 	};
 }
 
-function sessionsFor(app: App, service: Pick<ModelService, 'stream' | 'contextLimits'>, modules: ToolModule[] | ToolLayer, settings = normalizeSettings(null), skills?: SkillRegistry) {
+function sessionsFor(app: App, service: Pick<ModelService, 'stream' | 'contextLimits' | 'modelCapabilities'>, modules: ToolModule[] | ToolLayer, settings = normalizeSettings(null), skills?: SkillRegistry) {
 	settings.providerId = 'test-model-service';
 	settings.model = 'test-model';
 	const registry = Array.isArray(modules) ? createToolRegistry(modules) : modules.registry;
@@ -92,9 +93,69 @@ function sessionsFor(app: App, service: Pick<ModelService, 'stream' | 'contextLi
 	const runtime: RuntimeLayer = { newState: createRunState, createAgent: bindAgent(createAgentLoop(models, tools)), models, tools };
 	const adapter = app.vault.adapter as import('obsidian').FileSystemAdapter;
 	const store = createConversationStore(join(adapter.getBasePath(), 'transcripts'));
-	return createSessionController(app, settings, runtime, store, undefined, undefined,
+	const modelsForSession = service.modelCapabilities && {
+		modelCapabilities: service.modelCapabilities,
+		send: async (request: ModelRequest) => service.stream(request).result(),
+	};
+	return createSessionController(app, settings, runtime, store, undefined, modelsForSession,
 		Array.isArray(modules) ? undefined : modules.shellJobs, skills);
 }
+
+void test('the agent feeds a Read image result into the next model request as a tool image', async (t) => {
+	const { app, cwd } = await fixture(t);
+	const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
+	await writeFile(join(cwd, 'sample.png'), Buffer.from(data, 'base64'));
+	const call: ToolCall = { id: 'view', name: 'Read', input: { file_path: 'sample.png' } };
+	const requests: ModelRequest[] = [];
+	const sessions = sessionsFor(app, { stream(request) {
+		requests.push(request);
+		return fakeStream(requests.length === 1 ? emptyModelResponse('', [call]) : emptyModelResponse('Read the picture.'));
+	} }, [readTools]);
+	const result = await sessions.submit({ conversationId: 'tool-image', instruction: '读取 sample.png。', refs: [] }).result;
+	assert.equal(result.status, 'done');
+	const followup = requests[1]!;
+	const toolIndex = followup.messages.findIndex(({ role, toolCallId }) => role === 'tool' && toolCallId === call.id);
+	assert.equal(followup.images?.required, false);
+	assert.deepEqual((await followup.images?.load(new AbortController().signal))?.get(toolIndex), [
+		{ type: 'image', data, mimeType: 'image/png' },
+	]);
+});
+
+void test('a configured agent can request a fixed JSON schema for exactly its next model response', async (t) => {
+	const { app } = await fixture(t);
+	const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false };
+	const call: ToolCall = { id: 'schema', name: structuredOutputToolName, input: { schema } };
+	const sent: ModelRequest[] = [];
+	let enabled = true;
+	const sessions = sessionsFor(app, {
+		modelCapabilities: () => ({ structuredOutput: enabled }),
+		stream(request) {
+			sent.push(request);
+			return fakeStream(sent.length === 1 || sent.length === 4
+				? emptyModelResponse('', [call]) : emptyModelResponse('{"ok":true}'));
+		},
+	}, [structuredOutputTool]);
+	const request = { conversationId: 'schema-capability', instruction: '整理成固定的 JSON 格式。', refs: [] };
+	const first = await sessions.submit(request).result;
+	assert.equal(first.status, 'done');
+	assert.equal(sent.length, 2);
+	assert.equal(sent[0]?.responseSchema, undefined);
+	assert.equal('allowNativeWebSearch' in sent[0]!, false);
+	assert.deepEqual(sent[0]?.tools.map(({ name }) => name), [structuredOutputToolName]);
+	assert.deepEqual(sent[1]?.responseSchema, schema);
+	assert.deepEqual(sent[1]?.tools, []);
+	assert.equal(sent[1]?.messages.find(({ role }) => role === 'tool')?.isError, false);
+
+	const ordinary = await sessions.submit({ ...request, instruction: '接着解释。' }).result;
+	assert.equal(ordinary.status, 'done');
+	assert.equal(sent[2]?.responseSchema, undefined);
+	enabled = false;
+	const withoutCapability = await sessions.submit({ ...request, instruction: '再核对一下。' }).result;
+	assert.equal(withoutCapability.status, 'done');
+	assert.deepEqual(sent[3]?.tools, []);
+	assert.equal(sent[4]?.responseSchema, undefined);
+	assert.equal(sent[4]?.messages.filter(({ toolCallId }) => toolCallId === call.id).at(-1)?.isError, true);
+});
 
 void test('steering reaches the next natural model request, keeps its paired tool result and commits after success', async (t) => {
 	const { root, cwd, app } = await fixture(t);

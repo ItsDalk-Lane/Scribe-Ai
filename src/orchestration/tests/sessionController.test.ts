@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { statSync } from 'node:fs';
-import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -22,10 +23,12 @@ import { createToolExecutor } from '../../tools/executor';
 import { shellTools } from '../../tools/external/shellTool';
 import { readTools } from '../../tools/readTools';
 import { searchTools } from '../../tools/searchTools';
+import { readOnlySkillTools, skillTools } from '../../tools/skillTools';
 import { writeTools } from '../../tools/writeTools';
 import { MissingConversationError } from '../../types';
 import type { AutoReviewDenial, Message, ModelRequest, ModelService, ModelStream, ReportedUsage, RunState, RuntimeLayer, ScribeSettings, Task, TaskRequest, ToolCall } from '../../types';
 import { createContextBuilder } from '../context/contextBuilder';
+import { createSkillRegistry } from '../context/skills';
 import { createSessionController } from '../sessionController';
 import { normalizeSettings } from '../settings/defaults';
 import { chatModelKey } from '../settings/thinking';
@@ -100,17 +103,192 @@ async function fixture(t: TestContext) {
 		ruleReads,
 		setActiveNote: (path: string) => { activeNote = path; },
 		connect: (stream: (request: ModelRequest) => ModelStream, model: Partial<ScribeSettings> = firstModel,
-			thinkingOptions?: ModelService['thinkingOptions'], modelService?: Pick<ModelService, 'send' | 'contextLimits'>) => {
-			const registry = createToolRegistry([readTools, searchTools, writeTools, shellTools]);
+			thinkingOptions?: ModelService['thinkingOptions'], modelService?: Pick<ModelService, 'send' | 'contextLimits' | 'modelCapabilities' | 'modelOrigin'> & Partial<Pick<ModelService, 'modelConnection'>>, withSkills = false) => {
+			const settings = normalizeSettings(model);
+			const skills = withSkills ? createSkillRegistry(app, settings, async () => {}, {
+				draft: async () => false, install: async () => false,
+			}) : undefined;
+			const registry = createToolRegistry([readTools, searchTools, writeTools, shellTools, ...(skills ? [skillTools] : [])]);
 			const models = createModelCoordinator({ stream, contextLimits: modelService?.contextLimits }, createContextBuilder(registry));
 			const tools = createToolCoordinator(app, createToolExecutor(registry));
 			const runtime: RuntimeLayer = {
 				newState: createRunState, createAgent: bindAgent(createAgentLoop(models, tools)), models, tools,
 			};
-			return createSessionController(app, normalizeSettings(model), runtime, createConversationStore(directory), thinkingOptions, modelService);
+			return createSessionController(app, settings, runtime, createConversationStore(directory), thinkingOptions, modelService, undefined, skills);
 		},
 	};
 }
+
+void test('video service converts an attachment, requires a media receipt, and restores the saved result', async (t) => {
+	if (['ffmpeg', 'ffprobe'].some((tool) => spawnSync(tool, ['-version']).status !== 0)) {
+		t.skip('FFmpeg and ffprobe are required for this integration test');
+		return;
+	}
+	const { cwd, directory, connect } = await fixture(t);
+	const path = 'example.avi';
+	execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=red:size=64x64:rate=10', '-t', '1',
+		'-c:v', 'mpeg4', join(cwd, path)]);
+	const videoModel = secondModel;
+	const settings = {
+		...firstModel, videoModel,
+		providerModels: { [firstModel.providerId]: [firstModel.model], [videoModel.providerId]: [videoModel.model] },
+	};
+	let confirmed = true;
+	let videoCalls = 0;
+	const service: Pick<ModelService, 'send' | 'modelOrigin' | 'modelCapabilities'> = {
+		modelCapabilities: () => ({ structuredOutput: false, videoAnalysis: 'file' }),
+		modelOrigin: () => 'https://video.example',
+		async send(request) {
+			videoCalls++;
+			assert.equal(request.model, videoModel.model);
+			assert.equal(request.messages.length, 1);
+			assert.equal(request.tools.length, 0);
+			const [file] = await request.video!.load(request.signal!);
+			assert.equal(file?.mimeType, 'video/mp4');
+			assert.equal(Buffer.from(file?.data ?? '', 'base64').toString('ascii', 4, 8), 'ftyp');
+			await request.beforeSend?.('https://video.example/models/video:streamGenerateContent');
+			return reply('[00:00] A red screen.', [], { reportedUsage: { prompt: 11, ...(confirmed && { videoInput: 10 }) } }).result();
+		},
+	};
+	const mainRequests: ModelRequest[] = [];
+	const answer = (request: ModelRequest) => {
+		mainRequests.push(request);
+		assert.equal(request.model, firstModel.model);
+		assert.equal(request.video, undefined);
+		assert.match(request.messages[0]?.content ?? '', /\[00:00\] A red screen/u);
+		return reply('主模型完成。');
+	};
+	const submits = connect(answer, settings, undefined, service);
+	const id = await submits.createConversation();
+	const task = { conversationId: id, instruction: '说明这个视频。', refs: [{ path, kind: 'file' as const }] };
+	const active = submits.submit(task, { onEvent(event) {
+		if (event.type === 'text-delta') submits.pause(active.taskId);
+	} });
+	const interrupted = await active.result;
+	assert.equal(interrupted.status, 'interrupted', interrupted.error);
+	const saved = (await createConversationStore(directory).load(id)).runs[0];
+	assert.match(saved?.videoAnalysis ?? '', /\[00:00\] A red screen/u);
+	assert.deepEqual(saved?.videoAnalysisSources, ['file']);
+	assert.deepEqual(saved?.state.auxiliaryUsage?.map(({ kind }) => kind), ['video']);
+	assert.deepEqual(await readdir(join(cwd, '.scribe-ai', 'cache', id, 'root')), []);
+	assert.equal(runUsage(interrupted)?.byKind.video?.count, 1);
+	submits.dispose();
+
+	const reopened = connect(answer, settings, undefined, service);
+	t.after(() => reopened.dispose());
+	assert.equal((await reopened.resume(id, active.taskId).result).status, 'done');
+	assert.equal(videoCalls, 1);
+
+	confirmed = false;
+	const notDelivered = await reopened.submit({ ...task, conversationId: await reopened.createConversation() }).result;
+	assert.equal(notDelivered.status, 'failed');
+	assert.match(notDelivered.error ?? '', /服务商未确认处理视频输入/u);
+	assert.equal(videoCalls, 2);
+	assert.equal(mainRequests.length, 2);
+	await writeFile(join(cwd, path), 'not a valid video');
+	const corrupt = await reopened.submit({ ...task, conversationId: await reopened.createConversation() }).result;
+	assert.equal(corrupt.status, 'failed');
+	assert.match(corrupt.error ?? '', /无法读取视频格式/u);
+	assert.equal(videoCalls, 2);
+	assert.equal(mainRequests.length, 2);
+});
+
+void test('a link-only video model handles HTTPS embeds while local attachments follow their own setting', async (t) => {
+	const { cwd, directory, connect } = await fixture(t);
+	const remoteModel = { providerId: 'zhipu-fixture', model: 'glm-5.3-flash' };
+	const link = 'https://media.example.invalid/clip.mov';
+	const path = 'local.mp4';
+	await writeFile(join(cwd, path), 'native local fixture');
+	let requests = 0;
+	const sessions = connect((request) => {
+		assert.equal(request.model, firstModel.model);
+		assert.equal(request.video?.hasFiles, true);
+		assert.match(request.messages[0]?.content ?? '', /\[00:01\] Link scene/u);
+		return reply('处理完成。');
+	}, {
+		...firstModel, videoLinkModel: remoteModel,
+		providerModels: { [firstModel.providerId]: [firstModel.model], [remoteModel.providerId]: [remoteModel.model] },
+	}, undefined, {
+		modelCapabilities: () => ({ structuredOutput: false, videoAnalysis: 'link' }),
+		modelOrigin: () => 'https://video.example',
+		async send(request) {
+			requests++;
+			assert.equal(request.model, remoteModel.model);
+			assert.equal(request.video?.hasFiles, false);
+			assert.deepEqual(await request.video?.load(request.signal!), [{ mimeType: 'video/quicktime', url: link }]);
+			await request.beforeSend?.('https://video.example/chat/completions');
+			return reply('[00:01] Link scene.', [], { reportedUsage: { videoInput: 31 } }).result();
+		},
+	});
+	t.after(() => sessions.dispose());
+	const id = await sessions.createConversation();
+	const task = { conversationId: id, instruction: '解析 ![片段](' + link + ')', refs: [{ path, kind: 'file' as const }] };
+	const state = await sessions.submit(task).result;
+	assert.equal(state.status, 'done', state.error);
+	assert.equal(requests, 1);
+	assert.deepEqual((await createConversationStore(directory).load(id)).runs[0]?.videoAnalysisSources, ['link']);
+	const invalid = await sessions.submit({ ...task, instruction: task.instruction.replace('.mov', '.webm') }).result;
+	assert.equal(invalid.status, 'failed');
+	assert.match(invalid.error ?? '', /需要 MP4、MOV 或 MKV 的 HTTPS 直链/u);
+	assert.equal(requests, 1);
+});
+
+void test('a catalog tool denial hides tools and prevents an unsolicited model call from reading a file', async (t) => {
+	const { cwd, connect } = await fixture(t);
+	await writeFile(join(cwd, 'fact.md'), 'content-not-sent');
+	const requests: ModelRequest[] = [];
+	const sessions = connect((request) => {
+		requests.push(request);
+		return requests.length === 1 ? reply('', [{ id: 'read-one', name: 'Read', input: { file_path: 'fact.md' } }]) : reply('完成');
+	}, firstModel, undefined, {
+		send: async () => { throw new Error('Unexpected auxiliary request'); },
+		modelCapabilities: () => ({ tools: false, structuredOutput: false }),
+	});
+	t.after(() => sessions.dispose());
+	const state = await sessions.submit({ conversationId: await sessions.createConversation(), instruction: '读一下笔记', refs: [] }).result;
+	assert.ok(requests.length);
+	assert.ok(requests.every(({ tools }) => tools.length === 0));
+	assert.ok(!JSON.stringify(state.messages).includes('content-not-sent'));
+});
+
+void test('a catalog route change cannot send the next turn of a running task to the new address', async (t) => {
+	const { cwd, connect } = await fixture(t);
+	await writeFile(join(cwd, 'fact.md'), '保留在原任务中的工具结果');
+	let attempts = 0;
+	let address = 'https://one.example/api';
+	const sessions = connect(() => {
+		attempts += 1;
+		address = 'https://two.example/api';
+		return reply('', [{ id: 'read-one', name: 'Read', input: { file_path: 'fact.md' } }]);
+	}, firstModel, undefined, {
+		send: async () => { throw new Error('Unexpected auxiliary request'); },
+		modelConnection: () => ({ api: 'openai-completions', baseUrl: address, source: 'catalog' }),
+	});
+	t.after(() => sessions.dispose());
+	const state = await sessions.submit({ conversationId: await sessions.createConversation(), instruction: '读一下笔记', refs: [] }).result;
+	assert.equal(state.status, 'failed');
+	assert.match(state.error ?? '', /模型连接设置已变更/u);
+	assert.equal(attempts, 1);
+});
+
+void test('new submissions reject a disabled provider and use the remaining chat default', async (t) => {
+	const { connect } = await fixture(t);
+	const requests: string[] = [];
+	const sessions = connect(({ providerId }) => {
+		requests.push(providerId);
+		return reply('收到');
+	}, {
+		...firstModel,
+		providerModels: { [firstModel.providerId]: [firstModel.model], [secondModel.providerId]: [secondModel.model] },
+		disabledProviderIds: [firstModel.providerId],
+	});
+	t.after(() => sessions.dispose());
+	const request = { conversationId: await sessions.createConversation(), instruction: '你好', refs: [] };
+	assert.throws(() => sessions.submit(request, {}, undefined, { model: firstModel }), /所选模型已不可用/u);
+	assert.deepEqual(requests, []);
+	assert.equal((await sessions.submit(request).result).status, 'done');
+	assert.deepEqual(requests, [secondModel.providerId]);
+});
 
 void test('chat execution modes run vault edits directly and route outside actions to the selected approver', async (t) => {
 	const { cwd, connect, directory } = await fixture(t);
@@ -237,7 +415,7 @@ void test('a confirmed plan keeps its attachments and a saved goal resumes with 
 	const store = createConversationStore(directory);
 	const sourceRequest = { conversationId, instruction: '整理会议纪要', refs: [
 		{ path: source, kind: 'file' as const }, { path: join(cwd, '..', 'other.md'), kind: 'file' as const, addedExternal: true as const },
-	], chatQuotes: ['原始引文'] };
+	], chatQuotes: ['原始引文'], skillNotePaths: [source] };
 	await sessions.submit({ ...sourceRequest, intent: 'plan' }, {}, undefined, { executionMode: 'full-access' }).result;
 	await assert.rejects(access(join(cwd, index)), { code: 'ENOENT' });
 	const savedPlan = (await store.load(conversationId)).runs.at(-1)!;
@@ -248,6 +426,7 @@ void test('a confirmed plan keeps its attachments and a saved goal resumes with 
 	const approved = approvedPlanRequest(plan);
 	assert.equal(approved.intent, undefined);
 	assert.deepEqual(approved.refs, [{ path: source, kind: 'file' }]);
+	assert.deepEqual(approved.skillNotePaths, [source]);
 	await sessions.submit(approved, {}, undefined, { executionMode: 'ask' }).result;
 	assert.match(await readFile(join(cwd, index), 'utf8'), /\[\[会议\.md\]\]/u);
 
@@ -485,6 +664,11 @@ void test('a long chat keeps its confirmed decision and counts the summary and a
 	assert.ok(savedRecall);
 	assert.deepEqual(runUsage(savedRecall), usage);
 	const repeated = await ask(reopened, recallPrompt);
+	assert.equal(recalled.messages.find(({ toolCallId }) => toolCallId === 'reviewed-read')?.approvalReview, 'approved');
+	assert.equal(repeated.messages.find(({ toolCallId }) => toolCallId === 'reviewed-read')?.approvalReview, 'denied');
+	const goal = finishGoalRound({ objective: recallPrompt, status: 'active', maxRounds: 3, usedRounds: 1, totalRounds: 1 }, repeated);
+	assert.equal(goal.status, 'paused');
+	assert.equal(goal.reason, 'blocked');
 	assert.equal(repeated.messages.at(-1)?.content, recalled.messages.at(-1)?.content);
 	assert.deepEqual(repeated.auxiliaryUsage?.map(({ kind }) => kind), ['review']);
 	const repeatedUsage = runUsage(repeated);
@@ -1470,4 +1654,111 @@ void test('a resumed run refuses to send to an address other than the one approv
 	assert.equal(result.status, 'failed');
 	assert.match(result.error ?? '', /发送地址已改变/);
 	assert.deepEqual(sent, addresses.slice(0, 1));
+});
+
+void test('队列和重新编辑沿用有选择记录的库外资料', async (t) => {
+	const { cwd, directory, connect } = await fixture(t);
+	const store = createConversationStore(directory);
+	const outside = join(cwd, '..', '资料.md');
+	await writeFile(outside, '测试资料');
+	const sessions = connect((request) => request.messages.at(-1)?.role === 'tool' ? reply('已核对。')
+		: reply('', [{ id: 'read', name: 'Read', input: { file_path: outside } }]));
+	t.after(() => sessions.dispose());
+	for (const explicit of [true, false]) {
+		const id = await sessions.createConversation();
+		const request: TaskRequest = { conversationId: id, instruction: '读取资料。', refs: [{ path: outside, ...(explicit && { addedExternal: true }) }] };
+		const message = { id: 'queued', request };
+		await store.enqueue(id, message);
+		const queued = await sessions.submitQueued(message, {}, () => {}).result;
+		const edited = await sessions.submit(request, {}, queued.taskId).result;
+		for (const state of [queued, edited]) {
+			assert.equal(state.status, 'done', state.error);
+			assert.equal(state.messages.find(({ toolCallId }) => toolCallId === 'read')?.isError, !explicit);
+		}
+	}
+});
+
+void test('续做保留只读技能工具且侧聊继承压缩后的对话和原笔记范围', async (t) => {
+	const { directory, connect, setActiveNote } = await fixture(t);
+	const store = createConversationStore(directory);
+	const requests: ModelRequest[] = [];
+	const sessions = connect((request) => { requests.push(request); return reply('已核对。'); }, firstModel, undefined, undefined, true);
+	t.after(() => sessions.dispose());
+	const id = await sessions.createConversation();
+	const request = { conversationId: id, instruction: '旧正文', refs: [], skillScope: ['会议'], skillNotePaths: ['会议/原稿.md'] };
+	const task: Task = { id: 'paused', request, createdAt: 1, updatedAt: 1, status: 'running' };
+	await store.append(id, [{ type: 'start', task, model: firstModel },
+		{ type: 'messages', taskId: task.id, messages: [{ role: 'user', content: request.instruction }] }]);
+	assert.equal((await sessions.resume(id, task.id).result).status, 'done');
+	const tools = requests[0]!.tools.map(({ name }) => name);
+	assert.ok(readOnlySkillTools.every((name) => tools.includes(name)));
+	assert.ok(!tools.includes('install_skill'));
+	const snapshot = await store.load(id);
+	setActiveNote('另一处/新稿.md');
+	const side = sessions.createSideChat(snapshot.runs, { throughTaskId: task.id, text: '原决定仅留摘要' });
+	assert.deepEqual(side.skillScope, ['会议']);
+	const follow = side.submit({ instruction: '继续核对' });
+	assert.deepEqual(follow.request.skillNotePaths, ['会议/原稿.md']);
+	assert.equal((await follow.result).status, 'done');
+	const sent = requests.at(-1)!.messages.map(({ content }) => content).join('\n');
+	assert.match(sent, /原决定仅留摘要/u);
+	assert.doesNotMatch(sent, /旧正文|新稿/u);
+	const handoff = side.submit({ instruction: '队列转来的问题', skillScope: ['课题'], skillNotePaths: ['课题/排队时打开.md'] });
+	assert.deepEqual(handoff.request.skillNotePaths, ['课题/排队时打开.md']);
+	await handoff.result;
+});
+
+void test('重开后内置探索及其原有下级保持只读，未知工具进度不能续做', async (t) => {
+	const { directory, connect } = await fixture(t);
+	const requests = new Map<string, ModelRequest>();
+	const settings = { ...firstModel, providerModels: { [firstModel.providerId]: [firstModel.model] } };
+	const sessions = connect((request) => { requests.set(request.sessionId!, request); return reply('完成。'); }, settings);
+	t.after(() => sessions.dispose());
+	const id = await sessions.createConversation();
+	const store = createConversationStore(directory);
+	const task: Task = { id: 'old-root', request: { conversationId: id, instruction: '核对', refs: [] }, status: 'running', createdAt: 1, updatedAt: 1 };
+	const call = { id: 'started', name: 'Edit', input: {} };
+	await store.append(id, [
+		{ type: 'start', task, model: firstModel },
+		{ type: 'subagent', agentId: 'scout', record: { kind: 'create', agent: { id: 'scout', name: '探索', role: 'explorer', rootTaskId: task.id, model: firstModel } } },
+		{ type: 'subagent', agentId: 'nested', record: { kind: 'create', agent: { id: 'nested', name: '下级', role: 'worker', parentId: 'scout', rootTaskId: task.id, model: firstModel } } },
+		{ type: 'subagent', agentId: 'custom', record: { kind: 'create', instructions: '用户自定义的写作角色。', agent: { id: 'custom', name: '同名自设角色', role: 'explorer', rootTaskId: task.id, model: firstModel } } },
+		{ type: 'subagent', agentId: 'scout', record: { kind: 'run', entry: { type: 'start', task: { ...task, id: 'pending' }, model: firstModel } } },
+		{ type: 'subagent', agentId: 'scout', record: { kind: 'run', entry: { type: 'messages', taskId: 'pending', messages: [
+			{ role: 'user', content: '核对' }, { role: 'assistant', content: '', toolCalls: [call] },
+		], step: { turn: 1, phase: 'tool', call } } } },
+	]);
+	const controls = sessions.subagents!;
+	await controls.load(id);
+	await assert.rejects(controls.resume(id, 'scout', 'full-access'), /核对已保存的子任务进度/u);
+	assert.equal(requests.size, 0);
+	for (const agent of ['scout', 'nested', 'custom']) {
+		await controls.addInstruction(id, agent, '独立核对。', 'full-access');
+		await new Promise<void>((resolve) => {
+			const check = () => {
+				if (controls.snapshot(id).agents.find(({ id }) => id === agent)?.status === 'done') { unsubscribe(); resolve(); }
+			};
+			const unsubscribe = controls.subscribe(id, check);
+			check();
+		});
+		const projected = requests.get(agent)?.tools ?? [];
+		assert.ok(projected.some(({ name }) => name === 'Read'));
+		assert.equal(projected.some(({ name }) => name === 'Write'), agent === 'custom');
+	}
+});
+
+void test('旧队列插话沿用原记录完成出队，并把补齐的技能范围用于本轮', async (t) => {
+	const { connect, directory, cwd } = await fixture(t);
+	await writeFile(join(cwd, '附件.md'), '样例');
+	const sessions = connect(() => reply('收到。'), firstModel, undefined, undefined, true);
+	t.after(() => sessions.dispose());
+	const id = await sessions.createConversation();
+	const store = createConversationStore(directory);
+	const message = { id: 'old-queue', request: { conversationId: id, instruction: '补充资料', refs: [{ path: '附件.md' }] } };
+	await store.enqueue(id, message);
+	const run = sessions.submit({ conversationId: id, instruction: '开始', refs: [] });
+	const [result] = await Promise.all([run.result, sessions.steer(run.taskId, message)]);
+	assert.equal(result.status, 'done', result.error);
+	assert.deepEqual(result.messages.find(({ id }) => id === 'steer:old-queue')?.skillNotePaths, ['附件.md']);
+	assert.deepEqual(await store.getQueued(id), []);
 });

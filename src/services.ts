@@ -8,6 +8,7 @@ import type { SkillReviewActions } from './orchestration/context/skills';
 import { createSkillRegistry } from './orchestration/context/skills';
 import { createSessionController } from './orchestration/sessionController';
 import type { LocalState } from './orchestration/storage/localState';
+import { createModelCatalogStore } from './orchestration/storage/modelCatalogStore';
 import { createAgentLoop } from './runtime/agentLoop';
 import { bindAgent } from './runtime/createAgent';
 import { createModelCoordinator } from './runtime/modelCoordinator';
@@ -17,6 +18,7 @@ import { createToolLayer } from './tools';
 import { createMcpManager } from './tools/external/mcp';
 import { normalizeMcpSettings } from './tools/external/mcpConfig';
 import type { McpSettings } from './tools/external/mcpConfig';
+import { createWebSearchService } from './tools/external/webTools';
 import type {
 	CommunicationLayer,
 	ConversationStore,
@@ -27,9 +29,10 @@ import type {
 } from './types';
 
 /** 根级依赖组装：只负责按层创建服务并把它们连起来，业务留在各层 */
-export function createServices(app: App, settings: ScribeSettings, manifest: PluginManifest,
-	conversations: ConversationStore, localState: LocalState, cacheDirectory: string,
-	saveSettings: () => Promise<void>, skillReview: SkillReviewActions, saveMcp: (settings: McpSettings) => Promise<void>): ScribeServices {
+export async function createServices(app: App, settings: ScribeSettings, manifest: PluginManifest,
+	conversations: ConversationStore, localState: LocalState, cacheDirectory: string, modelCatalogPath: string,
+	saveSettings: () => Promise<void>, skillReview: SkillReviewActions, saveMcp: (settings: McpSettings) => Promise<void>,
+	onConversationDeleted: (id: string) => Promise<void>): Promise<ScribeServices> {
 	const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
 	// 第四层：工具层（模型通信之外的执行能力）
 	const mcp = createMcpManager({
@@ -46,30 +49,37 @@ export function createServices(app: App, settings: ScribeSettings, manifest: Plu
 			activeWindow.open(url, '_blank', 'noopener');
 		},
 	});
-	const tools = createToolLayer(conversations.shellJobHistory, mcp, cacheDirectory);
+	const webSearch = createWebSearchService(settings, app.secretStorage, cwd, { name: manifest.id, version: manifest.version });
+	const tools = createToolLayer(conversations.shellJobHistory, mcp, cacheDirectory, webSearch.tools);
 
 	// 第五层：通信层（仅负责模型服务接入）
 	const credentials = createCredentialStore(app, settings.communication);
 	const transport = createTransport(settings.communication);
+	const modelService = createModelService(credentials, transport, {
+		baseUrls: () => settings.communication.baseUrls,
+		protocols: () => settings.communication.protocols,
+		modelOverrides: () => settings.modelOverrides,
+		catalogProtocol: (providerId, model) => modelCatalog.protocol(providerId, model),
+		catalogDetails: (providerId, model, baseUrl) => modelCatalog.details(providerId, model, baseUrl),
+		customProviders: () => Object.entries(settings.customProviders).map(([id, entry]) => ({
+			id,
+			label: entry.label,
+			baseUrl: entry.baseUrl,
+			protocol: entry.protocol,
+			models: settings.providerModels[id] ?? [],
+		})),
+	});
+	const modelCatalog = createModelCatalogStore(modelCatalogPath, settings, modelService, transport.fetch);
+	await modelCatalog.loadProtocols();
 	const communication: CommunicationLayer = {
-		models: createModelService(credentials, transport, {
-			baseUrls: () => settings.communication.baseUrls,
-			protocols: () => settings.communication.protocols,
-			modelOverrides: () => settings.modelOverrides,
-			customProviders: () => Object.entries(settings.customProviders).map(([id, entry]) => ({
-				id,
-				label: entry.label,
-				baseUrl: entry.baseUrl,
-				protocol: entry.protocol,
-				models: settings.providerModels[id] ?? [],
-			})),
-		}),
+		models: modelService,
+		modelCatalog,
 		transport,
 		credentials,
 	};
 
 	// 核心循环接通模型通信和工具执行。
-	const context = createContextBuilder(tools.registry);
+	const context = createContextBuilder(tools.registry, app);
 	const models = createModelCoordinator(communication.models, context);
 	const toolCoordinator = createToolCoordinator(app, tools.executor);
 	const runtime: RuntimeLayer = {
@@ -79,15 +89,15 @@ export function createServices(app: App, settings: ScribeSettings, manifest: Plu
 		tools: toolCoordinator,
 	};
 
-	const skills = createSkillRegistry(app, settings, saveSettings, skillReview);
+	const skills = createSkillRegistry(app, settings, saveSettings, skillReview, mcp.isConnected);
 	const orchestration: OrchestrationLayer = {
 		sessions: createSessionController(
-			app, settings, runtime, conversations, communication.models.thinkingOptions, communication.models, tools.shellJobs, skills,
+			app, settings, runtime, conversations, communication.models.thinkingOptions, communication.models, tools.shellJobs, skills, onConversationDeleted,
 		),
 		context,
 		skills,
 		conversations,
 	};
 
-	return { app, settings, localState, communication, tools, orchestration, runtime };
+	return { app, settings, localState, communication, tools, webSearch, orchestration, runtime };
 }

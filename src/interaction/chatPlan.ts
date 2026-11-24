@@ -37,10 +37,13 @@ export function approvedPlanRequest({ request, markdown }: ChatPlan): TaskReques
 	return {
 		conversationId: request.conversationId,
 		instruction: `${request.instruction}\n\n用户已确认以下计划，请在确认的范围内执行，遵守现有审批，并逐项核对验收条件。\n\n${markdown}`,
+		imageLinkEnd: request.instruction.length,
+		...(request.imageSourcePath && { imageSourcePath: request.imageSourcePath }),
 		refs: request.refs,
 		chatQuotes: request.chatQuotes,
 		skillMentions: request.skillMentions,
 		skillScope: request.skillScope,
+		skillNotePaths: request.skillNotePaths,
 	};
 }
 
