@@ -14,6 +14,7 @@ import { diagnostics } from '../diagnostics';
 import { modelRequestConfirmation } from '../modelRequestConfirmation';
 import { createNodeFetch, modelNodeFetch, nodeFetch } from '../nodeFetch';
 import { createModelService } from '../providers';
+import { readProviderCatalog } from '../modelCatalog';
 import { conversationMetrics } from '../../interaction/chatMetrics';
 import { providerCategory } from '../../interaction/providerCategories';
 import { groupProviders } from '../../interaction/providerGroups';
@@ -156,8 +157,10 @@ const server = http.createServer((request, response) => {
 			return;
 		}
 		if (url.startsWith('/v1beta/models/test-model:streamGenerateContent')) {
+			const videoReceipt = body.includes('Check receipt')
+				? { promptTokensDetails: [{ modality: 'TEXT', tokenCount: 1 }, { modality: 'VIDEO', tokenCount: 30 }] } : {};
 			response.writeHead(200, { 'content-type': 'text/event-stream' });
-			response.end(`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: 'Hello from Google' }], role: 'model' }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 2, totalTokenCount: 3 } })}\n\n`);
+			response.end(`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: 'Hello from Google' }], role: 'model' }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 2, totalTokenCount: 3, ...videoReceipt } })}\n\n`);
 			return;
 		}
 		response.writeHead(404).end();
@@ -541,16 +544,17 @@ void test('Provider catalog reports its built-in protocol', () => {
 	assert.ok((provider?.protocols.length ?? 0) > 1);
 });
 
-void test('Protocol override switches the adapter for every model of the provider', async () => {
-	// test-google 自带 google-generative-ai；切成 openai-completions 后请求打到 /chat/completions（服务器没有该路径）
+void test('A configured provider connection switches adapter without rewriting its model catalog', async () => {
 	const service = createModelService(credentials, transport, {
 		additionalProviders: [testProvider('google-generative-ai')],
 		protocols: () => ({ 'test-google': 'openai-completions' }),
+		baseUrls: () => ({ 'test-google': `${baseUrl}/mirror` }),
 	});
-	// 自带 google-generative-ai，切成 openai-completions 后请求路径变成 /chat/completions（服务器没有该路径）
-	await assert.rejects(async () => {
-		await service.send({ providerId: 'test-google', model: 'test-model', messages: [{ role: 'user', content: 'hi' }], tools: [] });
-	}, /404/);
+	const call = (model: string) => service.send({ providerId: 'test-google', model, messages: [{ role: 'user', content: 'hi' }], tools: [] });
+	const results = await Promise.all([call('test-model'), call('manually-added')]);
+	assert.deepEqual(results.map((result) => result.content), ['Mirrored', 'Mirrored']);
+	assert.equal(mirroredPath, '/mirror/chat/completions');
+	assert.equal(service.providers().find(({ id }) => id === 'test-google')?.models[0]?.api, 'google-generative-ai');
 });
 
 void test('Google SDK uses Node fetch without touching global fetch', async () => {
@@ -563,6 +567,15 @@ void test('Google SDK uses Node fetch without touching global fetch', async () =
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
+});
+
+void test('Google response records provider confirmation of video input', async () => {
+	const service = createModelService(credentials, transport, { additionalProviders: [testProvider('google-generative-ai')] });
+	const request = { providerId: 'test-google', model: 'test-model', tools: [] };
+	const normal = await service.send({ ...request, messages: [{ role: 'user', content: 'Hello' }] });
+	assert.equal(normal.reportedUsage?.videoInput, undefined);
+	const confirmed = await service.send({ ...request, messages: [{ role: 'user', content: 'Check receipt' }] });
+	assert.equal(confirmed.reportedUsage?.videoInput, 30);
 });
 
 void test('Model override base URL wins over the provider base URL', async () => {
@@ -578,14 +591,31 @@ void test('Model override base URL wins over the provider base URL', async () =>
 	assert.equal(mirroredPath, '/mirror/chat/completions');
 });
 
-void test('Model override protocol switches only through the model api', async () => {
+void test('Protocol changes cannot silently reuse an address from a different API', async () => {
 	const service = createModelService(credentials, transport, {
 		additionalProviders: [testProvider('google-generative-ai')],
 		modelOverrides: () => ({ 'test-google': { 'test-model': { protocol: 'openai-completions' } } }),
 	});
+	assert.deepEqual(service.modelConnection?.('test-google', 'test-model'), {
+		source: 'unresolved', api: 'openai-completions', baseUrl: '', issue: 'missing-address',
+	});
+	let attempted = false;
 	await assert.rejects(async () => {
-		await service.send({ providerId: 'test-google', model: 'test-model', messages: [{ role: 'user', content: 'hi' }], tools: [] });
-	}, /404/);
+		await service.send({ providerId: 'test-google', model: 'test-model', messages: [{ role: 'user', content: 'hi' }], tools: [],
+			beforeSend: async () => { attempted = true; } });
+	}, /填写对应的请求地址/u);
+	assert.equal(attempted, false);
+});
+
+void test('An unlisted model on a multi-protocol provider needs explicit evidence before sending', async () => {
+	const service = createModelService(credentials, transport);
+	const providerId = 'github-copilot';
+	const model = 'unlisted-model-fixture';
+	assert.equal(service.modelConnection?.(providerId, model).issue, 'missing-protocol');
+	assert.equal(service.modelOrigin?.({ providerId, model }), undefined);
+	await assert.rejects(async () => {
+		await service.send({ providerId, model, messages: [], tools: [] });
+	}, /无法确认此模型的 API 协议/u);
 });
 
 void test('Custom providers register themselves with fallback metadata', () => {
@@ -811,6 +841,7 @@ void test('Discovery keeps the bundled list offline and stops before Pi when can
 	assert.ok(catalog.details?.size);
 	assert.deepEqual(urls.filter((url) => !url.includes('models.dev')), [
 		'https://api.deepseek.com/models',
+		'https://api.deepseek.com/v1/models',
 		'https://pi.dev/api/models/providers/deepseek?pi-version=1.5.2',
 	]);
 	const pending = service.listProviderModels('openai', controller.signal);
@@ -828,13 +859,13 @@ void test('Adding models merges exact catalog matches and keeps unpublished ids 
 			const authorization = new Headers(init?.headers).get('authorization');
 			seen.push({ origin: url.origin, authorization });
 			if (url.origin === 'https://openrouter.ai') return Promise.resolve(Response.json({ data: [
-				{ id: 'google/gemini-3.8-flash', context_length: 250000, architecture: { input_modalities: ['text', 'image', 'audio'] },
+				{ id: 'google/gemini-3.8-flash', context_length: 250000, architecture: { input_modalities: ['text', 'image', 'audio', 'file'] },
 					supported_parameters: ['reasoning', 'structured_outputs'] },
 				{ id: 'new-only' },
 			] }));
 			if (url.origin === 'https://models.dev') return Promise.resolve(Response.json({
-				openrouter: { models: {
-					'google/gemini-3.8-flash': { tool_call: true, limit: { context: 500000, output: 30000 }, modalities: { output: ['text'] } },
+				openrouter: { api: 'https://openrouter.ai/api/v1', models: {
+					'google/gemini-3.8-flash': { tool_call: true, limit: { context: 500000, output: 30000 }, modalities: { input: ['text', 'pdf'], output: ['text'] } },
 					'public-only': { tool_call: true },
 				} },
 				google: { models: { 'new-only': { tool_call: true } } },
@@ -848,15 +879,30 @@ void test('Adding models merges exact catalog matches and keeps unpublished ids 
 	assert.ok(details);
 	assert.equal(details.contextWindow, 250000);
 	assert.equal(details.maxTokens, 30000);
-	assert.equal(details.tools, false);
+	assert.equal(details.tools, true);
 	assert.equal(details.reasoning, true);
 	assert.equal(details.structuredOutput, true);
-	assert.deepEqual(details.inputModalities, ['text', 'image', 'audio']);
+	assert.deepEqual(details.inputModalities, ['text', 'image', 'audio', 'file', 'pdf']);
 	assert.deepEqual(details.outputModalities, ['text']);
 	assert.ok(details.thinkingLevels?.includes('high'));
+	assert.equal(details.evidence?.contextWindow?.source, 'provider');
+	assert.equal(details.evidence?.maxTokens?.source, 'models.dev');
 	assert.deepEqual(catalog.details?.get('new-only'), {});
 	assert.deepEqual(seen.find(({ origin }) => origin === 'https://models.dev'), { origin: 'https://models.dev', authorization: null });
 	assert.deepEqual(seen.find(({ origin }) => origin === 'https://openrouter.ai'), { origin: 'https://openrouter.ai', authorization: 'Bearer test-key' });
+});
+
+void test('catalog rows ignore web search fields while retaining supported input and function tools', () => {
+	const catalog = readProviderCatalog({ data: [
+		{ id: 'native', capabilities: { server_tools: { web_search: { supported: true } } }, input_modalities: ['text', 'audio', 'video'] },
+		{ id: 'flag', capabilities: { native_web_search: true }, native_web_search: true },
+		{ id: 'gateway', supported_parameters: ['tools', 'web_search_options', 'structured_outputs'] },
+		{ id: 'web-fetch', capabilities: { server_tools: { web_fetch: { supported: true }, supported: true } } },
+	] });
+	assert.deepEqual(catalog.details?.get('native'), { inputModalities: ['text', 'audio', 'video'] });
+	assert.deepEqual(catalog.details?.get('flag'), {});
+	assert.deepEqual(catalog.details?.get('gateway'), { tools: true, structuredOutput: true });
+	assert.deepEqual(catalog.details?.get('web-fetch'), {});
 });
 
 void test('Model settings control the actual tools, reasoning and output limit sent', async () => {
@@ -1001,10 +1047,16 @@ void test('Providers from the same vendor collapse into one group without URL du
 	assert.ok(!ids.includes('qwen-token-plan-individual-cn'));
 });
 
-void test('Every provider group has an icon definition', () => {
-	const groups = groupProviders(createModelService(credentials, transport, {}).providers());
-	const missing = groups.filter((group) => !providerIcon(group.providers[0]?.id ?? group.id));
-	assert.deepEqual(missing.map((group) => group.label), []);
-	// 品牌 SVG 必须是内联内容，而不是只剩空壳
+void test('Every preset connection has a bundled brand icon, including variants', () => {
+	const providers = createModelService(credentials, transport, {}).providers();
+	const missing = providers.filter(({ id }) => {
+		const brand = providerIcon(id);
+		return !brand?.svg?.includes('<path') && !/^data:image\/(?:png|svg\+xml);base64,/u.test(brand?.image ?? '');
+	});
+	assert.deepEqual(missing.map(({ id }) => id), []);
+	assert.equal(providerIcon('opencode-go'), providerIcon('opencode'));
+	assert.equal(providerIcon('volcengine-coding-plan'), providerIcon('volcengine-agent-plan'));
+	assert.notEqual(providerIcon('google-vertex')?.svg, providerIcon('google')?.svg);
+	assert.equal(providerIcon('custom-unknown'), undefined);
 	assert.ok(providerIcon('openai')?.svg?.includes('<path'));
 });

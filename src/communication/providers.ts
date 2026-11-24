@@ -1,9 +1,11 @@
+import { randomUUID } from 'node:crypto';
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
 	Api,
 	AuthContext,
 	Context,
+	ImageContent,
 	JsonObject,
 	Message as PiMessage,
 	Model,
@@ -26,7 +28,15 @@ import * as openaiCompletions from '@earendil-works/pi-ai/api/openai-completions
 import * as openaiResponses from '@earendil-works/pi-ai/api/openai-responses';
 import * as piMessages from '@earendil-works/pi-ai/api/pi-messages';
 import { EXTRA_IMAGE_LIMITS, EXTRA_PROVIDERS } from './extraProviders';
-import { fetchModelsDevDetails, fetchOfficialModelCatalog, fetchPiModelCatalog, mergeModelCatalogDetails, readProviderCatalog } from './modelCatalog';
+import { documentedModelDetails, documentedRouteDetails, fetchModelList, fetchModelsDevCatalog, fetchPiModelCatalog,
+	mergeModelCatalogDetails, ModelCatalogHttpError, modelsDevDetails, readPiModelCatalog, sourceModelCatalogDetails } from './modelCatalog';
+import { ACCOUNT_CATALOGS, fetchAccountModelCatalog } from './modelCatalogAccounts';
+import { fetchOfficialModelCatalog } from './modelCatalogProviders';
+import { openCodeConnection } from './openCodeModels';
+import { resolveModelConnection } from './modelConnection';
+import { applyResponseSchema, supportsResponseSchema } from './modelFeatures';
+import { bufferedGroqSchemaFetch, needsBufferedGroqSchema } from './groqSchema';
+import { applyModelVideo, catalogVideoInput, nativeVideoFormat, videoTakesOnlyUrls } from './modelVideo';
 import { confirmModelRequest, modelRequestConfirmation } from './modelRequestConfirmation';
 import type { ModelRequestConfirmation } from './modelRequestConfirmation';
 import { modelNodeFetch, nodeFetch } from './nodeFetch';
@@ -40,6 +50,7 @@ import type {
 	CustomProviderDef,
 	ModelCatalogDetails,
 	ModelCatalogResult,
+	ModelConnectionIssue,
 	ModelOverride,
 	ModelProviderInfo,
 	ModelRequest,
@@ -51,17 +62,19 @@ import type {
 	Transport,
 } from '../types';
 
-function toPiMessage(message: Message): PiMessage {
+function toPiMessage(message: Message, images?: ImageContent[]): PiMessage {
 	const timestamp = Date.now();
 	if (message.role === 'system') return { role: 'system', content: message.content, timestamp };
-	if (message.role === 'user') return { role: 'user', content: message.content, timestamp };
+	if (message.role === 'user') return { role: 'user', content: images?.length
+		? [...(message.content ? [{ type: 'text' as const, text: message.content }] : []), ...images] : message.content, timestamp };
 	if (message.role === 'tool') {
 		if (!message.toolCallId) throw new Error('Tool messages require toolCallId');
 		return {
 			role: 'toolResult',
 			toolCallId: message.toolCallId,
 			toolName: message.toolName ?? message.toolCallId,
-			content: [{ type: 'text', text: message.content }],
+			content: [{ type: 'text', text: message.imageRefs?.length && !images?.length
+				? message.content + '\n（此模型请求未携带这项工具返回的图片。）' : message.content }, ...(images ?? [])],
 			isError: message.isError ?? false,
 			timestamp,
 		};
@@ -96,10 +109,10 @@ function toPiMessage(message: Message): PiMessage {
 	};
 }
 
-function toContext(request: ModelRequest, toolsEnabled: boolean): Context {
+function toContext(request: ModelRequest, toolsEnabled: boolean, images?: Map<number, ImageContent[]>): Context {
 	return {
 		systemPrompt: request.system,
-		messages: request.messages.map(toPiMessage),
+		messages: request.messages.map((message, index) => toPiMessage(message, images?.get(index))),
 		tools: toolsEnabled ? request.tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
@@ -192,18 +205,19 @@ function toResponse(message: AssistantMessage, reportedUsage: ReportedUsage): Mo
 
 class PiModelStream implements ModelStream {
 	constructor(
-		private source: AssistantMessageEventStream,
+		private source: AssistantMessageEventStream | Promise<AssistantMessageEventStream>,
 		private controller: AbortController,
 		private cleanup: () => void,
 		private readUsage: () => ReportedUsage,
-		private confirmation?: ModelRequestConfirmation,
+		private confirmation: ModelRequestConfirmation | undefined,
+		private structuredOutput: boolean,
 		private onUsage?: Parameters<ModelService['send']>[1],
 	) {}
 
 	[Symbol.asyncIterator](): AsyncIterator<ModelStreamEvent> {
 		const iterate = async function* (this: PiModelStream) {
 			try {
-				for await (const event of this.source) yield event;
+				for await (const event of await this.source) yield event;
 			} finally {
 				this.cleanup();
 			}
@@ -213,11 +227,16 @@ class PiModelStream implements ModelStream {
 
 	async result(): Promise<ModelResponse> {
 		try {
-			const response = await this.source.result();
+			const response = await (await this.source).result();
 			if (this.confirmation?.failure) throw this.confirmation.failure;
 			const reportedUsage = this.readUsage();
 			this.onUsage?.({ reportedUsage, cost: reportedCost(response.usage) });
-			return toResponse(response, reportedUsage);
+			const result = toResponse(response, reportedUsage);
+			if (!this.structuredOutput) return result;
+			if (result.stopReason === 'end' && !result.toolCalls.length) {
+				try { JSON.parse(result.content); } catch { throw new Error('模型未返回有效的结构化 JSON。'); }
+			}
+			return { ...result, structuredOutput: true };
 		} finally {
 			this.cleanup();
 		}
@@ -258,7 +277,7 @@ function providerBaseUrl(provider: Provider): string {
 }
 
 function catalogSignal(signal?: AbortSignal): AbortSignal {
-	const timeout = AbortSignal.timeout(8_000);
+	const timeout = AbortSignal.timeout(15_000);
 	return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
@@ -295,6 +314,15 @@ function providerProtocol(provider: Provider): string {
 /** 可切换的协议：pi-ai 内置的全部对话协议实现 */
 export const API_PROTOCOLS = Object.keys(API_MODULES);
 
+const CONNECTION_ERRORS: Record<ModelConnectionIssue, string> = {
+	'unknown-provider': '未找到模型服务商。',
+	'missing-protocol': '无法确认此模型的 API 协议，请在模型配置中选择。',
+	'unsupported-protocol': '插件未接通此 API 协议，请重新选择。',
+	'missing-address': '无法确认此协议的 Base URL，请填写对应的请求地址。',
+	'invalid-address': 'Base URL 无效，请填写正确的 HTTP 或 HTTPS 地址。',
+	'incompatible-address': 'Base URL 与所选 API 协议或 OpenCode 套餐不匹配，请更正地址或清空以自动选择。',
+};
+
 interface ModelServiceOptions {
 	additionalProviders?: Provider[];
 	/** 运行时读取，保存设置后无需重建服务；空值表示用服务商自带地址 */
@@ -305,6 +333,8 @@ interface ModelServiceOptions {
 	modelOverrides?: () => Record<string, Record<string, ModelOverride>>;
 	/** 自建服务商（自定义端点/本地模型）：按设置现算，模型 ID 由用户手填 */
 	customProviders?: () => CustomProviderDef[];
+	catalogProtocol?: (providerId: string, model: string) => string | undefined;
+	catalogDetails?: (providerId: string, model: string, baseUrl?: string) => ModelCatalogDetails | undefined;
 }
 
 /** pi-ai 负责全部内置 Provider 的协议与能力差异，本层只转换插件契约并注入连接条件。 */
@@ -350,37 +380,6 @@ export function createModelService(
 		}));
 	}
 
-	// 单协议服务商把适配器钉死在一个实现上，只能换掉整个 Provider 才能真正切协议；
-	// 重建时挂上全部 api 实现，服务商级协议换掉所有模型，模型级协议只换那一个模型
-	const originals = new Map<string, Provider>();
-	const installed = new Map<string, string>();
-	const applyProtocol = (providerId: string, protocol: string): void => {
-		const key = protocol || '*';
-		if ((installed.get(providerId) ?? '') === key) return;
-		let base = originals.get(providerId);
-		if (!base) {
-			base = models.getProviders().find((entry) => entry.id === providerId);
-			if (!base) return;
-			originals.set(providerId, base);
-		}
-		models.setProvider(createProvider({
-			id: base.id,
-			name: base.name,
-			baseUrl: base.baseUrl,
-			headers: base.headers,
-			auth: base.auth,
-			models: base.getModels().map<Model<Api>>((model) => ({ ...model, api: protocol || model.api })),
-			api: API_MODULES,
-		}));
-		installed.set(providerId, key);
-	};
-	const restoreProtocol = (providerId: string): void => {
-		if (!installed.has(providerId)) return;
-		const base = originals.get(providerId);
-		if (base) models.setProvider(base);
-		installed.delete(providerId);
-	};
-
 	// 自建服务商没有目录元数据：使用中性聊天模型，避免继承任意内置模型的推理/模态行为
 	const registered = new Set<string>();
 	const syncCustomProviders = (): void => {
@@ -423,54 +422,129 @@ export function createModelService(
 	};
 
 	const contextLimits = ({ providerId, model: modelId }: Pick<ModelRequest, 'providerId' | 'model'>) => {
-		syncCustomProviders();
-		const override = serviceOptions.modelOverrides?.()[providerId]?.[modelId];
+		const route = resolve(providerId, modelId);
+		const { override, exact } = route;
+		const details = connectionCatalogDetails(providerId, modelId, route);
 		// 自建服务商目录中的窗口只是占位，只有明确填写的覆盖值可用于预算。
-		const model = registered.has(providerId) ? undefined : models.getModel(providerId, modelId);
+		const model = registered.has(providerId) ? undefined : exact;
 		return {
-			contextWindow: override?.contextWindow || model?.contextWindow || 0,
-			maxTokens: override?.maxTokens || model?.maxTokens || 0,
+			contextWindow: override?.contextWindow || details?.contextWindow || model?.contextWindow || 0,
+			maxTokens: override?.maxTokens || details?.maxTokens || model?.maxTokens || 0,
 		};
 	};
-	const findModel = (providerId: string, id: string): Model<Api> | undefined => {
-		const model = models.getModel(providerId, id);
-		if (model) return model;
-		// 手填的自定义模型 ID 不在目录里：借该服务商首个模型的元数据，只换 id。
-		const template = models.getProviders().find((entry) => entry.id === providerId)?.getModels()[0];
-		return template && { ...template, id, name: id };
+	const extended = new Map<string, Provider>();
+	const ensureAdapter = (provider: Provider, api: string) => {
+		const native = (selected: string) => Boolean(openCodeConnection(provider.id, selected))
+			|| provider.getModels().some((entry) => entry.api === selected);
+		if (registered.has(provider.id) || extended.get(provider.id) === provider || native(api)) return;
+		// 按每个请求的协议选适配器，保留服务商的目录和原生请求处理。
+		const generic = createProvider({ id: provider.id, auth: provider.auth, models: [], api: API_MODULES });
+		const adapter = (model: Model<Api>) => native(model.api) ? provider : generic;
+		const updated: Provider = {
+			...provider,
+			stream: (model, context, options) => adapter(model).stream(model, context, options),
+			streamSimple: (model, context, options) => adapter(model).streamSimple(model, context, options),
+		};
+		models.setProvider(updated);
+		extended.set(provider.id, updated);
+	};
+	const resolve = (providerId: string, id: string, useModelOverride = true) => {
+		syncCustomProviders();
+		const provider = models.getProvider(providerId);
+		const exact = models.getModel(providerId, id);
+		const override = serviceOptions.modelOverrides?.()[providerId]?.[id];
+		const connection = resolveModelConnection({
+			provider, model: exact, modelOverride: useModelOverride ? override : undefined, protocols: API_PROTOCOLS,
+			catalogProtocol: serviceOptions.catalogProtocol?.(providerId, id),
+			providerOverride: { protocol: serviceOptions.protocols?.()[providerId], baseUrl: serviceOptions.baseUrls?.()[providerId] },
+		});
+		return { provider, exact, override, connection };
 	};
 	const thinkingOptions: ModelService['thinkingOptions'] = ({ providerId, model: modelId }, preferred) => {
-		syncCustomProviders();
-		const model = findModel(providerId, modelId);
+		const { model, override } = requestModel(providerId, modelId);
 		if (!model) return { levels: [] };
-		const override = serviceOptions.modelOverrides?.()[providerId]?.[modelId];
 		const levels = reasoningLevels(model, override);
 		const level = selectedReasoning(model, override, levels, preferred);
 		return { levels, level };
 	};
 
-	const stream = (request: ModelRequest, onUsage?: Parameters<ModelService['send']>[1]): ModelStream => {
-		syncCustomProviders();
-		const protocol = serviceOptions.protocols?.()[request.providerId]?.trim() ?? '';
-		const override = serviceOptions.modelOverrides?.()[request.providerId]?.[request.model];
-		const modelProtocol = override?.protocol?.trim() ?? '';
-		for (const value of [protocol, modelProtocol]) {
-			if (value && !API_MODULES[value as keyof typeof API_MODULES]) throw new Error(`Unknown API protocol: ${value}`);
+	function requestModel(providerId: string, id: string) {
+		const route = resolve(providerId, id);
+		const { provider, exact, override, connection } = route;
+		const { api, baseUrl, issue } = connection;
+		if (issue || !provider) return { provider, connection, override, model: undefined };
+		const details = connectionCatalogDetails(providerId, id, route);
+		const model: Model<Api> = exact
+			? { ...exact, api, baseUrl, ...(exact.api !== api && { compat: undefined }) }
+			: { id, name: id, provider: providerId, api, baseUrl, reasoning: false,
+				input: ['text'], cost: zeroCost, contextWindow: 128000, maxTokens: 8000 };
+		const inputs = override?.input ?? (details?.evidence?.inputModalities?.conflict ? undefined : details?.inputModalities);
+		if (inputs) model.input = inputs.includes('image') ? ['text', 'image'] : ['text'];
+		const reported = details?.reportedThinkingLevels?.filter(isThinkingLevel);
+		const capabilities = { reasoning: details?.reasoning, ...override?.capabilities };
+		if (capabilities.reasoning === true) model.reasoning = true;
+		const literal = reported?.some((level) => level !== 'off' && level !== 'minimal' && !getSupportedThinkingLevels(model).includes(level as ThinkingLevel));
+		const effective: ModelOverride = {
+			contextWindow: details?.contextWindow, maxTokens: details?.maxTokens,
+			...(!override?.thinkingLevel && !override?.thinkingLevels && reported?.length && {
+				thinkingLevels: [...reported],
+				...(literal && { literalThinkingLevels: true as const }),
+			}),
+			...override, capabilities,
+		};
+		return { provider, connection, override: effective, model };
+	}
+
+	function connectionCatalogDetails(providerId: string, id: string, { provider, connection, override }: Pick<ReturnType<typeof resolve>, 'provider' | 'connection' | 'override'>) {
+		if (connection.issue) return undefined;
+		const normalize = (address?: string) => (URL.parse(address ?? '')?.href ?? address ?? '').replace(/\/+$/u, '');
+		const hasConnectionOverride = Boolean(override?.protocol || override?.baseUrl);
+		const catalogConnection = hasConnectionOverride ? resolve(providerId, id, false).connection : connection;
+		let details: ModelCatalogDetails | undefined;
+		if (provider && catalogConnection.api === connection.api && normalize(catalogConnection.baseUrl) === normalize(connection.baseUrl)) {
+			const configuredAddress = serviceOptions.baseUrls?.()[providerId] || (registered.has(providerId) ? provider.baseUrl : undefined);
+			const configuredProtocol = serviceOptions.protocols?.()[providerId];
+			const catalogAddress = (registered.has(providerId) || (configuredAddress && normalize(configuredAddress) !== normalize(providerBaseUrl(provider))))
+				? configuredAddress : undefined;
+			details = serviceOptions.catalogDetails?.(providerId, id, catalogAddress)
+				?? (!catalogAddress && (!configuredProtocol || configuredProtocol === providerProtocol(provider))
+					? documentedModelDetails(providerId).get(id) : undefined);
+			const bundled = provider.getModels().find((model) => model.id === id);
+			const catalogApi = details?.connectionProtocol || (!catalogAddress ? bundled?.api : undefined);
+			if (catalogApi && catalogApi !== connection.api) details = undefined;
 		}
-		if (protocol) applyProtocol(request.providerId, protocol);
-		else if (modelProtocol) applyProtocol(request.providerId, '');
-		else restoreProtocol(request.providerId);
-		let model = findModel(request.providerId, request.model);
-		if (!model) throw new Error(`Unknown model: ${request.providerId}/${request.model}`);
-		// 端点覆盖：请求路径只读 model.baseUrl；模型级优先，其次服务商级，最后目录自带
-		const baseUrl = override?.baseUrl?.trim() || serviceOptions.baseUrls?.()[request.providerId]?.trim() || '';
-		if (baseUrl && baseUrl !== model.baseUrl) model = { ...model, baseUrl };
-		// 协议覆盖：模型级只换当前模型的 api，服务商级见 applyProtocol
-		if (modelProtocol && modelProtocol !== model.api) model = { ...model, api: modelProtocol };
+		const routeDetails = documentedRouteDetails(providerId, id, connection.api, connection.baseUrl);
+		return routeDetails ? mergeModelCatalogDetails(new Map([[id, routeDetails]]), details && new Map([[id, details]])).get(id) : details;
+	}
+
+	function modelFeatures(providerId: string, id: string, route: Pick<ReturnType<typeof resolve>, 'provider' | 'connection' | 'override'>) {
+		const { connection, override } = route;
+		const details = connectionCatalogDetails(providerId, id, route);
+		const structuredOutput = (override?.capabilities?.structuredOutput
+			?? (details?.evidence?.structuredOutput?.conflict ? undefined : details?.structuredOutput)) === true
+			&& supportsResponseSchema(connection.api, connection.baseUrl, id);
+		const videoInput = override?.input?.includes('video') ?? catalogVideoInput(details);
+		const tools = override?.capabilities?.tools ?? details?.tools ?? true;
+		return { structuredOutput, videoInput, tools };
+	}
+
+	const stream = (request: ModelRequest, onUsage?: Parameters<ModelService['send']>[1]): ModelStream => {
+		const { provider, connection, override, model: selectedModel } = requestModel(request.providerId, request.model);
+		if (!provider || !selectedModel) throw new Error(CONNECTION_ERRORS[connection.issue ?? 'unknown-provider']);
+		const features = modelFeatures(request.providerId, request.model, { provider, connection, override });
+		const vision = selectedModel.input.includes('image');
+		if (request.images?.required && !vision) throw new Error('当前模型连接未启用图片输入，请选择支持图片的模型。');
+		const schema = request.responseSchema;
+		if (schema && !features.structuredOutput) throw new Error('当前模型连接未启用结构化输出。');
+		const video = request.video;
+		const videoFormat = video && features.videoInput ? nativeVideoFormat(connection, selectedModel.id) : undefined;
+		const videoMarker = video ? `[scribe-video-${randomUUID()}]\n` : undefined;
+		if (video && !videoFormat) throw new Error('当前模型连接无法发送视频，请选择已接通视频输入的模型。');
+		if (video?.hasFiles && videoTakesOnlyUrls(videoFormat)) throw new Error('当前模型接口接受 HTTPS 视频链接，请以 Markdown 视频嵌入链接提交。');
+		ensureAdapter(provider, selectedModel.api);
+		let model = selectedModel;
 		if (override?.contextWindow) model = { ...model, contextWindow: override.contextWindow };
 		if (override?.maxTokens) model = { ...model, maxTokens: override.maxTokens };
-		// 保留目录里的推理标记，支持的接口才能发送明确的关闭指令。
-		if (override?.capabilities?.reasoning === true && !model.reasoning) model = { ...model, reasoning: true };
 		const level = resolveReasoning(model, override, request.reasoning);
 		let reasoning: ThinkingLevel | undefined;
 		let onPayload: SimpleStreamOptions['onPayload'];
@@ -484,6 +558,16 @@ export function createModelService(
 					if (!payloadIncludesEffort(payload, level)) throw new Error(`The model does not accept a text reasoning effort (${level}).`);
 				};
 			} else if (native) reasoning = level;
+		}
+		if (schema || video) {
+			const validateThinking = onPayload;
+			onPayload = async (payload, activeModel) => {
+				await validateThinking?.(payload, activeModel);
+				const fields = schema ? applyResponseSchema(payload, model.api, schema, model.baseUrl) : payload;
+				return video && videoFormat && videoMarker
+					? applyModelVideo(fields, videoFormat, videoMarker, await video.load(controller.signal))
+					: fields;
+			};
 		}
 		const controller = new AbortController();
 		const onAbort = () => controller.abort(request.signal?.reason);
@@ -503,6 +587,7 @@ export function createModelService(
 			return transport.fetch(input, init);
 		};
 		const reportedUsage = captureReportedUsage(model.api);
+		const fetchModel = confirmation ? confirmedFetch : transport.fetch;
 		const options: SimpleStreamOptions = {
 			signal: controller.signal,
 			maxTokens: override?.maxTokens && request.maxTokens !== undefined
@@ -517,48 +602,75 @@ export function createModelService(
 			// shortcut: SDK total timeout is capped at 24.8 days; remove when SDK supports disabling it.
 			timeoutMs: 2_147_483_647,
 			transport: 'sse',
-			onProviderStreamEvent: reportedUsage.observe,
-			...(isGoogleModel(model) ? {} : { fetch: confirmation ? confirmedFetch : transport.fetch }),
+			onProviderStreamEvent: (event) => reportedUsage.observe(event),
+			...(isGoogleModel(model) ? {} : {
+				fetch: schema && needsBufferedGroqSchema(connection) ? bufferedGroqSchemaFetch(fetchModel) : fetchModel,
+			}),
 		};
 		try {
-			const context = toContext(request, override?.capabilities?.tools !== false);
-			const source = confirmation
-				? modelRequestConfirmation.run(confirmation, () => models.streamSimple(model, context, options))
-				: models.streamSimple(model, context, options);
-			return new PiModelStream(source, controller, cleanup, reportedUsage.read, confirmation, onUsage);
+			const input = video && videoMarker ? {
+				...request,
+				messages: request.messages.map((message, index) => index === video.messageIndex
+					? { ...message, content: videoMarker + message.content } : message),
+			} : request;
+			const start = (images?: Map<number, ImageContent[]>) => {
+				controller.signal.throwIfAborted();
+				const context = toContext(input, features.tools, images);
+				return confirmation
+					? modelRequestConfirmation.run(confirmation, () => models.streamSimple(model, context, options))
+					: models.streamSimple(model, context, options);
+			};
+			const source = vision && request.images ? request.images.load(controller.signal).then(start) : start();
+			return new PiModelStream(source, controller, cleanup, reportedUsage.read, confirmation, Boolean(schema), onUsage);
 		} catch (error) {
 			cleanup();
 			throw error;
 		}
 	};
 
-	async function discoverProviderModels(provider: Provider, signal?: AbortSignal): Promise<ModelCatalogResult> {
+	async function discoverProviderModels(provider: Provider, signal?: AbortSignal, sharedPiCatalog?: () => Promise<unknown>): Promise<ModelCatalogResult> {
 		const providerId = provider.id;
 		const bundled = provider.getModels();
+		const nonChat = new Set(provider.getAllModels?.().filter((model) => model.type && model.type !== 'chat').map((model) => model.id));
+		for (const model of bundled) nonChat.delete(model.id);
 		try {
 			const requestSignal = catalogSignal(signal);
-			if (provider.refreshModels) {
-				const result = await models.refresh({ allowNetwork: true, force: true, providers: [providerId], signal: requestSignal });
+			const baseUrl = providerBaseUrl(provider);
+			if (ACCOUNT_CATALOGS.has(providerId)) {
+				const credential = await credentials.read(providerId, { signal: requestSignal });
+				const resolved = credential ? await models.getAuth(providerId, { signal: requestSignal }) : undefined;
+				const catalog = await fetchAccountModelCatalog(providerId, baseUrl, credential, resolved, transport.fetch, requestSignal, nonChat);
 				signal?.throwIfAborted();
-				const refreshed = provider.getModels();
-				if (!result.aborted && !result.errors.size && refreshed !== bundled) {
-					return { models: refreshed.map((model) => model.id), source: 'provider', details: piCatalogDetails(refreshed) };
-				}
+				if (catalog) return catalog;
 			} else {
-				const catalog = await fetchOfficialModelCatalog(providerId, providerBaseUrl(provider), credentials, transport.fetch, requestSignal);
+				const catalog = await fetchOfficialModelCatalog(providerId, baseUrl, credentials, transport.fetch, requestSignal, nonChat);
 				signal?.throwIfAborted();
 				if (catalog) return catalog;
 			}
 		} catch {
 			signal?.throwIfAborted();
 		}
+		try {
+			if (provider.refreshModels) {
+				const result = await models.refresh({ allowNetwork: true, force: true, providers: [providerId], signal: catalogSignal(signal) });
+				signal?.throwIfAborted();
+				const refreshed = provider.getModels();
+				if (!result.aborted && !result.errors.size && refreshed !== bundled) {
+					return { models: refreshed.map((model) => model.id), source: 'provider',
+						details: sourceModelCatalogDetails(piCatalogDetails(refreshed), 'pi', new Date().toISOString()) };
+				}
+			}
+		} catch {
+			signal?.throwIfAborted();
+		}
 
-		// 百炼 Token Plan 有同套餐的 Pi 目录。其他补充端点保留各自的套餐清单。
-		const piId = providerId === 'bailian-token-plan' ? 'qwen-token-plan-cn'
-			: EXTRA_PROVIDERS.some((entry) => entry.id === providerId) ? undefined : providerId;
+		// 额外预置没有同套餐的 Pi 目录，避免把另一个套餐的模型当成可选。
+		const piId = EXTRA_PROVIDERS.some((entry) => entry.id === providerId) ? undefined : providerId;
 		if (piId) {
 			try {
-				const catalog = await fetchPiModelCatalog(piId, transport.fetch, catalogSignal(signal));
+				const catalog = sharedPiCatalog
+					? readPiModelCatalog(((await sharedPiCatalog()) as Record<string, unknown> | undefined)?.[piId], piId)
+					: await fetchPiModelCatalog(piId, transport.fetch, catalogSignal(signal));
 				signal?.throwIfAborted();
 				return catalog;
 			} catch {
@@ -577,31 +689,50 @@ export function createModelService(
 		}
 		const credential = await credentials.read(providerId, { signal: requestSignal });
 		const headers: Record<string, string> = { accept: 'application/json' };
-		if (credential?.type === 'api_key' && credential.key) headers.authorization = `Bearer ${credential.key}`;
-		let response = await transport.fetch(`${endpoint}/models`, { headers, signal: requestSignal });
-		// 备用地址确实能返回目录时，聊天也使用同一个前缀。
-		if (response.status === 404 && !/\/v\d+[a-z0-9]*$/i.test(endpoint)) {
-			await response.body?.cancel();
+		const configuredProtocol = serviceOptions.protocols?.()[providerId];
+		const finish = (catalog: ModelCatalogResult) => {
+			const protocol = configuredProtocol || (providerId === 'azure' ? 'azure-openai-responses' : '');
+			const confirmed = new Map<string, ModelCatalogDetails>();
+			for (const model of catalog.models) {
+				const details = documentedRouteDetails(providerId, model, protocol, endpoint);
+				if (details) confirmed.set(model, details);
+			}
+			return { models: catalog.models, details: mergeModelCatalogDetails(catalog.details, confirmed), baseUrl: endpoint };
+		};
+		if (['azure', 'cloudflare-ai-gateway', 'cloudflare-workers-ai', 'amazon-bedrock', 'bailian-payg'].includes(providerId)) {
+			const catalog = await fetchAccountModelCatalog(providerId, endpoint, credential, undefined, transport.fetch, requestSignal);
+			if (catalog) return finish(catalog);
+		}
+		const protocol = configuredProtocol
+			|| serviceOptions.customProviders?.().find(({ id }) => id === providerId)?.protocol
+			|| (providerId === 'anthropic' || /^minimax(?:-cn)?$/u.test(providerId) ? 'anthropic-messages' : '')
+			|| (providerId === 'google' ? 'google-generative-ai' : '');
+		if (credential?.type === 'api_key' && credential.key) {
+			if (protocol === 'anthropic-messages') headers['x-api-key'] = credential.key;
+			else if (protocol === 'google-generative-ai') headers['x-goog-api-key'] = credential.key;
+			else headers.authorization = `Bearer ${credential.key}`;
+		}
+		if (protocol === 'anthropic-messages') headers['anthropic-version'] = '2023-06-01';
+		const read = (address: string) => fetchModelList(transport.fetch, new URL(address + '/models'), headers, requestSignal, providerId);
+		let catalog: ModelCatalogResult;
+		try {
+			catalog = await read(endpoint);
+		} catch (error) {
+			if (!(error instanceof ModelCatalogHttpError) || ![404, 405].includes(error.status) || /\/v1$/iu.test(endpoint)) throw error;
+			// 与原连接保持在同一服务及路径下，验证版本前缀后才用作聊天地址。
 			endpoint += '/v1';
-			response = await transport.fetch(`${endpoint}/models`, { headers, signal: requestSignal });
+			catalog = await read(endpoint);
 		}
-		if (!response.ok) {
-			await response.body?.cancel();
-			throw new Error(`HTTP ${response.status}`);
-		}
-		const { models, details } = readProviderCatalog(await response.json());
 		requestSignal.throwIfAborted();
-		return { models, details, baseUrl: endpoint };
+		return finish(catalog);
 	}
 
 	return {
 		contextLimits,
+		modelConnection: (providerId, id) => resolve(providerId, id).connection,
 		modelOrigin: ({ providerId, model: id }) => {
-			syncCustomProviders();
-			const baseUrl = serviceOptions.modelOverrides?.()[providerId]?.[id]?.baseUrl?.trim()
-				|| serviceOptions.baseUrls?.()[providerId]?.trim()
-				|| findModel(providerId, id)?.baseUrl;
-			return baseUrl ? URL.parse(baseUrl)?.origin : undefined;
+			const { connection } = resolve(providerId, id);
+			return connection.issue ? undefined : URL.parse(connection.baseUrl)?.origin;
 		},
 		thinkingOptions,
 		providers: (): ModelProviderInfo[] => {
@@ -627,7 +758,7 @@ export function createModelService(
 			}));
 		},
 		login: (providerId, interaction, options) => models.login(providerId, 'oauth', interaction, options),
-		listProviderModels: async (providerId, signal) => {
+		listProviderModels: async (providerId, signal, sharedPublicCatalog, sharedPiCatalog) => {
 			signal?.throwIfAborted();
 			syncCustomProviders();
 			const provider = models.getProvider(providerId);
@@ -637,17 +768,31 @@ export function createModelService(
 				return { models, details, source: 'provider' };
 			}
 			const bundled = piCatalogDetails(provider.getModels());
-			const [catalog, publicDetails] = await Promise.all([
-				discoverProviderModels(provider, signal),
-				fetchModelsDevDetails(providerId, transport.fetch, catalogSignal(signal)).catch(() => undefined),
+			const [catalog, publicCatalog] = await Promise.all([
+				discoverProviderModels(provider, signal, sharedPiCatalog),
+				(sharedPublicCatalog ?? fetchModelsDevCatalog(transport.fetch, catalogSignal(signal))).catch(() => undefined),
 			]);
 			signal?.throwIfAborted();
-			const details = catalog.source === 'pi'
-				? mergeModelCatalogDetails(bundled, catalog.details, publicDetails)
-				: mergeModelCatalogDetails(bundled, publicDetails, catalog.details);
+			const checkedAt = new Date().toISOString();
+			const baseUrl = providerBaseUrl(provider);
+			const protocol = providerProtocol(provider);
+			const configured = serviceOptions.protocols?.()[providerId];
+			if (configured && configured !== protocol) return { ...catalog, details: undefined };
+			const publicDetails = modelsDevDetails(providerId, publicCatalog, { baseUrl, protocol, models: provider.getModels() }, checkedAt);
+			const details = mergeModelCatalogDetails(sourceModelCatalogDetails(bundled, 'bundled'),
+				sourceModelCatalogDetails(catalog.details, catalog.source, checkedAt),
+				publicDetails, documentedModelDetails(providerId));
 			return { ...catalog, details };
 		},
 		listCustomModels: readCustomModelCatalog,
+		modelCapabilities: (providerId, id) => {
+			const route = requestModel(providerId, id);
+			if (!route.model) return { structuredOutput: false, imageInput: false };
+			const { structuredOutput, tools, videoInput } = modelFeatures(providerId, id, route);
+			const format = videoInput ? nativeVideoFormat(route.connection, id) : undefined;
+			return { structuredOutput, tools, imageInput: route.model.input.includes('image'),
+				...(format && { videoAnalysis: videoTakesOnlyUrls(format) ? 'link' as const : 'file' as const }) };
+		},
 		stream,
 		send: (request, onUsage) => stream(request, onUsage).result(),
 	};
