@@ -23,7 +23,7 @@ function counters(api: Api, event: Record<string, unknown>): ReportedUsage {
 			const detail = record(usage.prompt_tokens_details ?? usage.prompt_token_details
 				?? usage.promptTokensDetails ?? usage.promptTokenDetails);
 			return {
-				prompt: count(usage.prompt_tokens), input: count(usage.prompt_cache_miss_tokens),
+				prompt: count(usage.prompt_tokens), input: count(usage.prompt_cache_miss_tokens), videoInput: count(detail.video_tokens),
 				cacheRead: count(detail.cached_tokens ?? detail.cachedTokens ?? usage.prompt_cache_hit_tokens
 					?? usage.cached_tokens ?? usage.num_cached_tokens ?? usage.numCachedTokens),
 				cacheWrite: count(detail.cache_write_tokens), output: count(usage.completion_tokens), total: count(usage.total_tokens),
@@ -34,7 +34,7 @@ function counters(api: Api, event: Record<string, unknown>): ReportedUsage {
 		case 'azure-openai-responses': {
 			const usage = record(record(event.response).usage);
 			const detail = record(usage.input_tokens_details);
-			return { prompt: count(usage.input_tokens), cacheRead: count(detail.cached_tokens),
+			return { prompt: count(usage.input_tokens), cacheRead: count(detail.cached_tokens), videoInput: count(detail.video_tokens),
 				cacheWrite: count(detail.cache_write_tokens), output: count(usage.output_tokens), total: count(usage.total_tokens) };
 		}
 		case 'anthropic-messages': {
@@ -52,7 +52,10 @@ function counters(api: Api, event: Record<string, unknown>): ReportedUsage {
 			const usage = record(event.usageMetadata);
 			const candidates = count(usage.candidatesTokenCount);
 			const thoughts = count(usage.thoughtsTokenCount);
+			const videoInput = Array.isArray(usage.promptTokensDetails) ? usage.promptTokensDetails.map(record)
+				.find((entry) => entry.modality === 'VIDEO' && (count(entry.tokenCount) ?? 0) > 0) : undefined;
 			return { prompt: count(usage.promptTokenCount), cacheRead: count(usage.cachedContentTokenCount),
+				videoInput: count(videoInput?.tokenCount),
 				output: candidates === undefined ? undefined : candidates + (thoughts ?? 0), total: count(usage.totalTokenCount) };
 		}
 		case 'pi-messages': {
@@ -69,7 +72,7 @@ export function captureReportedUsage(api: Api) {
 	return {
 		observe(this: void, event: unknown) {
 			const update = counters(api, record(event));
-			for (const key of ['prompt', 'input', 'cacheRead', 'cacheWrite', 'output', 'total'] as const) {
+			for (const key of ['prompt', 'input', 'cacheRead', 'cacheWrite', 'output', 'total', 'videoInput'] as const) {
 				if (update[key] !== undefined) values[key] = update[key];
 			}
 		},

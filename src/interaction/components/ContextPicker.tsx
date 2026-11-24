@@ -4,6 +4,7 @@ import type { App } from 'obsidian';
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, RefObject } from 'react';
 import type { ConversationStore, ConversationSummary, NoteRef } from '../../types';
+import { isImageFile } from '../../tools/support/imageData';
 import { composerShortcut, isImeComposing, referenceQuery, removeReferenceQuery } from '../composerKeyboard';
 import { conversationReference, conversationReferenceTitle } from '../conversationReference';
 import { externalReferenceAt, pickExternalReference } from '../externalReferencePicker';
@@ -53,10 +54,10 @@ export function ContextChips({ refs, quotes, disabled, onRemove, onRemoveQuotes,
 					}}><ChatIcon name="x" /></button>
 			</li>)}
 			{refs.map((ref) => {
-				const label = `${text.remove} ${ref.path}`;
+				const label = `${text.remove} ${ref.pastedImage ? basename(ref.path) : ref.path}`;
 				return (
 					<li className="scribe-context-chip" key={ref.path}>
-						<ChatIcon name={ref.kind === 'folder' ? 'folder' : 'file-text'} />
+						<ChatIcon name={ref.kind === 'folder' ? 'folder' : isImageFile(ref.path) ? 'image' : 'file-text'} />
 						<span className="scribe-context-name" title={ref.path}>
 							{isAbsolute(ref.path) ? ref.path : basename(ref.path) || ref.path}
 						</span>

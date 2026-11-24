@@ -7,6 +7,7 @@ import { assistantMessageId } from '../../runtime/runState';
 import { isThinkingLevel } from '../settings/thinking';
 import { createSubagentRecordIndex } from './subagentRecords';
 import { validNoteChange } from '../../tools/support/noteChange';
+import { isCachedImagePath } from './paths';
 
 function record(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -45,7 +46,7 @@ function retryBlock(value: unknown): boolean {
 }
 
 function reportedUsage(value: unknown): boolean {
-	return record(value) && ['prompt', 'input', 'cacheRead', 'cacheWrite', 'output', 'total']
+	return record(value) && ['prompt', 'input', 'cacheRead', 'cacheWrite', 'output', 'total', 'videoInput']
 		.every((key) => value[key] === undefined || count(value[key]));
 }
 
@@ -127,6 +128,11 @@ function message(value: unknown): boolean {
 		&& (value.role !== 'tool' || text(value.toolCallId))
 		&& (value.toolName === undefined || text(value.toolName))
 		&& (value.isError === undefined || typeof value.isError === 'boolean')
+		&& (value.imageRefs === undefined || (Array.isArray(value.imageRefs) && value.imageRefs.every((ref: unknown) =>
+			record(ref) && text(ref.path) && (value.role === 'tool' ? ref.kind === 'tool' && isCachedImagePath(ref.path)
+				: value.role === 'user' && (ref.kind === 'file' || ref.kind === 'url'
+					|| (ref.kind === 'pasted' && isCachedImagePath(ref.path))
+					|| (ref.kind === 'vault-link' && (ref.sourcePath === undefined || text(ref.sourcePath))))))))
 		&& (value.skipped === undefined || (value.role === 'tool' && value.skipped === true))
 		&& (value.truncated === undefined || (value.role === 'assistant' && value.truncated === true))
 		&& (value.metrics === undefined || (value.role === 'assistant' && modelMetrics(value.metrics)))
@@ -145,6 +151,8 @@ function message(value: unknown): boolean {
 
 function request(value: unknown): value is TaskRequest {
 	return record(value) && text(value.conversationId) && text(value.instruction) && Array.isArray(value.refs)
+		&& (value.imageSourcePath === undefined || text(value.imageSourcePath))
+		&& (value.imageLinkEnd === undefined || (count(value.imageLinkEnd) && Number(value.imageLinkEnd) <= value.instruction.length))
 		&& (value.intent === undefined || value.intent === 'plan' || value.intent === 'review')
 		&& (value.target === undefined || (value.intent === undefined && record(value.target)
 			&& (value.target.kind === 'mcp' || value.target.kind === 'agent')
@@ -159,6 +167,7 @@ function request(value: unknown): value is TaskRequest {
 		&& value.refs.every((ref: unknown) => record(ref) && text(ref.path)
 			&& (ref.kind === undefined || ref.kind === 'file' || ref.kind === 'folder')
 			&& (ref.addedExternal === undefined || ref.addedExternal === true)
+			&& (ref.pastedImage === undefined || (ref.pastedImage === true && isCachedImagePath(ref.path)))
 			&& (ref.lines === undefined || (Array.isArray(ref.lines) && ref.lines.length === 2 && ref.lines.every(count))))
 		&& (value.approvalSource === undefined || text(value.approvalSource))
 		&& (value.subagentCallerTaskId === undefined || identifier(value.subagentCallerTaskId))
@@ -213,6 +222,10 @@ export function isMainEntry(value: unknown): value is MainConversationEntry {
 		case 'run-summary':
 			return record(value.summary) && count(value.summary.throughMessage) && value.summary.throughMessage > 1
 				&& text(value.summary.text) && Boolean(value.summary.text.trim()) && Buffer.byteLength(value.summary.text) <= 4_096;
+		case 'video-analysis':
+			return text(value.content) && Boolean(value.content.trim()) && Buffer.byteLength(value.content) <= 16_384
+				&& (value.sources === undefined || (Array.isArray(value.sources) && value.sources.length > 0 && value.sources.length <= 2
+					&& value.sources.every((item) => item === 'file' || item === 'link') && new Set(value.sources).size === value.sources.length));
 		case 'context-compaction': {
 			const item = value.compaction;
 			return record(item) && (item.reason === 'budget' || item.reason === 'overflow')
@@ -221,7 +234,7 @@ export function isMainEntry(value: unknown): value is MainConversationEntry {
 				&& (item.throughMessage === undefined || (count(item.throughMessage) && item.throughMessage > 1));
 		}
 		case 'auxiliary-usage':
-			return record(value.usage) && (value.usage.kind === 'review' || value.usage.kind === 'summary')
+			return record(value.usage) && (value.usage.kind === 'review' || value.usage.kind === 'summary' || value.usage.kind === 'video')
 				&& (value.usage.reportedUsage === undefined || reportedUsage(value.usage.reportedUsage))
 				&& (value.usage.cost === undefined || duration(value.usage.cost));
 		case 'retry': {
@@ -377,7 +390,10 @@ export async function replayConversation(id: string, entries: AsyncIterable<Conv
 			run.subagentReport = item.report;
 			continue;
 		}
-		if (finished.has(item.taskId)) throw new Error('对话中的任务记录顺序无效。');
+		// 用户可以在任务结束后手动整理聊天，摘要用量仍归入这段记录。
+		if (finished.has(item.taskId) && !(item.type === 'auxiliary-usage' && item.usage.kind === 'summary')) {
+			throw new Error('对话中的任务记录顺序无效。');
+		}
 		const { state } = run;
 		switch (item.type) {
 			case 'messages': {
@@ -425,6 +441,10 @@ export async function replayConversation(id: string, entries: AsyncIterable<Conv
 					throw new ConversationRecordError('压缩记录与任务交接摘要的范围不符。');
 				}
 				state.contextCompaction = item.compaction;
+				break;
+			case 'video-analysis':
+				run.videoAnalysis = item.content;
+				run.videoAnalysisSources = item.sources;
 				break;
 			case 'auxiliary-usage':
 				(state.auxiliaryUsage ??= []).push(item.usage);

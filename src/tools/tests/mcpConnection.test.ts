@@ -81,6 +81,31 @@ void test('MCP 连接显示服务商返回的认证原因，同时隐藏请求�
 	});
 });
 
+void test('MCP keeps valid image and image resource blocks alongside text and URL references', { timeout: 5_000 }, async (t) => {
+	const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
+	const image = { type: 'image', mimeType: 'image/png', data: png };
+	const resource = { uri: 'fixture://snapshot', mimeType: 'image/png', blob: png };
+	const url = await listen(t, async (request, response) => {
+		if (request.method === 'GET') { response.writeHead(405).end(); return; }
+		const { id, method } = JSON.parse(await readBody(request)) as RPC;
+		if (id === undefined) { response.writeHead(202).end(); return; }
+		const result = method === 'initialize' ? initialize : method === 'tools/list' ? { tools }
+			: method === 'resources/read' ? { contents: [resource] } : { content: [
+				{ type: 'text', text: 'Preview' }, image, { type: 'resource', resource },
+				{ type: 'resource_link', name: 'other', uri: 'https://images.example.com/image.png', mimeType: 'image/png' },
+				{ ...image, data: 'invalid' },
+			] };
+		json(response, reply(id, result));
+	});
+	const { connection } = connect(t, { type: 'http', url });
+	await connection.start();
+	const signal = new AbortController().signal;
+	const result = await connection.callTool('echo', {}, signal);
+	assert.deepEqual(result.images, [image, image]);
+	assert.match(result.content, /https:\/\/images\.example\.com\/image\.png/u);
+	assert.deepEqual((await connection.readResource(resource.uri, signal)).images, [image]);
+});
+
 void test('Streamable HTTP paginates discovery and resources, handles updates, redacts secrets, and times out calls', { timeout: 5_000 }, async (t) => {
 	let stream: ServerResponse | undefined;
 	let notify!: () => void;

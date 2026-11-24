@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 import { mcpDigest } from './mcp';
 import type { McpLiveServer, McpManager } from './mcp';
-import type { ToolDefinition, ToolSpec } from '../../types';
+import type { ImageToolOutput, ToolDefinition, ToolSpec } from '../../types';
 
 const searchName = 'search_mcp_tools';
 
@@ -16,7 +16,7 @@ function objectArgs(input: unknown): Record<string, unknown> {
 	return input as Record<string, unknown>;
 }
 
-type McpOutput = { content: string; isError: boolean };
+type McpOutput = ImageToolOutput & { isError: boolean };
 type McpTool = ToolDefinition & { mcp: NonNullable<ToolDefinition['mcp']> & { serverId?: string } };
 
 function spec({ name, description, inputSchema }: ToolSpec): ToolSpec {
@@ -28,7 +28,7 @@ function remoteTool(
 	invoke: (args: Record<string, unknown>, signal: AbortSignal) => Promise<McpOutput>, signature?: string,
 ): McpTool {
 	const label = live.server.name + ' / ' + name;
-	const binding = signature ?? mcpDigest([live.server.id, live.server.secretKey, live.server.secretRefs, live.server.url, kind, name]);
+	const binding = signature ?? mcpDigest([live.server.id, live.connectionKey, kind, name]);
 	return {
 		name: alias(live.server, name, kind), ...definition,
 		isReadOnly: false,

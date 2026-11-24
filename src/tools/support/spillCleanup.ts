@@ -1,6 +1,7 @@
 import { lstatSync, readdirSync, rmdirSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { IMAGE_CACHE_PREFIX, VIDEO_CACHE_PREFIX } from '../../orchestration/storage/paths';
 import { ownedPrivateDirectory, SHELL_SPILL_PREFIX, TOOL_SPILL_PREFIX } from './resultSpill';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -56,9 +57,9 @@ function privateChildren(root: string): string[] {
 	});
 }
 
-function sweepSpillRoots(base: string, cutoffMs: number): void {
+function sweepSpillRoots(base: string, cutoffMs: number, prefixes = ROOT_PREFIXES): void {
 	for (const entry of listEntries(base)) {
-		if (!entry.isDirectory() || !ROOT_PREFIXES.some((prefix) => entry.name.startsWith(prefix))) continue;
+		if (!entry.isDirectory() || !prefixes.some((prefix) => entry.name.startsWith(prefix))) continue;
 		const root = join(base, entry.name);
 		if (ownedPrivateDirectory(root)) sweepRoot(root, cutoffMs);
 	}
@@ -74,7 +75,7 @@ export function sweepSpillFiles(options: SpillSweepOptions = {}): void {
 	if (!cacheDirectory || !ownedPrivateDirectory(dirname(cacheDirectory)) || !ownedPrivateDirectory(cacheDirectory)) return;
 	for (const conversation of privateChildren(cacheDirectory)) {
 		for (const owner of privateChildren(conversation)) {
-			sweepSpillRoots(owner, cutoffMs);
+			sweepSpillRoots(owner, cutoffMs, [...ROOT_PREFIXES, IMAGE_CACHE_PREFIX, VIDEO_CACHE_PREFIX]);
 			pruneEmpty(owner);
 		}
 		pruneEmpty(conversation);

@@ -9,6 +9,8 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontex
 import { ErrorCode, McpError, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { createNodeFetch } from '../../communication/nodeFetch';
+import type { ImageToolOutput } from '../../types';
+import { decodeToolImage, MAX_IMAGES, MAX_REQUEST_IMAGE_BYTES } from '../support/imageData';
 import { mcpArgumentSecretValues, restoreMcpArgumentSecrets } from './mcpArgumentSecrets';
 import type { McpServerDraft } from './mcpConfig';
 import { loginMcpOAuth, McpAuthRequiredError, oauthSecretValues, oauthTargetAllowed, oauthURLAllowed, savedOAuthProvider } from './mcpOAuth';
@@ -29,8 +31,7 @@ interface Catalog {
 	resources: boolean;
 }
 
-interface CallResult {
-	content: string;
+interface CallResult extends ImageToolOutput {
 	isError: boolean;
 }
 
@@ -131,6 +132,19 @@ async function readMcpServiceError(response: Response): Promise<string | undefin
 
 function resourceContent(resource: { uri: string; mimeType?: string } & ({ text: string } | { blob: string })): string {
 	return `${resource.uri}\n${'text' in resource ? resource.text : `二进制内容（${resource.mimeType ?? '未知格式'}）`}`;
+}
+
+function toolImages() {
+	const images: NonNullable<ImageToolOutput['images']> = [];
+	let remaining = MAX_REQUEST_IMAGE_BYTES * 4 / 3;
+	return { images, add(data: string) {
+		if (images.length >= MAX_IMAGES || data.length > remaining) return;
+		try {
+			const image = decodeToolImage(data);
+			images.push(image);
+			remaining -= image.data.length;
+		} catch { /* Preserve the textual result when the media is invalid. */ }
+	} };
 }
 
 function authFailure(error: unknown): boolean {
@@ -337,12 +351,17 @@ export function createMcpConnection(options: ConnectionOptions): McpConnection {
 		listTools: (signal) => scoped(startupMs, signal, (scope) => catalog(ready(), scope)),
 		callTool: (name, args, signal) => scoped(operationMs, signal, async (scope) => {
 			const { content, structuredContent, isError } = await ready().callTool({ name, arguments: args }, undefined, scope) as CallToolResult;
+			const media = toolImages();
 			const text = content.map((item) => {
 				switch (item.type) {
 					case 'text': return item.text;
-					case 'resource': return resourceContent(item.resource);
+					case 'resource':
+						if ('blob' in item.resource && item.resource.mimeType?.startsWith('image/')) media.add(item.resource.blob);
+						return resourceContent(item.resource);
 					case 'resource_link': return JSON.stringify({ uri: item.uri, name: item.name, description: item.description, mimeType: item.mimeType });
-					case 'image': return `图片（${item.mimeType}）`;
+					case 'image':
+						media.add(item.data);
+						return `图片（${item.mimeType}）`;
 					case 'audio': return `音频（${item.mimeType}）`;
 				}
 			});
@@ -350,7 +369,7 @@ export function createMcpConnection(options: ConnectionOptions): McpConnection {
 				const output = JSON.stringify(structuredContent);
 				if (!text.includes(output)) text.push(output);
 			}
-			return { content: redact(text.join('\n\n')), isError: isError === true };
+			return { content: redact(text.join('\n\n')), isError: isError === true, ...(media.images.length && { images: media.images }) };
 		}),
 		listResources: (signal) => scoped(operationMs, signal, async (scope) => {
 			const current = ready();
@@ -368,7 +387,12 @@ export function createMcpConnection(options: ConnectionOptions): McpConnection {
 		}),
 		readResource: (uri, signal) => scoped(operationMs, signal, async (scope) => {
 			const result = await ready().readResource({ uri }, scope);
-			return { content: redact(result.contents.map(resourceContent).join('\n\n')), isError: false };
+			const media = toolImages();
+			for (const item of result.contents) {
+				if ('blob' in item && item.mimeType?.startsWith('image/')) media.add(item.blob);
+			}
+			return { content: redact(result.contents.map(resourceContent).join('\n\n')), isError: false,
+				...(media.images.length && { images: media.images }) };
 		}),
 		redact,
 		close,

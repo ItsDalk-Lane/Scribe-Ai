@@ -1,4 +1,5 @@
 import type { Agent, ClientRequest, IncomingMessage } from 'node:http';
+import type { LookupFunction } from 'node:net';
 import { diagnostics } from './diagnostics';
 import { toLogEntry } from './events';
 import type { NodeFetchObserver } from './events';
@@ -13,6 +14,7 @@ import type { NetworkTimeouts } from './timeouts';
 interface NodeFetchOptions {
 	timeouts?: Partial<NetworkTimeouts>;
 	observer?: NodeFetchObserver;
+	lookup?: LookupFunction;
 }
 
 function abortReason(signal: AbortSignal): Error {
@@ -73,6 +75,7 @@ export function createNodeFetch(
 					method,
 					headers: requestHeaders,
 					agent,
+					...(options.lookup && !agent && { lookup: options.lookup, agent: false }),
 				});
 				let timer: ReturnType<typeof setTimeout> | undefined;
 				let activeResponse: IncomingMessage | undefined;

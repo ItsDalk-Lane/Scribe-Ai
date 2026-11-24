@@ -4,6 +4,7 @@ import { nodeRequire } from './nodeRequire';
 export type ProxySource = 'direct' | 'configured' | 'environment' | 'system';
 export interface ProxyAgentSelection {
 	agent?: Agent;
+	proxy?: URL;
 	source: ProxySource;
 }
 export type ProxyAgentResolver = (url: URL) => Agent | ProxyAgentSelection | undefined | Promise<Agent | ProxyAgentSelection | undefined>;
@@ -111,12 +112,12 @@ async function createAgent(target: URL, proxy: URL): Promise<Agent> {
 	return agent;
 }
 
-export const getProxyAgentWithStatus: ProxyAgentResolver = async (target) => {
+export async function getProxyAgentWithStatus(target: URL): Promise<ProxyAgentSelection> {
 	const { proxy, source } = await resolveProxy(target);
-	return proxy ? { agent: await createAgent(target, proxy), source } : { source: 'direct' };
-};
+	return proxy ? { agent: await createAgent(target, proxy), proxy, source } : { source: 'direct' };
+}
 
 export const getProxyAgent = async (target: URL): Promise<Agent | undefined> => {
-	const selection = await getProxyAgentWithStatus(target) as ProxyAgentSelection;
+	const selection = await getProxyAgentWithStatus(target);
 	return selection.agent;
 };

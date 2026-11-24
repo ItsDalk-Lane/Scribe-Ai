@@ -1,14 +1,24 @@
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import type { App } from 'obsidian';
 import { createModelService } from '../../communication/providers';
+import { clipboardImages, saveClipboardImage } from '../../interaction/composerImages';
 import { createModelCoordinator } from '../../runtime/modelCoordinator';
 import { createReadDelivery } from '../../runtime/readDelivery';
 import { createRunState } from '../../runtime/runState';
 import { ContextOverflowError } from '../../types';
 import type { CredentialStore, Message, RunContext, SavedRun, Transport } from '../../types';
-import { createContextBuilder, inputBytes } from '../context/contextBuilder';
+import { createToolExecutor } from '../../tools/executor';
+import { readTools } from '../../tools/readTools';
+import { createContextBuilder, inputBytes, taskMessage } from '../context/contextBuilder';
 import { conversationHistory } from '../context/conversationHistory';
 import { shrinkToolResults } from '../context/toolResultBudget';
+import { createPermissionPolicy } from '../policies/permissions';
+import { createConversationStore } from '../storage/conversationStore';
+import { scribeDataPaths } from '../storage/paths';
 
 const context = createContextBuilder({ all: () => [], find: () => undefined });
 
@@ -36,6 +46,131 @@ const current: Message[] = [
 	{ role: 'assistant', content: '', toolCalls: [{ id: 'call_last', name: 'Read', input: { file_path: 'latest.md' } }] },
 	{ role: 'tool', content: 'LATEST-RESULT', toolCallId: 'call_last', toolName: 'Read' },
 ];
+
+void test('explicit video attachments reach the selected native wire format at the right user message', async (t) => {
+	const cwd = await mkdtemp(join(tmpdir(), 'scribe-video-'));
+	t.after(() => rm(cwd, { recursive: true, force: true }));
+	await writeFile(join(cwd, 'sample.mp4'), 'video-fixture');
+	const ctx = runContext([{ role: 'user', content: 'An older turn' }, { role: 'assistant', content: 'Older answer' }]);
+	ctx.cwd = cwd;
+	ctx.task.request.refs = [{ path: 'sample.mp4', kind: 'file' }];
+	ctx.permissions = await createPermissionPolicy(cwd, '.test-config', ctx.task.request.refs);
+	ctx.model = { providerId: 'kimi-coding', model: 'k3.1-pro' };
+	const prompt = { role: 'user' as const, content: 'Analyze this video' };
+	const request = await context.build(ctx, [prompt], 8_000);
+	const seen: { url: string; body: Record<string, unknown> }[] = [];
+	const credentials: CredentialStore = {
+		read: async () => ({ type: 'api_key', key: 'fixture' }),
+		list: async () => [], modify: async () => undefined, delete: async () => {},
+	};
+	const transport: Transport = {
+		configure() {}, onStatus: () => () => {}, logs: () => [],
+		async fetch(input, init) {
+			const req = new Request(input, init);
+			seen.push({ url: req.url, body: await req.json() as Record<string, unknown> });
+			return new Response('data: {"id":"chatcmpl-video","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Video received"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+				{ headers: { 'content-type': 'text/event-stream' } });
+		},
+	};
+	const models = createModelService(credentials, transport);
+	assert.equal((await models.send(request)).content, 'Video received');
+	assert.equal(seen[0]?.url, 'https://api.kimi.com/coding/v1/chat/completions');
+	const messages = seen[0]?.body.messages as Array<{ role: string; content: unknown }>;
+	assert.deepEqual(messages.filter(({ role }) => role === 'user').map(({ content }) => content), [
+		'An older turn', [{ type: 'text', text: prompt.content },
+			{ type: 'video_url', video_url: { url: 'data:video/mp4;base64,dmlkZW8tZml4dHVyZQ==' } }],
+	]);
+	assert.deepEqual(prompt, { role: 'user', content: 'Analyze this video' });
+	await assert.rejects(async () => models.send({ ...request, model: 'k3-256k' }), /无法发送视频/);
+	assert.equal(seen.length, 1);
+});
+
+void test('attached, pasted, linked and tool images reach the vision API after reopening without replaying earlier chat images', async (t) => {
+	const cwd = await mkdtemp(join(tmpdir(), 'scribe-image-vault-'));
+	t.after(() => rm(cwd, { recursive: true, force: true }));
+	const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
+	const bytes = Buffer.from(data, 'base64');
+	await mkdir(join(cwd, 'pages'));
+	await Promise.all(['attached.png', 'pages/linked.png', 'tool.png'].map((path) => writeFile(join(cwd, path), bytes)));
+	const app = {
+		vault: { adapter: { getBasePath: () => cwd }, configDir: 'test-config' },
+		metadataCache: { getFirstLinkpathDest: (name: string, source: string) => {
+			assert.equal(name, 'linked.png');
+			assert.equal(source, 'pages/source.md');
+			return { path: 'pages/linked.png' };
+		} },
+	} as unknown as App;
+	const ctx = runContext();
+	ctx.cwd = cwd;
+	ctx.model = { providerId: 'fixture', model: 'vision' };
+	const conversationId = ctx.task.request.conversationId;
+	const file = new File([new Uint8Array(bytes)], 'Screenshot.png', { type: 'image/png' });
+	const clipboard = { files: [], items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] } as unknown as DataTransfer;
+	assert.deepEqual(clipboardImages(clipboard), [file]);
+	const pasted = await saveClipboardImage(app, conversationId, file);
+	assert.match(pasted.path, /^\.scribe-ai\/cache\/context-test\/root\/scribe-ai-image-/u);
+	assert.deepEqual(await readFile(join(cwd, pasted.path)), bytes);
+	Object.assign(ctx.task.request, {
+		instruction: '看图 ![[linked.png|400]]', imageSourcePath: 'pages/source.md',
+		refs: [{ path: 'attached.png', kind: 'file' }, pasted],
+	});
+	ctx.permissions = await createPermissionPolicy(cwd, app.vault.configDir, ctx.task.request.refs, () => true, 'ask');
+	const tool = readTools()[0]!;
+	const executor = createToolExecutor({ all: () => [tool], find: () => tool });
+	const call = { id: 'image-result', name: 'Read', input: { file_path: 'tool.png' } };
+	const asked: string[] = [];
+	const toolContext = { ...ctx, app, approve: async ({ target = '' }: { target?: string }) => { asked.push(target); return false; } };
+	const denied = await executor.execute({ ...call, input: { file_path: 'https://images.example.com/picture' } }, toolContext);
+	assert.equal(denied.isError, true);
+	assert.deepEqual(asked, ['https://images.example.com/picture']);
+	assert.equal(denied.imageRefs, undefined);
+	const result = await executor.execute(call, toolContext);
+	assert.equal(result.isError, false);
+	assert.equal(result.imageRefs?.length, 1);
+	const messages: Message[] = [
+		taskMessage(ctx.task.request), { role: 'assistant', content: '', toolCalls: [call] },
+		{ role: 'tool', content: result.content, toolCallId: call.id, toolName: call.name, imageRefs: result.imageRefs },
+	];
+	const paths = scribeDataPaths(cwd);
+	const store = createConversationStore(paths.conversations);
+	await store.enqueue(conversationId, { id: 'queued-image', request: ctx.task.request });
+	await store.append(conversationId, [
+		{ type: 'start', task: ctx.task, model: ctx.model },
+		{ type: 'messages', taskId: ctx.task.id, messages },
+	]);
+	const saved = await createConversationStore(paths.conversations).load(conversationId);
+	assert.equal(saved.queue?.[0]?.request.refs[1]?.pastedImage, true);
+	assert.deepEqual(saved.runs[0]?.request.refs[1], pasted);
+	assert.deepEqual(saved.runs[0]?.state.messages[2]?.imageRefs, result.imageRefs);
+	ctx.history = [{ ...messages[0]!, content: 'historical' }, { role: 'assistant', content: 'old answer' }];
+	const builder = createContextBuilder({ all: () => [], find: () => undefined }, app);
+	const request = await builder.build(ctx, saved.runs[0].state.messages, 8_000);
+	const bodies: string[] = [];
+	const credentials: CredentialStore = { read: async () => ({ type: 'api_key', key: 'fixture' }),
+		list: async () => [], modify: async (_id, update) => update(undefined), delete: async () => {} };
+	const transport: Transport = {
+		configure() {}, onStatus: () => () => {}, logs: () => [],
+		async fetch(input, init) {
+			bodies.push(await new Request(input, init).text());
+			return new Response('data: {"id":"images","choices":[{"index":0,"delta":{"content":"seen"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+				{ headers: { 'content-type': 'text/event-stream' } });
+		},
+	};
+	const models = createModelService(credentials, transport, {
+		customProviders: () => [{ id: 'fixture', label: 'Fixture', models: ['vision', 'text'],
+			baseUrl: 'https://fixtures.example.com/v1', protocol: 'openai-completions' }],
+		catalogDetails: (_provider, id) => id === 'vision' ? { inputModalities: ['text', 'image'] } : undefined,
+	});
+	assert.equal(models.modelCapabilities?.('fixture', 'vision').imageInput, true);
+	assert.equal(models.modelCapabilities?.('fixture', 'text').imageInput, false);
+	assert.throws(() => models.send({ ...request, model: 'text' }), /未启用图片输入/u);
+	assert.equal(bodies.length, 0);
+	assert.equal((await models.send(request)).content, 'seen');
+	assert.equal(bodies[0]?.split('data:image/png;base64,' + data).length, 5);
+	assert.match(bodies[0] ?? '', /"role":"user","content":"historical"/u);
+	assert.match(bodies[0] ?? '', /"role":"tool"[^}]+image-result/u);
+	assert.doesNotMatch(JSON.stringify(saved), /iVBORw0KGgo|data:image/u);
+});
 
 void test('long history is trimmed without losing the current instruction or tool-result pair', async () => {
 	const history: Message[] = [

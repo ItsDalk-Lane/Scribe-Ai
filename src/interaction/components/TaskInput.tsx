@@ -2,7 +2,10 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SIDE_CHAT_ICON } from '../../constants';
+import { userImageReferences } from '../../orchestration/context/imageAttachments';
 import type { ExecutionMode, SkillInfo, SkillMention, SkillRegistry, TaskTarget } from '../../types';
+import { clipboardImages, saveClipboardImage } from '../composerImages';
+import { isImageFile, MAX_IMAGES } from '../../tools/support/imageData';
 import { composerShortcut, sideChatCommand } from '../composerKeyboard';
 import { parseSlashCommand, readSlashDraft, slashCommandAcceptsArgs, slashCommandAllowed, slashTargetCommand, slashTargetMatches } from '../slashCommands';
 import type { SlashCommand, SlashCommandName, SlashCommandSurface, SlashSubcommand, SlashTargetChoice } from '../slashCommands';
@@ -89,11 +92,13 @@ export default function TaskInput({
 	const inputPlaceholder = placeholder ?? (modeKind === 'goal' ? tr('描述目标，以及怎样算完成…', 'Describe the goal and what counts as done…')
 		: modeKind === 'plan' ? tr('描述要规划的任务…', 'Describe the task to plan…') : text.taskPlaceholder);
 	const provider = modelGroups.find(({ models }) => models.some(({ value }) => value === modelValue))?.label;
+	const vision = modelGroups.flatMap(({ models }) => models).find(({ value }) => value === modelValue)?.vision;
 	const disclosure = provider
 		? text.chatSubmitDisclosure.replace('{provider}', () => provider)
 		: text.chatModelMissing;
 	const locked = busy || disabled;
 	const [checking, setChecking] = useState(false);
+	const [pasting, setPasting] = useState(false);
 	const [commandRunning, setCommandRunning] = useState(false);
 	const [slashMenuOpen, setSlashMenuOpen] = useState(false);
 	const [referenceMenuOpen, setReferenceMenuOpen] = useState(false);
@@ -104,6 +109,9 @@ export default function TaskInput({
 	const runningCommand = useRef(false);
 	const draftRevision = useRef(0);
 	const mounted = useRef(false);
+	const pastePending = useRef(false);
+	const pasteConversation = useRef(conversationId);
+	useLayoutEffect(() => { pasteConversation.current = conversationId; }, [conversationId]);
 	useLayoutEffect(() => { draftRevision.current++; }, [conversationId, instruction, skillMentions, skillScope]);
 	useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 	const busyWithoutQueue = busy && !queueDuringRun;
@@ -125,8 +133,10 @@ export default function TaskInput({
 	const slashUi = useRef<SlashUi | null>(null);
 	const modelTrigger = useRef<HTMLButtonElement>(null);
 	const permissionsTrigger = useRef<HTMLButtonElement>(null);
-	const blocked = disabled || commandRunning
-		|| (slashDraft ? draftLocked : !isSideCommand && (contextLocked || (!isSkillMenu && (modelSaving || !modelValue || !instruction.trim()))));
+	const attachedImages = context.refs.filter(({ kind, lines, path }) => kind !== 'folder' && !lines && isImageFile(path));
+	const blocked = disabled || commandRunning || pasting
+		|| (slashDraft ? draftLocked : !isSideCommand && (contextLocked || (!isSkillMenu && (modelSaving || !modelValue
+			|| (!instruction.trim() && (!attachedImages.length || modeKind === 'goal'))))));
 	const actionLabel = busy ? text.chatStop : isSkillMenu ? skillMenuText().title : isSideCommand ? text.sideChatOpen : slashDraft ? slashText.run : text.submit;
 	const queueHint = busy && queueDuringRun && !slashDraft ? text.queueEnterHint : undefined;
 	const commandDescription = command ? slashText.describe(command.name) : slashDraft ? slashText.label : undefined;
@@ -214,13 +224,17 @@ export default function TaskInput({
 			return;
 		}
 		if (isSkillMenu) { menu.current?.(); onChange('', []); return; }
+		if (!isSideCommand && vision === false && userImageReferences({ instruction, refs: context.refs }).length) {
+			setSkillError(tr('当前模型连接未启用图片输入，请选择支持图片的模型。', 'Choose a model that supports image input.'));
+			return;
+		}
 		pending.current = true;
 		setChecking(true);
 		setSkillError('');
 		try {
 			const scope = skillScope ?? skills.scope(context.refs);
 			const mentions = await prepareSkillMentions({ instruction, skillMentions }, skills, scope);
-			if (mounted.current) await onSubmit(instruction, mentions, scope);
+			if (mounted.current) await onSubmit(instruction.trim() ? instruction : tr('请查看这些图片。', 'Look at these images.'), mentions, scope);
 		} catch (cause) {
 			if (mounted.current) setSkillError(cause instanceof Error ? cause.message : text.chatFailed);
 		} finally {
@@ -265,6 +279,30 @@ export default function TaskInput({
 					aria-description={commandDescription ?? (isSkillMenu ? skillMenuText().title : queueHint ? `${queueHint} ${disclosure}` : disclosure)}
 					rows={3}
 					readOnly={draftLocked}
+					onPaste={(event) => {
+						const files = clipboardImages(event.clipboardData);
+						if (!files.length) return;
+						event.preventDefault();
+						if (!conversationId || referencesDisabled || pending.current || pastePending.current) return;
+						if (files.length + attachedImages.length > MAX_IMAGES) {
+							setSkillError(tr('最多添加 12 张图片。', 'Attach up to 12 images.'));
+							return;
+						}
+						pastePending.current = true;
+						setPasting(true);
+						setSkillError('');
+						void (async () => {
+							for (const file of files) {
+								const ref = await saveClipboardImage(context.app, conversationId, file);
+								if (mounted.current && pasteConversation.current === conversationId) context.onAdd(ref);
+							}
+						})().catch((cause: unknown) => {
+							if (mounted.current && pasteConversation.current === conversationId) setSkillError(cause instanceof Error ? cause.message : text.chatFailed);
+						}).finally(() => {
+							pastePending.current = false;
+							if (mounted.current) setPasting(false);
+						});
+					}}
 					onKeyDown={(event) => {
 						if (event.defaultPrevented) return;
 						const input = event.currentTarget;

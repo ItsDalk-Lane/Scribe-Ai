@@ -2,6 +2,7 @@ import { ButtonComponent, Modal } from 'obsidian';
 import type { App } from 'obsidian';
 import type { Message, ResumePreview } from '../types';
 import { uiText } from './uiText';
+import { tr } from './skills/dialog';
 
 export function confirmResume(app: App, preview: ResumePreview, signal: AbortSignal, labelsOverride: {
 	title?: string; confirm?: string; disclosure?: string; scope?: string;
@@ -40,8 +41,12 @@ export function confirmResume(app: App, preview: ResumePreview, signal: AbortSig
 			attr: { role: 'region', 'aria-label': text.chatResumeContents, tabindex: '0' },
 		});
 		const messages: Message[] = request.system ? [{ role: 'system', content: request.system }, ...request.messages] : request.messages;
-		for (const message of messages) {
-			const data = [message.content, ...(message.toolCalls ?? []).map((call) => `${call.name} ${JSON.stringify(call.input)}`)];
+		for (const [index, message] of messages.entries()) {
+			const images = request.images?.references.get(index - Number(Boolean(request.system))) ?? [];
+			const data = [message.content, ...(message.toolCalls ?? []).map((call) => `${call.name} ${JSON.stringify(call.input)}`),
+				...images.map(({ kind, path }) => tr('图片附件（如可用）', 'Image attachment, if available') + ' · '
+					+ (kind === 'pasted' || kind === 'tool' ? path.split('/').at(-1) : path)),
+			];
 			contents.createEl('strong', { text: message.toolName ?? labels[message.role] });
 			contents.createEl('pre', { cls: 'scribe-chat-pre', text: data.filter(Boolean).join('\n') });
 		}

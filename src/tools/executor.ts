@@ -1,8 +1,11 @@
 import { truncate } from './support/truncate';
+import { Buffer } from 'node:buffer';
+import { scribeDataPaths } from '../orchestration/storage/paths';
+import { MAX_IMAGES, MAX_REQUEST_IMAGE_BYTES, saveCachedImage } from './support/imageData';
 import { boundToolResult } from './support/resultSpill';
 import { toolExecutionInput } from './support/toolInput';
 import { TOOL_NOT_APPROVED } from '../types';
-import type { ToolExecutor, ToolRegistry } from '../types';
+import type { ImageReference, ToolExecutor, ToolRegistry } from '../types';
 
 /** 执行前校验、取得授权，再返回可直接配对的工具结果。 */
 export function createToolExecutor(registry: ToolRegistry, cacheDirectory?: string): ToolExecutor {
@@ -31,7 +34,25 @@ export function createToolExecutor(registry: ToolRegistry, cacheDirectory?: stri
 				signal.throwIfAborted();
 				if (!permissions.canCallTool(tool)) return failure(`未授权使用工具：${call.name}`);
 				const output = await prepared.run();
-				const text = typeof output === 'string' ? output : output.content;
+				let text = typeof output === 'string' ? output : output.content;
+				const imageRefs: ImageReference[] = [];
+				if (typeof output !== 'string' && 'images' in output && output.images?.length && !output.isError) {
+					signal.throwIfAborted();
+					const location = { cacheDirectory: cacheDirectory ?? scribeDataPaths(ctx.cwd).cache,
+						conversationId: ctx.task.request.conversationId, subagentId: ctx.subagentId };
+					let available = MAX_REQUEST_IMAGE_BYTES;
+					for (const image of output.images.slice(0, MAX_IMAGES)) {
+						const size = Buffer.byteLength(image.data, 'base64');
+						if (size > available) break;
+						try {
+							const path = await saveCachedImage(ctx.cwd, location, Buffer.from(image.data, 'base64'), 'image');
+							imageRefs.push({ kind: 'tool', path });
+							available -= size;
+						} catch { /* Keep the text result even if an image cannot be cached. */ }
+						signal.throwIfAborted();
+					}
+					if (imageRefs.length !== output.images.length) text += '\n部分图片过大、格式无效或无法保存，未能作为图片交付。';
+				}
 				// The tool's own cap runs first; the DSH inline budget then handles the surviving text.
 				const limited = truncate(text, tool.maxResultSizeChars ?? 300_000);
 				const content = boundToolResult(limited, tool.name, cacheDirectory ? {
@@ -41,9 +62,10 @@ export function createToolExecutor(registry: ToolRegistry, cacheDirectory?: stri
 					return { callId: call.id, content, isError: output.shellStatus !== 'success', shellStatus: output.shellStatus };
 				}
 				return {
-					callId: call.id, content, isError: typeof output !== 'string' && 'isError' in output && output.isError,
+					callId: call.id, content, isError: typeof output !== 'string' && 'isError' in output && output.isError === true,
 					fileRead: typeof output !== 'string' && 'fileRead' in output && content === text ? output.fileRead : undefined,
 					...(typeof output !== 'string' && 'noteChange' in output && { noteChange: output.noteChange }),
+					...(imageRefs.length && { imageRefs }),
 				};
 			} catch (error) {
 				return failure(signal.aborted ? '任务已停止。' : truncate(error instanceof Error ? error.message : String(error), 2_000));
