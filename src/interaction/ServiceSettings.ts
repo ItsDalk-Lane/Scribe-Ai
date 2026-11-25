@@ -36,8 +36,6 @@ export function renderServiceSettings(panel: HTMLElement, plugin: ScribeAiPlugin
 			}
 			const saved = selection();
 			if (saved && !options.has(saved)) dropdown.addOption(saved, tr('已选模型不可用', 'Saved model unavailable'));
-			if (!options.size) status.setText(tr('请先在「模型」中添加并启用支持此类视频输入的模型。',
-				'Add and enable a model that accepts this video source under Models.'));
 			dropdown.setValue(saved).onChange(async (key) => {
 				if (key && !options.has(key)) return;
 				dropdown.setDisabled(true);
