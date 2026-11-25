@@ -3,8 +3,9 @@ import type ScribeAiPlugin from '../main';
 import { isProviderEnabled, videoModelFor } from '../orchestration/settings/modelAvailability';
 import { chatModelKey } from '../orchestration/settings/thinking';
 import type { VideoSourceKind } from '../types';
-import { isWebSearchProvider, normalizeWebSearchSettings, WEB_SEARCH_PROVIDERS, type WebSearchSettings } from '../tools/external/webSearchSettings';
+import { DEFAULT_SUMMARY_LIMIT, isWebSearchProvider, normalizeWebSearchSettings, WEB_SEARCH_PROVIDERS, type WebSearchSettings } from '../tools/external/webSearchSettings';
 import { renderCredentialLink } from './credentialLink';
+import { mcpSegments } from './mcpSettingsControls';
 import { errorText, tr } from './skills/dialog';
 import { uiText } from './uiText';
 
@@ -143,5 +144,46 @@ export function renderServiceSettings(panel: HTMLElement, plugin: ScribeAiPlugin
 	}
 
 	renderProvider();
+
+	const advanced = panel.createEl('details', { cls: 'scribe-mcp-advanced' });
+	advanced.createEl('summary', { text: tr('高级设置', 'Advanced settings') });
+	const fields = advanced.createDiv();
+	let limit = current().summaryLimit || DEFAULT_SUMMARY_LIMIT;
+	const numberRow = (name: string, max: number, read: () => number, write: (value: number) => void) => {
+		const row = new Setting(fields).setName(name);
+		row.addText((entry) => {
+			entry.inputEl.type = 'number';
+			entry.inputEl.min = '1';
+			entry.inputEl.max = String(max);
+			entry.setValue(String(read()));
+			entry.inputEl.addEventListener('change', () => {
+				const value = Number(entry.inputEl.value);
+				if (!Number.isSafeInteger(value) || value < 1 || value > max) entry.setValue(String(read()));
+				else write(value);
+			});
+		});
+		return row;
+	};
+	numberRow(tr('搜索结果个数', 'Results per search'), 20, () => current().maxResults,
+		(value) => void save((config) => ({ ...config, maxResults: value })));
+	const method = new Setting(fields).setName(tr('压缩方法', 'Summary method'));
+	const limitRow = numberRow(tr('截断长度', 'Truncate length'), 20_000, () => limit, (value) => {
+		limit = value;
+		void save((config) => ({ ...config, summaryLimit: value }));
+	});
+	limitRow.setDesc(tr('每条摘要保留的字符数，超出部分会标注已截断。',
+		'Characters kept in each summary; longer ones are marked as truncated.'));
+	const applyMode = (truncate: boolean) => {
+		setMode(truncate ? 'truncate' : 'none');
+		limitRow.settingEl.style.display = truncate ? '' : 'none';
+	};
+	const setMode = mcpSegments(method.controlEl, tr('压缩方法', 'Summary method'),
+		[['none', tr('不压缩', 'Keep full')], ['truncate', tr('截断', 'Truncate')]] as const, (value) => {
+			const truncate = value === 'truncate';
+			void save((config) => ({ ...config, summaryLimit: truncate ? limit : 0 })).then((saved) => {
+				if (saved && !disposed) applyMode(truncate);
+			});
+		});
+	applyMode(current().summaryLimit > 0);
 	return () => { disposed = true; probe?.abort(); };
 }

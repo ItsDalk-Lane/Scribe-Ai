@@ -2,12 +2,18 @@ import { parseCredential } from '../../communication/credentials';
 import { createNodeFetch } from '../../communication/nodeFetch';
 import type { ScribeSettings, ToolDefinition } from '../../types';
 import { createMcpConnection } from './mcpConnection';
-import { WEB_SEARCH_PROVIDERS, type WebSearchProvider } from './webSearchSettings';
+import { normalizeWebSearchSettings, WEB_SEARCH_PROVIDERS, type WebSearchProvider } from './webSearchSettings';
 
 export const webSearchToolName = 'web_search';
 const maxQueryLength = 128;
-const maxResults = 6;
 const testQuery = 'Obsidian developer documentation plugin API';
+
+/** 在切口留下标记，让模型知道摘要不完整。 */
+function trimSummary(summary: string, limit: number): string {
+	const chars = [...summary];
+	if (!limit || chars.length <= limit) return summary;
+	return `${chars.slice(0, limit).join('')}…（摘要已截断，仅保留前 ${limit} 个字符，完整内容需打开来源链接）`;
+}
 
 const object = (value: unknown): Record<string, unknown> | undefined =>
 	value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -28,7 +34,9 @@ function decodeMcpResults(provider: 'zhipu-coding' | 'exa', content: string): un
 	});
 }
 
-function resultRows(value: unknown, label: string) {
+type Limits = Pick<NonNullable<ScribeSettings['webSearch']>, 'maxResults' | 'summaryLimit'>;
+
+function resultRows(value: unknown, label: string, maxResults: number, summaryLimit: number) {
 	if (!Array.isArray(value)) throw new Error(`${label} 返回了无法识别的搜索结果。`);
 	const results = [];
 	const seen = new Set<string>();
@@ -43,7 +51,7 @@ function resultRows(value: unknown, label: string) {
 		results.push({
 			title: typeof row?.title === 'string' && row.title.trim() ? row.title.trim().slice(0, 250) : parsed.hostname,
 			url: parsed.href,
-			summary: typeof summary === 'string' ? summary.trim().slice(0, 1_000) : '',
+			summary: typeof summary === 'string' ? trimSummary(summary.trim(), summaryLimit) : '',
 		});
 		if (results.length === maxResults) break;
 	}
@@ -74,9 +82,11 @@ export function createWebSearchService(
 		}
 	};
 	const isConfigured = (provider: WebSearchProvider) => provider === 'exa' || Boolean(keyFor(provider));
+	const currentLimits = (): Limits => normalizeWebSearchSettings(settings.webSearch);
 
-	async function search(provider: WebSearchProvider, query: string, signal: AbortSignal, confirm: () => void = () => {}) {
+	async function search(provider: WebSearchProvider, query: string, signal: AbortSignal, limits: Limits, confirm: () => void = () => {}) {
 		const { label, endpoint } = WEB_SEARCH_PROVIDERS[provider];
+		const { maxResults, summaryLimit } = limits;
 		const key = provider === 'exa' ? undefined : keyFor(provider);
 		if (!key && provider !== 'exa') throw new Error(`请在服务设置中关联 ${label} 的 API 密钥。`);
 		signal = AbortSignal.any([signal, AbortSignal.timeout(45_000)]);
@@ -119,7 +129,7 @@ export function createWebSearchService(
 				rows = object(await response.json())?.results;
 			}
 			signal.throwIfAborted();
-			return resultRows(rows, label);
+			return resultRows(rows, label, maxResults, summaryLimit);
 		} catch (error) {
 			if (signal.aborted) throw new Error('网页搜索已取消或超时。');
 			if (!(error instanceof Error)) throw new Error(`${label} 搜索失败。`);
@@ -151,7 +161,7 @@ export function createWebSearchService(
 					|| ref !== credentialId(provider) || key !== keyFor(provider) || !permissions.canSendOutbound()
 					|| !permissions.canCallTool(tool)) throw new Error('搜索配置或聊天权限已变化，请重试。');
 			};
-			const run = async () => JSON.stringify({ source: label, results: await search(provider, text, signal, confirm) });
+			const run = async () => JSON.stringify({ source: label, results: await search(provider, text, signal, currentLimits(), confirm) });
 			if (permissions.executionMode === 'full-access') return { independent: true, run };
 			return { approval: {
 				title: '批准网页搜索', kind: 'web-search', target: label, after: text,
@@ -162,7 +172,7 @@ export function createWebSearchService(
 	return {
 		tools: () => settings.webSearch?.enabled && isConfigured(settings.webSearch.provider) ? [tool] : [],
 		credentialId, isConfigured,
-		test: (provider: WebSearchProvider, signal: AbortSignal) => search(provider, testQuery, signal),
+		test: (provider: WebSearchProvider, signal: AbortSignal) => search(provider, testQuery, signal, currentLimits()),
 	};
 }
 

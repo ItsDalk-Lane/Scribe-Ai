@@ -8,7 +8,7 @@ import { createTask } from '../../orchestration/taskManager';
 import type { ExecutionMode, ToolApproval } from '../../types';
 import { createToolLayer } from '..';
 import type { createMcpConnection } from '../external/mcpConnection';
-import { WEB_SEARCH_PROVIDERS, type WebSearchProvider } from '../external/webSearchSettings';
+import { normalizeWebSearchSettings, WEB_SEARCH_PROVIDERS, type WebSearchProvider } from '../external/webSearchSettings';
 import { createWebSearchService } from '../external/webTools';
 
 const query = 'Obsidian developer documentation plugin API';
@@ -22,6 +22,7 @@ function fixture() {
 	const calls: { destination: string | undefined; auth: string | undefined; args: unknown }[] = [];
 	let aborted = false;
 	let badStatus: number | undefined;
+	let tail = '';
 	let closed = 0;
 	const connect: typeof createMcpConnection = ({ server }) => {
 		const name = server.id === 'zhipu-coding' ? 'web_search_prime' : 'web_search_exa';
@@ -52,7 +53,8 @@ function fixture() {
 			else request.signal.addEventListener('abort', cancel, { once: true });
 		});
 		if (badStatus) return new Response(null, { status: badStatus });
-		const excerpt = request.url === WEB_SEARCH_PROVIDERS.tavily.endpoint ? { content: 'Tavily excerpt' } : { summary: 'DeepSeek excerpt' };
+		const excerpt = request.url === WEB_SEARCH_PROVIDERS.tavily.endpoint
+			? { content: 'Tavily excerpt' + tail } : { summary: 'DeepSeek excerpt' + tail };
 		return Response.json({ results: [{ title: 'Obsidian', url: resultUrl, ...excerpt },
 			{ title: 'invalid', url: 'javascript:void(0)' }, { title: 'duplicate', url: resultUrl }] });
 	};
@@ -60,11 +62,12 @@ function fixture() {
 		{ name: 'test', version: '1' }, fetchSearch, connect);
 	const layer = createToolLayer(undefined, undefined, undefined, service.tools);
 	const select = (provider: WebSearchProvider, enable = true) => {
-		settings.webSearch = normalizeSettings({ webSearch: { enabled: enable, provider, credentialIds: { tavily: 'tavily-key' } } }).webSearch;
+		settings.webSearch = normalizeWebSearchSettings({ enabled: enable, provider, credentialIds: { tavily: 'tavily-key' } });
 	};
 	return {
 		settings, select, calls, layer, service, closed: () => closed,
 		waitForAbort: () => { aborted = true; }, failWith: (status: number) => { badStatus = status; },
+		longSummary: (value: string) => { tail = value; },
 	};
 }
 
@@ -125,10 +128,10 @@ void test('搜索服务按所选服务商发送参数，处理免费服务、协
 		assert.deepEqual(JSON.parse(result.content), { source: WEB_SEARCH_PROVIDERS[provider].label, results: [{ title: 'Obsidian', url: resultUrl, summary }] });
 	}
 	assert.deepEqual(calls, [
-		{ destination: WEB_SEARCH_PROVIDERS.deepseek.endpoint, auth: 'Bearer deepseek-fixture', args: { query, count: 6, need_content: false } },
-		{ destination: WEB_SEARCH_PROVIDERS.exa.endpoint, auth: undefined, args: { query, numResults: 6 } },
+		{ destination: WEB_SEARCH_PROVIDERS.deepseek.endpoint, auth: 'Bearer deepseek-fixture', args: { query, count: 5, need_content: false } },
+		{ destination: WEB_SEARCH_PROVIDERS.exa.endpoint, auth: undefined, args: { query, numResults: 5 } },
 		{ destination: WEB_SEARCH_PROVIDERS.tavily.endpoint, auth: 'Bearer tavily-fixture',
-			args: { query, search_depth: 'basic', max_results: 6, auto_parameters: false } },
+			args: { query, search_depth: 'basic', max_results: 5, auto_parameters: false } },
 	]);
 	failWith(429);
 	const failure = await execute();
@@ -164,4 +167,34 @@ void test('解除搜索密钥链接后重开设置也不会复用模型密钥，
 	settings.webSearch!.credentialIds['zhipu-coding'] = 'zhipu-key';
 	assert.ok(layer.registry.find('web_search'));
 	assert.equal((await service.test('zhipu-coding', signal))[0]?.url, resultUrl);
+});
+
+void test('高级设置控制结果条数与摘要截断，截断处留下标记，关闭压缩时保留全文', async () => {
+	const { settings, select, layer, longSummary, calls } = fixture();
+	select('deepseek');
+	const execute = async () => layer.executor.execute({ id: 'search', name: 'web_search', input: { query } },
+		{ ...await runContext('full-access'), app: {} as App, approve: async () => true });
+
+	settings.webSearch!.maxResults = 2;
+	await execute();
+	assert.deepEqual(calls[0]?.args, { query, count: 2, need_content: false });
+
+	longSummary('x'.repeat(300));
+	settings.webSearch!.summaryLimit = 50;
+	const [first] = (JSON.parse((await execute()).content) as { results: { summary: string }[] }).results;
+	assert.equal(first?.summary, 'DeepSeek excerpt' + 'x'.repeat(34)
+		+ '…（摘要已截断，仅保留前 50 个字符，完整内容需打开来源链接）');
+
+	settings.webSearch!.summaryLimit = 0;
+	const [full] = (JSON.parse((await execute()).content) as { results: { summary: string }[] }).results;
+	assert.equal(full?.summary, 'DeepSeek excerpt' + 'x'.repeat(300));
+});
+
+void test('搜索结果个数与截断长度在旧配置缺失时回落默认值', () => {
+	const legacy = normalizeWebSearchSettings({ enabled: true, provider: 'exa' });
+	assert.equal(legacy.maxResults, 5);
+	assert.equal(legacy.summaryLimit, 2000);
+	const custom = normalizeWebSearchSettings({ enabled: true, provider: 'exa', maxResults: 12, summaryLimit: 0 });
+	assert.equal(custom.maxResults, 12);
+	assert.equal(custom.summaryLimit, 0);
 });
