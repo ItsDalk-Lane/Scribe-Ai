@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { PI_AI_VERSION } from '@earendil-works/pi-ai';
 import { createModelService } from '../../communication/providers';
 import { prefillModelConfiguration } from '../../interaction/modelDraft';
 import type { CredentialStore, ModelOverride, Transport } from '../../types';
@@ -67,7 +68,7 @@ void test('model catalog refresh saves merged data inside the vault and offline 
 	assert.equal(catalog.refresh(), initial);
 	assert.equal((await initial).failed, 0);
 	assert.equal(requests.filter((url) => url === 'https://models.dev/api.json').length, 1);
-	assert.equal(requests.filter((url) => url === 'https://pi.dev/api/models?pi-version=1.5.2').length, 1);
+	assert.equal(requests.filter((url) => url === `https://pi.dev/api/models?pi-version=${PI_AI_VERSION}`).length, 1);
 	const file = await readFile(paths.modelCatalog, 'utf8');
 	assert.ok(!file.includes('test-secret-never-store') && !file.includes('linked-secret'));
 	assert.doesNotMatch(file, /nativeWebSearch/u);
@@ -185,8 +186,11 @@ void test('OpenCode lists refresh before configuration and an unavailable supple
 		inputModalities: ['text', 'image', 'audio', 'video'], reasoning: true, tools: true, reportedThinkingLevels: ['low', 'high'],
 		connectionProtocol: 'google-generative-ai',
 		contextWindow: 1048576, maxTokens: 65536,
+		outputModalities: ['text'], thinkingLevels: ['low', 'medium', 'high', 'xhigh'],
 	});
 	assert.equal(evidence?.connectionProtocol?.source, 'provider');
+	assert.equal(evidence?.reportedThinkingLevels?.source, 'provider');
+	assert.equal(evidence?.thinkingLevels?.source, 'bundled');
 	assert.deepEqual((await store.read('opencode-go'))?.models, ['qwen4-max']);
 
 	settings.communication.credentialIds.opencode = 'saved-key';
