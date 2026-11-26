@@ -1,5 +1,5 @@
 import type { Message, RunEvent, ShellOutputPreview, ToolCall, ToolResult } from '../types';
-import { subagentToolNames } from '../tools/subagentTools';
+import { isSubagentTool } from '../tools/subagentTools';
 import { toolKind } from './toolCardDetails';
 
 export type TextRow = { kind: 'text'; id: string; messageId: string; content: string; draft?: boolean; abandoned?: boolean; final?: true };
@@ -59,7 +59,7 @@ export function applyTimelineChange(items: readonly TimelineItem[], change: Time
 }
 
 function groupKind({ id, call }: ToolRow): string {
-	if (call.name === 'read_skill' || subagentToolNames.has(call.name)) return `single:${id}`;
+	if (call.name === 'read_skill' || isSubagentTool(call.name)) return `single:${id}`;
 	const kind = toolKind(call.name);
 	return kind === 'generic' ? 'tool:' + call.name : kind === 'notebook' ? 'edit' : kind;
 }

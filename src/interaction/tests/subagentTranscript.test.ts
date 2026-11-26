@@ -34,7 +34,9 @@ void test('收到答复即开启新的普通对话回合，保留两稿原文和
 });
 
 void test('等待中的问题立即显示一次，尚未读到的答复保留为用户消息', () => {
-	const draft = run('draft', '核对签到', [ask]);
+	const draft = run('draft', '核对签到', [{ ...ask, toolCalls: [
+		{ id: 'q', name: 'contact_subagent', input: { action: 'ask_parent', message: question.text } },
+	] }]);
 	draft.state.status = 'running';
 	const { turns, pending } = subagentChatTurns({ ...agent, notes: [question, answer], runs: [draft] }, prefix);
 	assert.equal(chatTurnContent(turns[0]!.execution).answer, '已查阅工作单。\n\n【向主聊天提问】统计窗口？');

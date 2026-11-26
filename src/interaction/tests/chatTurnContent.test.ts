@@ -45,20 +45,20 @@ void test('main chat shows each successful dispatch, outgoing contact and submit
 	}
 	call('spawn_agent', {}, identity);
 	received('question', 'question');
-	call('answer_subagent', {}, { target: identity.id, name: identity.name });
+	call('contact_subagent', { action: 'answer' }, { target: identity.id, name: identity.name });
 	call('send_message', { target: identity.id }, '消息已保存。');
 	call('wait_agent', {}, {});
 	received('draft', 'result');
 	call('review_subagent_result', { decision: 'revise' }, { status: 'returned', agent: identity });
-	call('list_agents', {}, [identity]);
+	call('manage_subagents', { action: 'list' }, [identity]);
 	call('list_agents', {}, [identity]);
 	received('revised', 'result');
 	call('review_subagent_result', { decision: 'use' }, { status: 'passed' });
 	call('read_subagent_result', {}, '交稿全文');
-	call('followup_task', { target: identity.id }, identity);
+	call('contact_subagent', { action: 'follow_up', target: identity.id }, identity);
 	call('interrupt_agent', {}, identity);
 	call('close_agent', {}, identity);
-	call('resume_agent', {}, identity);
+	call('manage_subagents', { action: 'reopen' }, identity);
 	call('spawn_agent', {}, '额度用尽', true);
 	messages.push({ role: 'assistant', content: '主聊天的最终汇总' });
 	for (const execution of [restoreExecution(saved(messages)), updateExecution(emptyExecution, { type: 'state', state: state(messages) })]) {
@@ -79,7 +79,7 @@ void test('main chat shows each successful dispatch, outgoing contact and submit
 });
 
 void test('child transcripts keep the outgoing question and the incoming reply once while hiding private tool results', () => {
-	const ask = { name: 'ask_parent', id: 'ask', input: { message: '统计窗口是什么？' } };
+	const ask = { name: 'contact_subagent', id: 'ask', input: { action: 'ask_parent', message: '统计窗口是什么？' } };
 	const wait = { name: 'wait_agent', id: 'wait', input: {} };
 	const spawn = { name: 'spawn_agent', id: 'spawn', input: {} };
 	const conversation = restoreExecution(saved([

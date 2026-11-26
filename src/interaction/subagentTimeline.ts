@@ -1,5 +1,5 @@
 import type { SubagentSnapshot } from '../types';
-import { subagentToolNames } from '../tools/subagentTools';
+import { isSubagentTool, subagentOperation } from '../tools/subagentTools';
 import type { TimelineRow } from './chatTimeline';
 import { toolTextField } from './toolCardDetails';
 
@@ -21,8 +21,9 @@ export function collaborationRows(rows: readonly TimelineRow[], submissions?: Su
 			}
 			return [{ kind: 'collaboration', id: row.id, action: 'completed', agentId, agentName }];
 		}
-		if (row.kind !== 'tool' || !subagentToolNames.has(row.call.name)) return [row];
-		const { name, input } = row.call;
+		if (row.kind !== 'tool' || !isSubagentTool(row.call.name)) return [row];
+		const name = subagentOperation(row.call);
+		const { input } = row.call;
 		if (row.skipped) return [];
 		const error: ChatRow[] = row.result?.isError ? [{ kind: 'notice', id: `error:${row.id}`, code: 'collaboration',
 			tone: 'warning', detail: row.result.content, resolved: row.resolved }] : [];

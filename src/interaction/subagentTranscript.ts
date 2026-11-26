@@ -1,4 +1,5 @@
 import type { Message, SavedRun, SubagentView } from '../types';
+import { subagentOperation } from '../tools/subagentTools';
 import { messageTime } from './chatMetrics';
 import { restoreExecution } from './context';
 import { toolTextField } from './toolCardDetails';
@@ -36,8 +37,9 @@ function childMessages(run: SavedRun, parent: string, prefix: string, outbox: { 
 		let content = message.content;
 		let asked = false;
 		const calls = message.toolCalls.filter((call) => {
-			const question = call.name === 'ask_parent';
-			if (!question && !(call.name === 'send_message' && toolTextField(call.input, 'target') === parent)) return true;
+			const operation = subagentOperation(call);
+			const question = operation === 'ask_parent';
+			if (!question && !(operation === 'send_message' && toolTextField(call.input, 'target') === parent)) return true;
 			const text = toolTextField(call.input, 'message')?.trim();
 			if (!text || results.get(call.id)?.skipped) return true;
 			outbox.push({ kind: question ? 'question' : 'message', text });
