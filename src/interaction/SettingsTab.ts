@@ -1,6 +1,7 @@
-import { App, PluginSettingTab, Setting } from 'obsidian';
+import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
 import type ScribeAiPlugin from '../main';
 import type { ChatLocation } from '../types';
+import { renderDataDirectorySettings } from './dataDirectorySettings';
 import { renderModelSettings } from './ModelSettings';
 import { renderMcpSettings } from './McpSettings';
 import { renderServiceSettings } from './ServiceSettings';
@@ -11,6 +12,7 @@ import { uiText } from './uiText';
 import { tr } from './skills/dialog';
 import { renderSkillSettings } from './skills/skillUi';
 import type { SkillPageHandle } from './skills/skillUi';
+import { watchSettingDescriptions } from './settingsHelp';
 
 type SettingsSection = 'general' | 'personalization' | 'models' | 'services' | 'skills' | 'subagents' | 'mcp' | 'advanced';
 const SECTIONS: readonly SettingsSection[] = ['general', 'personalization', 'models', 'services', 'skills', 'subagents', 'mcp', 'advanced'];
@@ -22,7 +24,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 	private instructionsEditor?: CustomInstructionsEditor;
 	private mcpDispose?: () => void;
 	private servicesDispose?: () => void;
-	private diagnosticsDispose?: () => void;
+	private settingDescriptionsDispose?: () => void;
 
 	constructor(
 		app: App,
@@ -40,25 +42,16 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		this.mcpDispose = undefined;
 		this.servicesDispose?.();
 		this.servicesDispose = undefined;
-		this.diagnosticsDispose?.();
-		this.diagnosticsDispose = undefined;
+		this.settingDescriptionsDispose?.();
 		containerEl.empty();
+		this.settingDescriptionsDispose = watchSettingDescriptions(containerEl);
 
 		const settings = this.plugin.services.settings;
-		const transport = this.plugin.services.communication.transport;
 		const text = uiText();
 		const skillsTab = tr('技能', 'Skills');
 		const servicesTab = tr('服务', 'Services');
 		const subagentsTab = subagentSettingsText().tab;
-		const phaseLabels = {
-			connecting: text.phaseConnecting,
-			streaming: text.phaseStreaming,
-			done: text.phaseDone,
-			error: text.phaseError,
-		} as const;
 		const rendered = new Set<SettingsSection>();
-		let diagnosticsList: HTMLDivElement | undefined;
-
 		const tabList = containerEl.createDiv({
 			cls: 'scribe-settings-tabs',
 			attr: { role: 'tablist', 'aria-label': `${text.generalTab} / ${text.personalizationTab} / ${text.modelsTab} / ${servicesTab} / ${skillsTab} / ${subagentsTab} / MCP / ${text.advancedTab}` },
@@ -140,29 +133,10 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 			}),
 		};
 
-		const renderDiagnostics = () => {
-			if (!diagnosticsList) return;
-			diagnosticsList.empty();
-			const entries = transport.logs().slice(-30).reverse();
-			if (!entries.length) {
-				diagnosticsList.createEl('p', { text: text.noDiagnostics });
-				return;
-			}
-			for (const entry of entries) {
-				const row = diagnosticsList.createDiv({ cls: 'scribe-diagnostic-entry' });
-				const meta = row.createDiv({ cls: 'scribe-diagnostic-meta' });
-				meta.createSpan({ text: new Date(entry.at).toLocaleTimeString() });
-				meta.createSpan({ cls: `scribe-diagnostic-phase is-${entry.phase}`, text: phaseLabels[entry.phase] });
-				if (entry.status) meta.createSpan({ text: String(entry.status) });
-				if (entry.proxy) meta.createSpan({ text: `${text.proxy}: ${entry.proxy}` });
-				const endpoint = [entry.method, `${entry.origin ?? ''}${entry.path ?? ''}`].filter(Boolean).join(' ');
-				if (endpoint) row.createDiv({ cls: 'scribe-diagnostic-endpoint', text: endpoint });
-				if (entry.error) row.createDiv({ cls: 'scribe-diagnostic-error', text: entry.error });
-			}
-		};
-
 		const renderGeneral = () => {
-			new Setting(panels.general)
+			const generalGroup = panels.general.createDiv({ cls: 'scribe-settings-group' });
+			generalGroup.createDiv({ cls: 'scribe-settings-group-title', text: text.generalTab });
+			new Setting(generalGroup)
 				.setName(text.chatLocation)
 				.setDesc(text.chatLocationDescription)
 				.addDropdown((dropdown) =>
@@ -175,6 +149,16 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 							settings.chatLocation = value as ChatLocation;
 							await this.plugin.saveSettings();
 						}),
+				);
+
+			new Setting(generalGroup)
+				.setName(text.confirmChatRemoval)
+				.setDesc(text.confirmChatRemovalDescription)
+				.addToggle((toggle) =>
+					toggle.setValue(settings.confirmChatRemoval).onChange(async (value) => {
+						settings.confirmChatRemoval = value;
+						await this.plugin.saveSettings();
+					}),
 				);
 		};
 
@@ -189,44 +173,26 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 
 		const renderAdvanced = () => {
 			const panel = panels.advanced;
-			new Setting(panel)
+			const network = panel.createDiv({ cls: 'scribe-settings-group' });
+			network.createDiv({ cls: 'scribe-settings-group-title', text: tr('网络连接', 'Network') });
+			let proxyInput: HTMLInputElement;
+			const saveProxy = async (forget = false) => {
+				try {
+					await this.plugin.saveProxy(forget ? settings.communication.proxyUrl : proxyInput.value, forget);
+					proxyInput.value = settings.communication.proxyUrl;
+					new Notice(tr('代理设置已保存。', 'Proxy settings saved.'));
+				} catch {
+					new Notice(tr('无法保存代理设置，请检查地址或 Obsidian 密钥库。', 'Could not save the proxy. Check the address or Obsidian Secret Storage.'));
+				}
+			};
+			new Setting(network)
 				.setName(text.proxyUrl)
 				.setDesc(text.proxyDescription)
-				.addText((input) =>
-					input.setValue(settings.communication.proxyUrl).onChange(async (value) => {
-						settings.communication.proxyUrl = value.trim();
-						transport.configure(settings.communication);
-						await this.plugin.saveSettings();
-					}),
-				);
+				.addText((input) => { proxyInput = input.setValue(settings.communication.proxyUrl).inputEl; })
+				.addButton((button) => button.setButtonText(tr('保存代理', 'Save proxy')).onClick(() => saveProxy()))
+				.addButton((button) => button.setButtonText(tr('解除代理认证关联', 'Unlink proxy credentials')).onClick(() => saveProxy(true)));
 
-			new Setting(panel)
-				.setName(text.spillCleanupDays)
-				.setDesc(text.spillCleanupDaysDescription)
-				.addText((input) => {
-					input.inputEl.type = 'number';
-					input.inputEl.min = '0';
-					input.inputEl.step = '1';
-					input.setValue(String(settings.spillCleanupDays));
-					input.onChange(async (value) => {
-						const days = Number(value);
-						if (!Number.isSafeInteger(days) || days < 0) return;
-						settings.spillCleanupDays = days;
-						await this.plugin.saveSettings();
-					});
-					input.inputEl.addEventListener('blur', () => {
-						const days = Number(input.inputEl.value);
-						if (!Number.isSafeInteger(days) || days < 0) input.setValue(String(settings.spillCleanupDays));
-					});
-				});
-
-			new Setting(panel)
-				.setName(text.diagnostics)
-				.setHeading()
-				.addButton((button) => button.onClick(renderDiagnostics).setButtonText(text.refresh));
-			panel.createEl('p', { cls: 'scribe-settings-description', text: text.diagnosticsDescription });
-			diagnosticsList = panel.createDiv({ cls: 'scribe-diagnostic-list' });
-			renderDiagnostics();
+			renderDataDirectorySettings(panel, this.plugin);
 		};
 
 		const updateSkillWarning = (count: number) => {
@@ -263,13 +229,6 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 				panels[key].hidden = !selected;
 			}
 			if (focus) buttons[section].focus();
-			if (section === 'advanced') {
-				renderDiagnostics();
-				if (!this.diagnosticsDispose) this.diagnosticsDispose = transport.onStatus(renderDiagnostics);
-			} else {
-				this.diagnosticsDispose?.();
-				this.diagnosticsDispose = undefined;
-			}
 		};
 
 		const navigate = (section: SettingsSection, focus = false) => {
@@ -306,8 +265,8 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		this.mcpDispose = undefined;
 		this.servicesDispose?.();
 		this.servicesDispose = undefined;
-		this.diagnosticsDispose?.();
-		this.diagnosticsDispose = undefined;
+		this.settingDescriptionsDispose?.();
+		this.settingDescriptionsDispose = undefined;
 		super.hide();
 	}
 }

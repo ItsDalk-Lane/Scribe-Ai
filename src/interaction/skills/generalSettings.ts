@@ -14,7 +14,9 @@ export function renderSkillPreferences(plugin: ScribeAiPlugin, container: HTMLEl
 		try { await plugin.saveSettings(); orchestration.skills.notify(); }
 		catch (cause) { if (settings.skillSettings === next) settings.skillSettings = old; new Notice(errorText(cause)); }
 	}
-	const roots = container.createDiv();
+	const roots = container.createDiv({ cls: 'scribe-settings-group scribe-skill-shared' });
+	const budgets = container.createDiv({ cls: 'scribe-settings-group' });
+	budgets.createDiv({ cls: 'scribe-settings-group-title', text: tr('技能目录预算', 'Skill catalog budget') });
 	async function add(path: string) {
 		await externalReferenceAt(path, 'folder');
 		const canonical = await orchestration.skills.sharedDirectory(path);
@@ -34,6 +36,7 @@ export function renderSkillPreferences(plugin: ScribeAiPlugin, container: HTMLEl
 	}
 	function drawRoots() {
 		roots.empty();
+		roots.createDiv({ cls: 'scribe-settings-group-title', text: tr('共享技能目录', 'Shared skill folders') });
 		new Setting(roots).setName(tr('从共享文件夹读取技能', 'Read skills from shared folders'))
 			.setDesc(tr('选择存放技能的文件夹。这里的技能可直接引用；创建或安装技能时也可选择保存到这里。', 'Select a folder containing skills. You can use its skills directly and choose it as a destination when creating or installing a skill.'))
 			.addButton((button) => button.setButtonText(tr('添加文件夹', 'Add folder')).onClick(async () => {
@@ -49,7 +52,7 @@ export function renderSkillPreferences(plugin: ScribeAiPlugin, container: HTMLEl
 	}
 	drawRoots();
 	const numberField = (key: 'catalogBudgetPercent' | 'catalogBudgetMaxTokens', name: string, description: string, step: string, valid: (value: number) => boolean) => {
-		new Setting(container).setName(name).setDesc(description).addText((input) => {
+		new Setting(budgets).setName(name).setDesc(description).addText((input) => {
 			input.inputEl.type = 'number';
 			input.inputEl.step = step;
 			input.inputEl.min = key === 'catalogBudgetPercent' ? '0.01' : '1';

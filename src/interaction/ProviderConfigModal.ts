@@ -553,9 +553,9 @@ export class ConfigureProviderModal extends Modal {
 			const name = summary.createSpan({ cls: 'scribe-model-panel-name', text: model });
 			name.addEventListener('pointerenter', () => updateOverflowTitle(name));
 			const evidence = this.modelDetails(model);
+			renderModelCapabilityIcons(summary, evidence, this.text.modelCapabilityLabels, setIcon);
 			const context = evidence.override?.contextWindow ?? evidence.details?.contextWindow ?? evidence.bundled?.contextWindow ?? 0;
 			summary.createSpan({ cls: 'scribe-model-context', text: formatContext(context) });
-			renderModelCapabilityIcons(summary, evidence, this.text.modelCapabilityLabels, setIcon);
 			const meta = row.createSpan({ cls: 'scribe-model-panel-meta' });
 			new ButtonComponent(meta)
 				.setIcon('pencil')

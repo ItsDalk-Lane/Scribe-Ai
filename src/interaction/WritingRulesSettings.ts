@@ -4,8 +4,9 @@ import { readWritingRule, saveWritingRule, WRITING_RULE_FILENAME, WritingRuleCha
 import type { UiText } from './uiText';
 
 export function renderWritingRulesSettings(container: HTMLElement, text: UiText, edit: () => void): void {
-	new Setting(container).setName(text.customInstructions).setHeading();
-	new Setting(container).setName(WRITING_RULE_FILENAME)
+	const group = container.createDiv({ cls: 'scribe-settings-group' });
+	new Setting(group).setName(text.customInstructions).setHeading();
+	new Setting(group).setName(WRITING_RULE_FILENAME)
 		.addButton((button) => button.setButtonText(text.editInstructions).onClick(edit));
 }
 

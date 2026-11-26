@@ -14,6 +14,7 @@ import type ScribeAiPlugin from '../main';
 import type { ModelProviderInfo } from '../types';
 import { confirmAction } from './ConfirmModal';
 import { modelCatalogAddress, modelDetailsForConnection, renderModelCapabilityIcons } from './modelCapabilityIcons';
+import { createHelpIcon } from './settingsHelp';
 import { ScribeModelConfigModal } from './ModelConfigModal';
 import { ConfigureProviderModal } from './ProviderConfigModal';
 import { updateOverflowTitle } from './overflowTitle';
@@ -56,8 +57,9 @@ export function renderModelSettings(
 
 	const header = panel.createDiv({ cls: 'scribe-models-header' });
 	const heading = header.createDiv({ cls: 'scribe-models-heading' });
-	heading.createDiv({ cls: 'scribe-models-title', text: text.modelsTitle });
-	heading.createDiv({ cls: 'scribe-models-description', text: text.modelsDescription });
+	const title = heading.createDiv({ cls: 'scribe-models-title' });
+	title.createSpan({ text: text.modelsTitle });
+	createHelpIcon(title, text.modelsDescription);
 	const actions = header.createDiv({ cls: 'scribe-models-header-actions' });
 	// ButtonComponent 的 setButtonText 会清掉 setIcon 写入的图标，因此图标与文字各占一个子元素
 	const addProv = actions.createEl('button', { cls: 'scribe-icon-text-button', attr: { type: 'button' } });

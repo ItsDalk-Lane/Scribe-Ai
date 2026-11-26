@@ -1,4 +1,4 @@
-import { Notice } from 'obsidian';
+import { Notice, setTooltip } from 'obsidian';
 import type { App } from 'obsidian';
 import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -6,6 +6,7 @@ import type ScribeAiPlugin from '../../main';
 import type { ImportPreview, LibrarySkill } from '../../skills/library/contracts';
 import ChatIcon from '../components/ChatIcon';
 import { updateOverflowTitle } from '../overflowTitle';
+import { HELP_TOOLTIP } from '../settingsHelp';
 import { confirmSkill, errorText, IconButton, openSkillDialog, SaveReview, tr } from './dialog';
 import { LocalImport, openPackageReview, RestoreBuiltins, SystemImport } from './importDialogs';
 import { SkillDetails, SkillIcon, SkillSwitch, sourceLabel } from './skillDetails';
@@ -28,12 +29,6 @@ export function openGithubSkillReview(app: App, preview: ImportPreview, install:
 	return openPackageReview(app, preview, install, signal, sharedDirectories);
 }
 
-function usageNote(skill: LibrarySkill) {
-	if (!skill.usage.count || !skill.usage.lastUsedAt) return '';
-	const hours = Math.max(0, Math.floor((Date.now() - skill.usage.lastUsedAt) / 3600000));
-	const last = hours === 0 ? tr('刚刚', 'just now') : hours < 24 ? tr(hours + ' 小时前', hours + 'h ago') : tr(Math.floor(hours / 24) + ' 天前', Math.floor(hours / 24) + 'd ago');
-	return tr('使用 ' + skill.usage.count + ' 次，上次使用于' + last, 'Used ' + skill.usage.count + ' times, last ' + last);
-}
 function settingsClose(app: App) { (app as App & { setting?: { close(): void } }).setting?.close(); }
 
 export interface SkillPageHandle { beforeLeave: () => Promise<void>; dispose: () => void }
@@ -167,6 +162,7 @@ function SkillPage({ plugin, leave, warning }: { plugin: ScribeAiPlugin; leave: 
 			repair: () => perform(() => repair(current)), restore: () => show('restore'), changed, back: () => setSelected(undefined),
 		}} /> : <>
 			<SkillPreferences plugin={plugin} />
+			<section className="scribe-settings-group scribe-skill-library">
 			<header className="scribe-skill-toolbar"><strong>{tr('技能', 'Skills')} <span className="scribe-skill-meta">{rows.length}</span></strong>
 				<div className="scribe-skill-search"><input type="text" ref={searchInput} aria-label={tr('搜索技能', 'Search skills')} placeholder={tr('搜索技能…', 'Search skills…')}
 					value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
@@ -194,18 +190,17 @@ function SkillPage({ plugin, leave, warning }: { plugin: ScribeAiPlugin; leave: 
 				<button type="button" className="scribe-skill-summary" onClick={() => setSelected(skill.name)}>
 					<span className="scribe-skill-inline"><SkillIcon skill={skill} library={library} />
 						<strong onPointerEnter={({ currentTarget }) => updateOverflowTitle(currentTarget)}>{skill.displayName || skill.name}</strong>
+						<span className="scribe-setting-help" tabIndex={0} role="img" aria-label={skill.error || skill.shortDescription || skill.description}
+							ref={(element) => { if (element) setTooltip(element, skill.error || skill.shortDescription || skill.description, HELP_TOOLTIP); }}><ChatIcon name="circle-help" /></span>
 						<span className="scribe-skill-badge">{sourceLabel(skill.source.kind)}</span>
 					</span>
-					<span className="scribe-skill-description" title={skill.error || undefined}
-						onPointerEnter={skill.error ? undefined : ({ currentTarget }) => updateOverflowTitle(currentTarget)}>
-						{skill.error ? tr('无法加载此技能', 'Could not load this skill') : skill.shortDescription || skill.description}
-					</span>
-					{skill.usage.count > 0 && <small>{usageNote(skill)}</small>}</button>
+				</button>
 				<div className="scribe-skill-inline"><IconButton label={tr('立即使用 ', 'Use now: ') + skill.name} name="play" disabled={busy || Boolean(skill.error) || !skill.userInvocable} onClick={() => void perform(() => launch(skill, 'use'))} />
 					<SkillSwitch skill={skill} busy={busy} onToggle={(enabled) => void toggle(skill, enabled)} /><IconButton label={tr('卸载 ', 'Uninstall ') + skill.name} name="trash-2" disabled={busy} onClick={() => void perform(() => uninstall(skill))} /></div>
 			</div>)}
 			{!loading && !filtered.length && (rows.length ? <p>{tr('没有符合搜索条件的技能。', 'No skills match your search.')}</p> : <div className="scribe-skill-empty"><ChatIcon name="layout-grid" />{tr('暂无技能', 'No skills yet')}</div>)}</section>
 			{stale.length > 0 && <p role="status" className="scribe-skill-meta">{tr('以下技能已超过 90 天未使用', 'Not used in over 90 days')} · {stale.map((s) => s.name).join(', ')}</p>}
+			</section>
 		</>}
 	</div>;
 }

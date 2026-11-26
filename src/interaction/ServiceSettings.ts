@@ -1,4 +1,4 @@
-import { Setting } from 'obsidian';
+import { setIcon, Setting } from 'obsidian';
 import type ScribeAiPlugin from '../main';
 import { isProviderEnabled, videoModelFor } from '../orchestration/settings/modelAvailability';
 import { chatModelKey } from '../orchestration/settings/thinking';
@@ -10,6 +10,9 @@ import { errorText, tr } from './skills/dialog';
 import { uiText } from './uiText';
 
 export function renderServiceSettings(panel: HTMLElement, plugin: ScribeAiPlugin): () => void {
+	const videoGroup = panel.createDiv({ cls: 'scribe-settings-group' });
+	videoGroup.createDiv({ cls: 'scribe-settings-group-title', text: tr('视频解析', 'Video analysis') });
+	const searchGroup = panel.createDiv({ cls: 'scribe-settings-group' });
 	const { settings, webSearch, communication: { models } } = plugin.services;
 	const labels = new Map(models.providers().map(({ id, label }) => [id, label]));
 	const videoOptions = Object.entries(settings.providerModels).flatMap(([providerId, ids]) => {
@@ -25,8 +28,7 @@ export function renderServiceSettings(panel: HTMLElement, plugin: ScribeAiPlugin
 			const choice = videoModelFor(settings, kind);
 			return choice ? chatModelKey(choice.providerId, choice.model) : '';
 		};
-		const status = panel.createDiv({ cls: 'scribe-settings-description', attr: { role: 'status' } });
-		new Setting(panel).setName(name).setDesc(description).addDropdown((dropdown) => {
+		new Setting(videoGroup).setName(name).setDesc(description).addDropdown((dropdown) => {
 			const options = new Map<string, NonNullable<typeof settings.videoModel>>();
 			dropdown.addOption('', tr('使用聊天模型', 'Use chat model'));
 			for (const { choice, input, label } of videoOptions) {
@@ -71,14 +73,14 @@ export function renderServiceSettings(panel: HTMLElement, plugin: ScribeAiPlugin
 		}
 	};
 
-	new Setting(panel).setName(tr('网页搜索', 'Web search')).setHeading();
-	new Setting(panel).setName(tr('启用网页搜索', 'Enable web search'))
+	new Setting(searchGroup).setName(tr('网页搜索', 'Web search')).setHeading();
+	new Setting(searchGroup).setName(tr('启用网页搜索', 'Enable web search'))
 		.setDesc(tr('允许支持工具调用的 Agent 根据任务自行搜索。搜索沿用聊天的权限模式。',
 			'Let agents with tool access search when needed. Searches follow the chat permission mode.'))
 		.addToggle((toggle) => toggle.setValue(current().enabled).onChange(async (enabled) => {
 			if (!await save((value) => ({ ...value, enabled }))) toggle.setValue(current().enabled);
 		}));
-	new Setting(panel).setName(tr('搜索服务商', 'Search provider'))
+	new Setting(searchGroup).setName(tr('搜索服务商', 'Search provider'))
 		.addDropdown((dropdown) => {
 			for (const [id, { label }] of Object.entries(WEB_SEARCH_PROVIDERS)) dropdown.addOption(id, label);
 			dropdown.setValue(current().provider).onChange(async (selected) => {
@@ -93,8 +95,8 @@ export function renderServiceSettings(panel: HTMLElement, plugin: ScribeAiPlugin
 				}
 			});
 		});
-	const details = panel.createDiv();
-	const status = panel.createDiv({ cls: 'scribe-settings-description', attr: { role: 'status' } });
+	const status = searchGroup.createDiv({ cls: 'scribe-settings-description', attr: { role: 'status' } });
+	const details = searchGroup.createDiv();
 
 	function renderProvider() {
 		probe?.abort();
@@ -145,8 +147,13 @@ export function renderServiceSettings(panel: HTMLElement, plugin: ScribeAiPlugin
 
 	renderProvider();
 
-	const advanced = panel.createEl('details', { cls: 'scribe-mcp-advanced' });
-	advanced.createEl('summary', { text: tr('高级设置', 'Advanced settings') });
+	const advanced = searchGroup.createEl('details', { cls: 'scribe-mcp-advanced scribe-search-advanced' });
+	const summary = advanced.createEl('summary');
+	summary.createSpan({ text: tr('高级设置', 'Advanced settings') });
+	const chevron = summary.createSpan({ cls: 'scribe-advanced-chevron', attr: { 'aria-hidden': 'true' } });
+	const syncChevron = () => setIcon(chevron, advanced.open ? 'chevron-up' : 'chevron-down');
+	advanced.addEventListener('toggle', syncChevron);
+	syncChevron();
 	const fields = advanced.createDiv();
 	let limit = current().summaryLimit || DEFAULT_SUMMARY_LIMIT;
 	const numberRow = (name: string, max: number, read: () => number, write: (value: number) => void) => {

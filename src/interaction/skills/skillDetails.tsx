@@ -1,9 +1,10 @@
-import { Component, MarkdownRenderer, Notice } from 'obsidian';
+import { Component, MarkdownRenderer, Notice, setTooltip } from 'obsidian';
 import type { App } from 'obsidian';
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { SKILL_LIBRARY } from '../../skills/library/SkillLibrary';
 import type { LibrarySkill, ManagedSkillLibrary } from '../../skills/library/contracts';
 import ChatIcon from '../components/ChatIcon';
+import { HELP_TOOLTIP } from '../settingsHelp';
 import { IconButton, errorText, tr } from './dialog';
 import { SkillEditorSession } from './editorDraft';
 
@@ -65,7 +66,6 @@ function Metadata({ skill, library, disabled, refresh, flush }: { skill: Library
 	const [original, setOriginal] = useState<LibrarySkill>(skill);
 	const [busy, setBusy] = useState(false);
 	const [message, setMessage] = useState('');
-	const pathsHelp = useId();
 	const paths = edit.paths?.join('\n') ?? '';
 	const pathsChanged = paths !== (original.paths?.join('\n') ?? '');
 	const editedFields = fieldKeys.filter((key) => edit[key] !== original[key]);
@@ -82,12 +82,14 @@ function Metadata({ skill, library, disabled, refresh, flush }: { skill: Library
 				.then(async () => { setOriginal(edit); await refresh(); }).catch((cause: unknown) => setMessage(errorText(cause))).finally(() => setBusy(false));
 		}}>{fieldKeys.map((key) => <label key={key} className="scribe-skill-field">{fields[key]()}
 			<input value={edit[key] ?? ''} disabled={busy || disabled} onChange={(event) => setEdit({ ...edit, [key]: event.currentTarget.value })} /></label>)}
-			<label className="scribe-skill-field">{tr('自动推荐范围', 'Automatic recommendation scope')}
-				<textarea rows={3} cols={28} value={paths} spellCheck={false} aria-describedby={pathsHelp} disabled={busy || disabled}
+			<label className="scribe-skill-field"><span>{tr('自动推荐范围', 'Automatic recommendation scope')}<span className="scribe-setting-help" tabIndex={0} role="img"
+				aria-label={tr('每行一项。可填笔记（会议/本周.md）、文件夹（会议/）或匹配规则（项目/**/*.md）。只影响自动推荐，留空表示不限范围。',
+					'One vault-relative path per line. Use a note (Meetings/Weekly.md), a folder (Meetings/), or a pattern (Projects/**/*.md). Affects automatic recommendations only. Leave blank for any note.')}
+				ref={(element) => { if (element) setTooltip(element, tr('每行一项。可填笔记（会议/本周.md）、文件夹（会议/）或匹配规则（项目/**/*.md）。只影响自动推荐，留空表示不限范围。',
+					'One vault-relative path per line. Use a note (Meetings/Weekly.md), a folder (Meetings/), or a pattern (Projects/**/*.md). Affects automatic recommendations only. Leave blank for any note.'), HELP_TOOLTIP); }}><ChatIcon name="circle-help" /></span></span>
+				<textarea rows={3} cols={28} value={paths} spellCheck={false} disabled={busy || disabled}
 					onChange={(event) => setEdit({ ...edit, paths: event.currentTarget.value.split('\n') })} />
 			</label>
-			<small id={pathsHelp}>{tr('每行一项。可填笔记（会议/本周.md）、文件夹（会议/）或匹配规则（项目/**/*.md）。只影响自动推荐，留空表示不限范围。',
-				'One vault-relative path per line. Use a note (Meetings/Weekly.md), a folder (Meetings/), or a pattern (Projects/**/*.md). Affects automatic recommendations only. Leave blank for any note.')}</small>
 			{message && <p className="scribe-skill-error" role="alert">{message}</p>}
 			<div><button disabled={busy || disabled || !dirty}>{tr('保存设置', 'Save settings')}</button></div></form>
 	</details>;

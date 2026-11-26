@@ -26,16 +26,23 @@ export interface UiText {
 	modelsTab: string;
 	advancedTab: string;
 	diagnostics: string;
-	diagnosticsDescription: string;
-	spillCleanupDays: string;
-	spillCleanupDaysDescription: string;
-	refresh: string;
 	noDiagnostics: string;
-	phaseConnecting: string;
-	phaseStreaming: string;
 	phaseDone: string;
 	phaseError: string;
-	proxy: string;
+	dataDirectory: string;
+	appData: string;
+	appLogs: string;
+	openDirectory: string;
+	logRetentionDays: string;
+	logRetentionDescription: string;
+	spillCleanupDays: string;
+	spillCleanupDaysDescription: string;
+	days: string;
+	keepForever: string;
+	clearCache: string;
+	clearCacheDescription: string;
+	cacheCleared: string;
+	cacheClearFailed: string;
 	modelsTitle: string;
 	modelsDescription: string;
 	addProvider: string;
@@ -214,6 +221,9 @@ export interface UiText {
 	chatArchiveError: string;
 	chatDeleteConversation: string;
 	chatDeleteConfirm: string;
+	chatRemovalNeverAsk: string;
+	confirmChatRemoval: string;
+	confirmChatRemovalDescription: string;
 	chatRenameError: string;
 	chatDeleteError: string;
 	chatNewTab: string;
@@ -455,16 +465,23 @@ const EN: UiText = {
 	modelsTab: 'Models',
 	advancedTab: 'Advanced',
 	diagnostics: 'Diagnostic log',
-	diagnosticsDescription: 'Recent model connections. Secrets and request data are excluded.',
+	dataDirectory: 'Data directory',
+	appData: 'Plugin data',
+	appLogs: 'Diagnostic logs',
+	openDirectory: 'Open folder',
+	logRetentionDays: 'Log retention',
+	logRetentionDescription: 'Log files with no new entries for this long are removed at the next plugin start.',
+	days: 'days',
+	keepForever: 'Keep forever',
+	clearCache: 'Clear cache',
+	clearCacheDescription: 'Delete diagnostic logs and temporary tool output. Conversations, skills and settings are kept.',
+	cacheCleared: 'Logs and temporary files cleared.',
+	cacheClearFailed: 'Could not clear all cache files. Close running tasks and try again.',
 	spillCleanupDays: 'Spill cleanup period (days)',
 	spillCleanupDaysDescription: 'At the next plugin start, remove private spill files older than this many days. Set 0 to disable cleanup.',
-	refresh: 'Refresh',
 	noDiagnostics: 'No connection records yet.',
-	phaseConnecting: 'Connecting',
-	phaseStreaming: 'Streaming',
 	phaseDone: 'Done',
 	phaseError: 'Error',
-	proxy: 'Proxy',
 	modelsTitle: 'Models and providers',
 	modelsDescription: 'Set up the provider and model used by the agent.',
 	addProvider: 'Add a provider',
@@ -518,7 +535,7 @@ const EN: UiText = {
 		'missing-protocol': 'The model’s API protocol is unconfirmed. Select a protocol to connect.',
 		'unsupported-protocol': 'This API protocol is unsupported. Select a different protocol.',
 		'missing-address': 'Enter the base URL for this protocol.',
-		'invalid-address': 'Enter a valid HTTP or HTTPS base URL.',
+		'invalid-address': 'Use HTTPS for a remote service, or HTTP for a loopback address.',
 		'incompatible-address': 'The base URL does not match the API protocol or OpenCode plan. Correct or clear it.',
 	},
 	baseUrlNone: 'Models of this provider use different addresses, so there is no single default.',
@@ -581,7 +598,7 @@ const EN: UiText = {
 	back: 'Back',
 	modelConfiguration: 'Model configuration',
 	defaults: 'Defaults',
-	modelConfigSaveNote: 'Saving updates this model and the agent run limits.',
+	modelConfigSaveNote: 'Saving updates the model connection and token limits.',
 	invalidModelConfiguration: 'Enter a model ID and valid integer limits.',
 	duplicateModelId: 'This model ID is already in the list.',
 	refreshModels: 'Update model data',
@@ -656,6 +673,9 @@ const EN: UiText = {
 	chatArchiveError: 'Could not update the chat’s archive status.',
 	chatDeleteConversation: 'Delete chat',
 	chatDeleteConfirm: 'Permanently delete “{title}” and all of its messages? This cannot be undone. Its side chat will also close and any unsent side-chat draft will be lost.',
+	chatRemovalNeverAsk: 'Don’t ask again',
+	confirmChatRemoval: 'Ask before deleting or archiving chats',
+	confirmChatRemovalDescription: 'Show a confirmation before deleting or archiving a chat. Turn off to delete or archive right away.',
 	chatRenameError: 'Could not save the chat title.',
 	chatDeleteError: 'Could not delete the chat.',
 	chatNewTab: 'New tab',
@@ -693,7 +713,7 @@ const EN: UiText = {
 	chatRetryConnection: 'Retry connection',
 	chatStopped: 'Stopped',
 	chatFailed: 'Task failed',
-	chatRunLimit: 'The task stopped at a limit',
+	chatRunLimit: 'The task stopped early',
 	chatTurn: 'Round',
 	chatYou: 'You',
 	chatAssistant: 'Assistant',
@@ -897,16 +917,23 @@ const ZH_CN: UiText = {
 	modelsTab: '模型',
 	advancedTab: '高级',
 	diagnostics: '诊断日志',
-	diagnosticsDescription: '最近的模型连接记录，不包含密钥和请求内容。',
+	dataDirectory: '数据目录',
+	appData: '应用数据',
+	appLogs: '应用日志',
+	openDirectory: '打开目录',
+	logRetentionDays: '日志保留期',
+	logRetentionDescription: '超过这个天数没有新记录的日志文件，会在插件下次启动时删除。',
+	days: '天',
+	keepForever: '永久保留',
+	clearCache: '清除缓存',
+	clearCacheDescription: '删除诊断日志和工具产生的临时结果。对话、技能和设置不受影响。',
+	cacheCleared: '日志和临时结果已清除。',
+	cacheClearFailed: '部分缓存文件无法删除，请停止正在运行的任务后再试。',
 	spillCleanupDays: '临时结果清理周期（天）',
 	spillCleanupDaysDescription: '插件下次启动时删除早于该天数的私有临时结果文件；设为 0 可禁用清理。',
-	refresh: '刷新',
 	noDiagnostics: '暂无连接记录。',
-	phaseConnecting: '连接中',
-	phaseStreaming: '传输中',
 	phaseDone: '完成',
 	phaseError: '错误',
-	proxy: '代理',
 	modelsTitle: '模型与服务商',
 	modelsDescription: '配置 Agent 使用的服务商和模型。',
 	addProvider: '添加服务商',
@@ -960,7 +987,7 @@ const ZH_CN: UiText = {
 		'missing-protocol': '无法确认此模型的 API 协议，请选择协议。',
 		'unsupported-protocol': '插件尚未接通此 API 协议，请重新选择。',
 		'missing-address': '请填写此协议对应的 Base URL。',
-		'invalid-address': '请输入有效的 HTTP 或 HTTPS Base URL。',
+		'invalid-address': '远端服务请使用 HTTPS，本机回环地址可用 HTTP。',
 		'incompatible-address': 'Base URL 与所选协议或 OpenCode 套餐不匹配，请更正地址或清空以自动选择。',
 	},
 	baseUrlNone: '该服务商各模型地址不一致，没有统一的默认地址。',
@@ -1023,7 +1050,7 @@ const ZH_CN: UiText = {
 	back: '返回',
 	modelConfiguration: '模型配置',
 	defaults: '默认值',
-	modelConfigSaveNote: '保存会更新当前模型和 Agent 运行限制。',
+	modelConfigSaveNote: '保存后更新模型连接和令牌限制。',
 	invalidModelConfiguration: '请输入模型 ID 和有效的整数限制。',
 	duplicateModelId: '列表中已存在这个模型 ID。',
 	refreshModels: '更新模型数据',
@@ -1098,6 +1125,9 @@ const ZH_CN: UiText = {
 	chatArchiveError: '无法更新对话的归档状态。',
 	chatDeleteConversation: '删除对话',
 	chatDeleteConfirm: '永久删除「{title}」及其全部消息？删除后无法撤销。如果开着这段对话的侧聊，它也会关闭，未发送的侧聊草稿将丢失。',
+	chatRemovalNeverAsk: '不再询问',
+	confirmChatRemoval: '删除或归档对话前询问',
+	confirmChatRemovalDescription: '删除或归档对话前先弹窗确认。关闭后点击删除或归档会直接执行。',
 	chatRenameError: '无法保存对话标题。',
 	chatDeleteError: '无法删除对话。',
 	chatNewTab: '新建标签页',
@@ -1135,7 +1165,7 @@ const ZH_CN: UiText = {
 	chatRetryConnection: '重试连接',
 	chatStopped: '已停止',
 	chatFailed: '任务失败',
-	chatRunLimit: '任务已触发运行限制',
+	chatRunLimit: '任务提前结束',
 	chatTurn: '轮次',
 	chatYou: '你',
 	chatAssistant: '助手',
@@ -1339,16 +1369,23 @@ const ZH_TW: UiText = {
 	modelsTab: '模型',
 	advancedTab: '進階',
 	diagnostics: '診斷日誌',
-	diagnosticsDescription: '最近的模型連線記錄，不包含金鑰和請求內容。',
+	dataDirectory: '資料目錄',
+	appData: '應用資料',
+	appLogs: '應用日誌',
+	openDirectory: '開啟目錄',
+	logRetentionDays: '日誌保留期',
+	logRetentionDescription: '超過這個天數沒有新記錄的日誌檔案，會在此外掛下次啟動時刪除。',
+	days: '天',
+	keepForever: '永久保留',
+	clearCache: '清除快取',
+	clearCacheDescription: '刪除診斷日誌和工具產生的暫存結果。對話、技能和設定不受影響。',
+	cacheCleared: '日誌和暫存結果已清除。',
+	cacheClearFailed: '部分快取檔案無法刪除，請停止正在執行的工作後再試。',
 	spillCleanupDays: '暫存結果清理週期（天）',
 	spillCleanupDaysDescription: '此外掛下次啟動時刪除早於該天數的私有暫存結果檔案；設為 0 可停用清理。',
-	refresh: '重新整理',
 	noDiagnostics: '尚無連線記錄。',
-	phaseConnecting: '連線中',
-	phaseStreaming: '傳輸中',
 	phaseDone: '完成',
 	phaseError: '錯誤',
-	proxy: '代理',
 	modelsTitle: '模型與服務商',
 	modelsDescription: '設定 Agent 使用的服務商和模型。',
 	addProvider: '新增服務商',
@@ -1402,7 +1439,7 @@ const ZH_TW: UiText = {
 		'missing-protocol': '無法確認此模型的 API 協定，請選擇協定。',
 		'unsupported-protocol': '外掛尚未接通此 API 協定，請重新選擇。',
 		'missing-address': '請填寫此協定對應的 Base URL。',
-		'invalid-address': '請輸入有效的 HTTP 或 HTTPS Base URL。',
+		'invalid-address': '遠端服務請使用 HTTPS，本機迴環位址可用 HTTP。',
 		'incompatible-address': 'Base URL 與所選協定或 OpenCode 方案不符，請更正網址或清空以自動選擇。',
 	},
 	baseUrlNone: '該服務商各模型地址不一致，沒有統一的預設地址。',
@@ -1465,7 +1502,7 @@ const ZH_TW: UiText = {
 	back: '返回',
 	modelConfiguration: '模型設定',
 	defaults: '預設值',
-	modelConfigSaveNote: '儲存會更新目前模型和 Agent 執行限制。',
+	modelConfigSaveNote: '儲存後更新模型連線和權杖限制。',
 	invalidModelConfiguration: '請輸入模型 ID 和有效的整數限制。',
 	duplicateModelId: '清單中已存在這個模型 ID。',
 	refreshModels: '更新模型資料',
@@ -1540,6 +1577,9 @@ const ZH_TW: UiText = {
 	chatArchiveError: '無法更新對話的封存狀態。',
 	chatDeleteConversation: '刪除對話',
 	chatDeleteConfirm: '永久刪除「{title}」及其全部訊息？刪除後無法復原。如果開著這段對話的側聊，它也會關閉，未送出的側聊草稿將遺失。',
+	chatRemovalNeverAsk: '不再詢問',
+	confirmChatRemoval: '刪除或封存對話前詢問',
+	confirmChatRemovalDescription: '刪除或封存對話前先彈窗確認。關閉後點擊刪除或封存會直接執行。',
 	chatRenameError: '無法儲存對話標題。',
 	chatDeleteError: '無法刪除對話。',
 	chatNewTab: '新建分頁',
@@ -1577,7 +1617,7 @@ const ZH_TW: UiText = {
 	chatRetryConnection: '重試連線',
 	chatStopped: '已停止',
 	chatFailed: '任務失敗',
-	chatRunLimit: '任務已觸發執行限制',
+	chatRunLimit: '任務提前結束',
 	chatTurn: '輪次',
 	chatYou: '你',
 	chatAssistant: '助理',

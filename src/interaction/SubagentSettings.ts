@@ -28,7 +28,10 @@ export function renderSubagentSettings(container: HTMLElement, plugin: ScribeAiP
 			return false;
 		}
 	};
-	new Setting(container).setName(copy.mode).setDesc(copy.modeDescription).addDropdown((dropdown) => {
+	const runGroup = container.createDiv({ cls: 'scribe-settings-group' });
+	runGroup.createDiv({ cls: 'scribe-settings-group-title', text: copy.tab });
+	const roleGroup = container.createDiv({ cls: 'scribe-settings-group' });
+	new Setting(runGroup).setName(copy.mode).setDesc(copy.modeDescription).addDropdown((dropdown) => {
 		for (const mode of ['auto', 'explicit', 'off'] as const) dropdown.addOption(mode, copy[mode]);
 		dropdown.setValue(current().mode).onChange(async (mode) => {
 			if (mode !== 'auto' && mode !== 'explicit' && mode !== 'off') return;
@@ -39,7 +42,7 @@ export function renderSubagentSettings(container: HTMLElement, plugin: ScribeAiP
 	});
 
 	const numberSetting = (key: 'maxConcurrent' | 'maxDepth', label: string, description = '') => {
-		new Setting(container).setName(label).setDesc(description).addText((input) => {
+		new Setting(runGroup).setName(label).setDesc(description).addText((input) => {
 			input.setValue(String(current()[key]));
 			input.inputEl.type = 'number';
 			input.inputEl.min = '1';
@@ -60,8 +63,8 @@ export function renderSubagentSettings(container: HTMLElement, plugin: ScribeAiP
 	numberSetting('maxConcurrent', copy.concurrency);
 	numberSetting('maxDepth', copy.depth, copy.depthDescription);
 
-	const heading = new Setting(container).setName(copy.roles).setHeading();
-	const list = container.createDiv();
+	const heading = new Setting(roleGroup).setName(copy.roles).setHeading();
+	const list = roleGroup.createDiv();
 	const edit = (role?: SubagentRole, custom = false) => openRoleEditor(plugin, text, update, renderRoles, role, custom);
 	const renderRoles = () => {
 		list.empty();

@@ -29,6 +29,20 @@ void test('spill cleanup days default to 30, accept 0 and reject invalid values'
 	assert.equal(normalizeSettings({ spillCleanupDays: 1.5 }).spillCleanupDays, 30);
 });
 
+void test('removal confirmation defaults to on and accepts an explicit off', () => {
+	assert.equal(normalizeSettings({}).confirmChatRemoval, true);
+	assert.equal(normalizeSettings({ confirmChatRemoval: false }).confirmChatRemoval, false);
+	assert.equal(normalizeSettings({ confirmChatRemoval: 'no' as unknown as boolean }).confirmChatRemoval, true);
+});
+
+void test('log retention defaults to 30 days, accepts 0 for permanent and rejects invalid values', () => {
+	assert.equal(normalizeSettings({}).logRetentionDays, 30);
+	assert.equal(normalizeSettings({ logRetentionDays: 0 }).logRetentionDays, 0);
+	assert.equal(normalizeSettings({ logRetentionDays: 90 }).logRetentionDays, 90);
+	assert.equal(normalizeSettings({ logRetentionDays: -5 }).logRetentionDays, 30);
+	assert.equal(normalizeSettings({ logRetentionDays: 1.5 }).logRetentionDays, 30);
+});
+
 function reply(content: string): ModelStream {
 	const raw: AssistantMessage = {
 		role: 'assistant',
