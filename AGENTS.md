@@ -12,11 +12,13 @@
 
 | 改动涉及 | 复用的入口 | 需要对照的场景 |
 | --- | --- | --- |
-| 模型可以调用的工具，包括网页搜索、MCP、技能工具、后台命令 | [工具注册与执行](src/tools/index.ts)、[任务权限](src/orchestration/runContext.ts)、[审批结果](src/runtime/toolCoordinator.ts) | 对照三档权限、模型关闭工具、角色与计划模式的只读限制；网页搜索审批展示查询内容和接收方，发送前复核所选服务。用户或自动审核拒绝后，核对真实副作用、界面和自动续跑。 |
-| 对话、队列、侧聊、目标、计划、子助手 | [任务入口](src/orchestration/sessionController.ts)、[续做判断](src/orchestration/runResume.ts)、[子助手](src/orchestration/subagents/controller.ts)、[关联窗口](src/interaction/conversationViews.ts) | 比较新建、转交、编辑、重新打开和停止，核对模型、资料授权、技能范围和历史摘要。删除主聊天时验证提醒、关联窗口和草稿，并验证另一段聊天不受影响。 |
-| 模型请求、自动审核或摘要 | [模型服务](src/communication/providers.ts)、[辅助请求用量](src/orchestration/meteredService.ts) | 核对实际目的地、模型设置、取消、用量归属。额外请求也要计数，复用已存结果时不新增用量；测试用本地替身。结构化输出和原生搜索逐字段使用当前连接的本地资料和显式覆盖。JSON Schema 只作用于指定请求，原生搜索只随有资格的普通聊天请求发送。原生视频只读取本轮明确选择且仍有权访问的附件，按已接通的协议发送。图片能力按当前连接及显式覆盖解析。只发送当前任务明确附加的图片和可用的工具图片，工具发起的网络图片读取遵循现有审批。剪贴板和工具图片保存到当前库的缓存，历史记录仅保存引用。 |
+| 聊天任务清单 | [任务工具](src/tools/index.ts)、[会话执行](src/orchestration/sessionController.ts)、[清单存储](src/orchestration/storage/chatTasks.ts) | 测试同一聊天主助手与子助手并发认领、依赖、停止释放、重开、分支与编辑。计划中只编排待办，按此执行只解锁已确认计划及其修订链的条目。关闭工具、只读角色和侧聊遵循各自范围。输入框上方的只读清单展示最近一批，按实际认领、完成或停止更新。 |
+| 模型可以调用的工具，包括网页搜索、MCP、技能工具、后台命令 | [工具注册与执行](src/tools/index.ts)、[任务权限](src/orchestration/runContext.ts)、[审批结果](src/runtime/toolCoordinator.ts) | 对照三档权限、模型关闭工具、角色与计划模式的只读限制；网页搜索审批展示查询内容和接收方，发送前复核所选服务。本地 MCP 的启动许可绑定设备和配置，变更后重新确认。受限 Bash 默认库内只读，命令写入和放开沙箱须人工批准。用户或自动审核拒绝后，核对真实副作用、界面和自动续跑。 技能目录查询按有无技能标识返回配套文件名或可用技能清单，重放新旧目录结果时复核当前授权。Obsidian 结构搜索使用核心搜索语法，返回的笔记须通过当前任务的路径和读取范围校验。核心搜索入口不可用时隐藏该工具。 |
+| 对话、队列、侧聊、目标、计划、子助手 | [任务入口](src/orchestration/sessionController.ts)、[续做判断](src/orchestration/runResume.ts)、[子助手](src/orchestration/subagents/controller.ts)、[关联窗口](src/interaction/conversationViews.ts) | 比较新建、转交、编辑、重新打开和停止，核对模型、资料授权、技能范围和历史摘要。排队消息以原接收方为准，换接收方须独立发送并确认，插话与转侧聊复核原接收方。任务和目标按完成、实际进展、错误或用户停止收尾。合并子助手工具时按具体操作校验答疑、续做和向上级提问的权限，保留旧记录的协作动态。删除主聊天时验证提醒、关联窗口和草稿，并验证另一段聊天不受影响。 |
+| 模型请求、自动审核或摘要 | [模型服务](src/communication/providers.ts)、[辅助请求用量](src/orchestration/meteredService.ts) | 核对实际目的地、模型设置、取消、用量归属。额外请求和已经发出但未完成的请求也要计数，复用已存结果时不新增用量。文件编辑自动审核只发送实际变动，测试用本地替身。结构化输出和原生搜索逐字段使用当前连接的本地资料和显式覆盖。JSON Schema 只作用于指定请求，原生搜索只随有资格的普通聊天请求发送。原生视频只读取本轮明确选择且仍有权访问的附件，按已接通的协议发送。图片能力按当前连接及显式覆盖解析。只发送当前任务明确附加的图片和可用的工具图片，工具发起的网络图片读取遵循现有审批。剪贴板和工具图片保存到当前库的缓存，历史记录仅保存引用。 |
+| 聊天媒体展示 | [输入框附件](src/interaction/components/TaskInput.tsx)、[消息 Markdown](src/interaction/components/ChatMarkdown.tsx) | 对照主聊天、侧聊和历史。粘贴图片沿用当前库缓存引用。包括 Markdown 图片在内的远程媒体先显示为链接，经用户点击后才访问源站。复制、导出和模型请求继续读取原文。 |
 | 模型连接协议和地址 | [连接解析](src/communication/modelConnection.ts)、[模型服务](src/communication/providers.ts)、[模型资料](src/orchestration/storage/modelCatalogStore.ts) | 模型设置、测试连接和实际请求使用同一解析结果。模型覆盖优先于服务商覆盖，换协议时只继承匹配的地址。固定 JSON Schema 和视频输入分别按模型和接口读取本地能力资料。区分模型目录、兼容连接、手动配置与未确认，信息不足时禁止发送。OpenCode 只自动使用当前套餐的官方地址。运行中目录改变实际连接时，在下一次发送前拦截。 |
-| 独立视频解析 | [任务入口](src/orchestration/sessionController.ts)、[视频解析](src/orchestration/context/videoAnalysis.ts)、[辅助请求用量](src/orchestration/meteredService.ts) | 本地文件和公开直链分别选择已启用的连接，发送前复核接收地址。只接受链接的连接直接接收 HTTPS 视频地址，允许文件的连接按已验证的规格转码。逐个视频收到服务端输入回执后才交付带时间戳的结果。缺少回执、转码或解析失败时停止主模型请求并说明原因。续做复用已存结果和来源范围，避免重复发送和计费。 |
+| 独立视频解析 | [任务入口](src/orchestration/sessionController.ts)、[视频解析](src/orchestration/context/videoAnalysis.ts)、[辅助请求用量](src/orchestration/meteredService.ts) | 本地文件和公开直链分别选择已启用的连接，发送前复核接收地址。只接受链接的连接直接接收 HTTPS 视频地址，允许文件的连接按已验证的规格转码。逐个视频收到服务端输入回执后才交付带时间戳的结果。缺少回执、转码或解析失败时停止主模型请求并说明原因。收到每个视频的有效回执后保存该项结果。续做复用已存结果、发送方和来源范围，避免重复发送和计费。 |
 | 服务商启停和默认模型 | [模型可用范围](src/orchestration/settings/modelAvailability.ts)、[聊天模型列表](src/interaction/useChatModel.ts)、[任务入口](src/orchestration/sessionController.ts) | 多个服务商可同时启用，聊天默认模型独立选择。停用不删除配置，影响新请求和续做，已经运行的任务继续使用原模型。默认模型不可选时从其余可用模型中选择。 |
 | 新设置、历史记录、技能依赖、模型资料或临时输出 | [存储约定](#插件数据存储)、[技能目录](src/orchestration/context/skills.ts)、[MCP 服务状态](src/tools/external/mcp.ts) | 核对谁写、谁读、其他入口何时看到变更，以及停用、清理和重开后的行为。旧记录缺少新字段时须能安全恢复。模型资料在启动和手动更新时刷新，获取模型只读本地资料。 |
 
@@ -32,9 +34,9 @@
 这条规则适用于所有贡献者和编程智能体。新增或修改功能时，按以下约定保存插件自行管理的运行时数据。
 
 - 插件安装目录下的 `data.json` 只保存 `storageVersion`。`loadData()` 和 `saveData()` 由现有迁移入口使用，负责读旧设置和读写存储版本。
-- 其他需要落盘的数据统一保存到**当前笔记库的 `.scribe-ai/`**。复用现有存储服务和[统一路径入口](src/orchestration/storage/paths.ts)。设置和命令预设放 `settings.json`，本机界面和会话权限状态放 `state.json`，对话相关记录放 `conversations/`，技能放 `skills/`，工具输出缓存放 `cache/`。
+- 其他需要落盘的数据统一保存到**当前笔记库的 `.scribe-ai/`**。复用现有存储服务和[统一路径入口](src/orchestration/storage/paths.ts)。设置和命令预设放 `settings.json`，本机界面和会话权限状态放 `state.json`，对话相关记录放 `conversations/`，诊断日志放 `logs/`（一段对话一个文件，按最后写入时间保留），技能放 `skills/`，工具输出缓存放 `cache/`。
 - 模型资料保存在 `cache/model-catalog.json`。刷新优先使用当前连接的官方目录，官方目录不可用时查 Pi 或内置目录。名单和能力字段独立更新。使用同一地址和协议的公开资料逐字段补齐，记录来源和核对时间。明确的否定与资料缺失分开处理，保留同一连接已保存的更可靠字段。
-- 禁止把新增的插件数据另存到库根目录、插件安装目录、系统临时目录或浏览器与 Obsidian 的本机存储中。旧位置仅用于兼容读取和清理。真正的密钥、登录令牌由 Obsidian 密钥库保管。Obsidian 自己保存的布局，以及用户指定写入的笔记、导出和共享文件，按各自的保存约定处理。
+- 禁止把新增的插件数据另存到库根目录、插件安装目录、系统临时目录或浏览器与 Obsidian 的本机存储中。旧位置仅用于兼容读取和清理。真正的密钥、登录令牌和带认证的代理地址由 Obsidian 密钥库保管。日志须在当前库的私有目录写入和清理。清理缓存时保留仍有引用的粘贴图片。Obsidian 自己保存的布局，以及用户指定写入的笔记、导出和共享文件，按各自的保存约定处理。
 - 存储改动须通过 `npm run lint`，并在测试库核对写入位置和重新打开后的恢复。涉及迁移时，先核对已有数据能在新位置恢复，确认后才清理旧副本。
 
 ## Environment & tooling
