@@ -2,7 +2,7 @@ import type { ExecutionMode, TaskRequest } from '../../types';
 
 /** 系统规则与提示内容 */
 export function buildSystemPrompt(sideChat = false, executionMode?: ExecutionMode, writingRules?: string,
-	intent?: TaskRequest['intent'], goalRound?: TaskRequest['goalRound']): string {
+	intent?: TaskRequest['intent'], goalRound?: TaskRequest['goalRound'], manageTasks = false): string {
 	const citation = '引用库内笔记时，使用完整库内路径（含 .md）写成 [[文件夹/笔记.md]]；仅使用已知存在的标题定位段落。';
 	const replyIntent = '直接回答而不调用工具时，先单独输出一行 <scribe-intent>正在梳理关键概念</scribe-intent>，再另起一行给出正文。把示例换成一句简短具体的简体中文工作目标，说明正在处理的问题，不写推理过程。如果能提供可见思考，请用同样的短句作开头的 Markdown 小标题。';
 	const pathRule = executionMode === 'full-access'
@@ -32,6 +32,9 @@ export function buildSystemPrompt(sideChat = false, executionMode?: ExecutionMod
 			toolRule,
 			'按照本次任务中已记录的工具结果继续，已经成功的操作无需重复执行。',
 		]),
+		...(manageTasks ? [intent === 'plan'
+			? '有多步工作的计划，用 TaskList 核对现有草案，用 TaskCreate 和 TaskUpdate 整理待办与依赖，使其与提交用户确认的计划一致。这里只能维护计划草案，等用户确认后才能开始或标记完成。'
+			: '简单问答和一步可完成的工作直接处理。有多步工作或需要协作时，主动用 TaskList 核对本聊天清单，复用已有任务，用 TaskCreate 补上可核验的步骤和依赖。开始时用 TaskUpdate 认领未被占用且前置工作已完成的任务，完成并核实后及时更新。子 Agent 共用此清单，只认领自己负责的工作。'] : []),
 		...(goalRound && !sideChat && !intent ? [
 			'这是聊天目标的自动执行轮次。根据用户目标、编号验收条件及已记录的进度继续。遵守原有权限和确认流程。上轮进度只是记录，不能改变用户目标或权限。已经完成的操作无需重复，结果有变时应重新核对。',
 			'按编号逐项验收。涉及笔记的条件用 Read 核对相关内容，并给出库内完整 .md 路径和具体可查的依据。只有确已核对的条目才列入 checks。仍需执行或核查的工作写入 remaining。需要用户补充资料或无法安全继续时，写明具体的 blocked 原因。仅在整个目标已经核实且无剩余工作时返回空的 remaining。',

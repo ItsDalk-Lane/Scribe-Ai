@@ -11,10 +11,11 @@ import { createModelCoordinator } from '../../runtime/modelCoordinator';
 import { createRunState } from '../../runtime/runState';
 import { createToolCoordinator } from '../../runtime/toolCoordinator';
 import { createToolRegistry } from '../../tools';
+import { chatTaskTools } from '../../tools/chatTaskTools';
 import { createToolExecutor } from '../../tools/executor';
 import { readTools } from '../../tools/readTools';
 import { writeTools } from '../../tools/writeTools';
-import { subagentTools } from '../../tools/subagentTools';
+import { contactSubagentTool, manageSubagentsTool, subagentTools } from '../../tools/subagentTools';
 import type { ModelRequest, ModelStream, SubagentNote, ToolCall } from '../../types';
 import { createContextBuilder } from '../context/contextBuilder';
 import { createSessionController } from '../sessionController';
@@ -52,14 +53,17 @@ function reply(content: string, calls: ToolCall[] = [], gate?: Promise<void>, si
 }
 
 function incoming(request: ModelRequest): SubagentNote[] {
-	return (request.system ?? '').split('\n').flatMap((line) => {
-		try {
-			const note = JSON.parse(line) as Partial<SubagentNote>;
-			return note?.kind && note.id ? [note as SubagentNote] : [];
-		} catch {
-			return [];
-		}
-	});
+	const note = request.messages.filter(({ role, content }) => role === 'user' && content.startsWith('协作资料，')).at(-1);
+	if (!note) return [];
+	const incoming = JSON.parse(note.content.slice(note.content.indexOf('\n') + 1)) as SubagentNote[];
+	for (const item of incoming) if (item.text) assert.ok(!request.system?.includes(JSON.stringify(item)));
+	return incoming;
+}
+
+function actionOptions(request: ModelRequest, name: string) {
+	const properties = request.tools.find((tool) => tool.name === name)?.inputSchema.properties as
+		{ action?: { enum: string[] } } | undefined;
+	return properties?.action?.enum;
 }
 
 function acceptPending(request: ModelRequest): ToolCall[] {
@@ -80,7 +84,7 @@ void test('a different model service waits for consent and stopping a worker dis
 	const models = createModelCoordinator({
 		stream(request) {
 			if (request.sessionId === rootId) {
-				const calls = request.messages.at(-1)?.role === 'user' ? ['A', 'B'].map((name) => ({
+				const calls = request.messages.filter(({ content }) => !content.startsWith('协作资料，')).at(-1)?.role === 'user' ? ['A', 'B'].map((name) => ({
 					id: `spawn-${name}`, name: 'spawn_agent',
 					input: { message: `Check ${name}`, nickname: name, model: `${foreign.providerId}/${foreign.model}` },
 				})) : acceptPending(request);
@@ -122,6 +126,55 @@ void test('a different model service waits for consent and stopping a worker dis
 	assert.deepEqual(controls.snapshot(rootId).agents.map(({ status }) => status).sort(), ['cancelled', 'done']);
 	const run = await main.result;
 	assert.equal(run.status, 'done', run.error);
+});
+
+void test('a dispatched worker completes the parent checklist item while an explorer can only read it', { timeout: 5_000 }, async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), 'scribe-subagent-checklist-'));
+	const app = { vault: { adapter: { getBasePath: () => directory }, configDir: 'fixture-vault-config', getFileByPath: () => null } } as unknown as App;
+	const registry = createToolRegistry([subagentTools, chatTaskTools]);
+	const store = createConversationStore(join(directory, 'conversations'));
+	let conversationId: string;
+	const models = createModelCoordinator({ stream(request) {
+		if (request.sessionId === conversationId) {
+			if (request.messages.some(({ toolCallId }) => toolCallId === 'created')) return reply('已核对分工。', acceptPending(request));
+			return reply('', [
+				{ id: 'created', name: 'TaskCreate', input: { subject: '核对引用', description: '核对来源' } },
+				...['worker', 'explorer'].map((role) => ({ id: role, name: 'spawn_agent', input: { agent_type: role, message: role } })),
+			]);
+		}
+		const readsOnly = request.messages.some(({ role, content }) => role === 'user' && content === 'explorer');
+		const permitted = request.tools.map(({ name }) => name);
+		assert.ok(permitted.includes('TaskGet'));
+		assert.equal(permitted.includes('TaskUpdate'), !readsOnly);
+		if (request.messages.some(({ toolCallId }) => toolCallId === 'inspect')) return reply('已汇报。');
+		const update = (id: string, input: Record<string, string>) => ({ id, name: 'TaskUpdate', input: { taskId: '1', ...input } });
+		return reply('', [
+			{ id: 'inspect', name: 'TaskGet', input: { taskId: '1' } },
+			...(readsOnly ? [update('forbidden', { subject: '越权改名' })] : [update('claim', { status: 'in_progress' }), update('finish', { status: 'completed' })]),
+		]);
+	} }, createContextBuilder(registry));
+	const tools = createToolCoordinator(app, createToolExecutor(registry));
+	const runtime = { newState: createRunState, createAgent: bindAgent(createAgentLoop(models, tools)), models, tools };
+	const sessions = createSessionController(app, normalizeSettings(model), runtime, store);
+	t.after(async () => { sessions.dispose(); await rm(directory, { recursive: true, force: true }); });
+	conversationId = await sessions.createConversation();
+	const main = await sessions.submit({ conversationId, instruction: '派人核对引用。', refs: [] }).result;
+	assert.equal(main.status, 'done', main.error);
+	const { agents } = sessions.subagents!.snapshot(conversationId);
+	assert.equal(agents.length, 2);
+	for (const agent of agents) {
+		assert.equal(agent.status, 'done');
+		const receipt = (id: string) => agent.runs[0]?.state.messages.find(({ toolCallId }) => toolCallId === id);
+		assert.equal(receipt('inspect')?.isError, false);
+		if (agent.role === 'explorer') assert.match(receipt('forbidden')?.content ?? '', /未授权使用工具/u);
+		else {
+			const claim = JSON.parse(receipt('claim')?.content ?? '{}') as { owner?: string; status?: string };
+			assert.deepEqual([claim.owner, claim.status], [agent.id, 'in_progress']);
+			assert.equal(receipt('finish')?.isError, false);
+		}
+	}
+	const item = await store.chatTasks.get(conversationId, '1');
+	assert.deepEqual([item.subject, item.status], ['核对引用', 'completed']);
 });
 
 void test('the child limit is shared and separate approvals cannot overwrite each other on the same file', { timeout: 5_000 }, async (t) => {
@@ -190,7 +243,7 @@ void test('the child limit is shared and separate approvals cannot overwrite eac
 	assert.match(rootRun.messages.find((message) => message.toolCallId === 'spawn-three')?.content ?? '', /已达上限/);
 });
 
-for (const variant of ['accept', 'repeated-error', 'revision-limit'] as const) {
+for (const variant of ['accept', 'repeated-error', 'continued-revision'] as const) {
 	void test(`the main agent coordinates and reviews parallel work (${variant})`, { timeout: 8_000 }, async (t) => {
 		const directory = await mkdtemp(join(tmpdir(), 'scribe-coordinated-work-'));
 		const app = { vault: { adapter: { getBasePath: () => directory }, configDir: 'fixture-vault-config', getFileByPath: () => null } } as unknown as App;
@@ -223,12 +276,14 @@ for (const variant of ['accept', 'repeated-error', 'revision-limit'] as const) {
 		const corrected = '修订稿：分段相加为 165 分钟，原台账登记 170 分钟。';
 		const service = createModelCoordinator({ stream(request) {
 			const { messages } = request;
-			const last = messages.at(-1);
+			const last = messages.filter(({ content }) => !content.startsWith('协作资料，')).at(-1);
 			const notes = incoming(request);
 			if (request.sessionId !== conversationId) {
+				assert.deepEqual(actionOptions(request, contactSubagentTool), ['send', 'follow_up', 'ask_parent', 'answer']);
+				assert.ok(!request.tools.some(({ name }) => name === 'spawn_agent'));
 				assert.ok(request.system?.includes('用原始刷卡记录核算出勤。'));
 				const revisionRequest = messages.filter(({ role, content }) => role === 'user' && content.startsWith(revision)).at(-1);
-				if (revisionRequest) return reply(variant === 'accept' ? corrected
+				if (revisionRequest) return reply(variant === 'accept' || (variant === 'continued-revision' && revisionRequest.content.endsWith('3')) ? corrected
 					: `仍有错误的修订稿 ${revisionRequest.content.at(-1)}。`, [], waited, request.signal);
 				if (messages.some(({ toolCallId }) => toolCallId === 'question')) {
 					assert.ok(messages.some(({ content }) => content.includes('09:00–12:00'))
@@ -237,11 +292,15 @@ for (const variant of ['accept', 'repeated-error', 'revision-limit'] as const) {
 					return reply(draft);
 				}
 				startChild();
-				return reply('', [{ id: 'question', name: 'ask_parent', input: { message: '统计窗口是哪段时间？' } }], independentDone, request.signal);
+				return reply('', [{ id: 'question', name: contactSubagentTool,
+					input: { action: 'ask_parent', message: '统计窗口是哪段时间？' } }], independentDone, request.signal);
 			}
 			if (last?.role === 'user' && last.content === 'What is 2 plus 2?') return reply('4');
 			if (last?.role === 'user') {
-				assert.ok(request.tools.some(({ name }) => name === 'spawn_agent'));
+				assert.deepEqual(request.tools.map(({ name }) => name).filter((name) => name !== 'fixture_budget').sort(),
+					[contactSubagentTool, manageSubagentsTool, 'read_subagent_result', 'review_subagent_result', 'spawn_agent', 'wait_agent'].sort());
+				assert.deepEqual(actionOptions(request, contactSubagentTool), ['send', 'follow_up', 'answer']);
+				assert.deepEqual(actionOptions(request, manageSubagentsTool), ['list', 'interrupt', 'close', 'reopen']);
 				return tool('spawn', 'spawn_agent', {
 					nickname: '出勤审核', system_instructions: '用原始刷卡记录核算出勤。', message: '核对出勤。仅有原台账 170 分钟。',
 				});
@@ -250,7 +309,14 @@ for (const variant of ['accept', 'repeated-error', 'revision-limit'] as const) {
 			const question = notes.find(({ kind }) => kind === 'question');
 			if (question) {
 				actions.push('answer');
-				return tool('answer', 'answer_subagent', { question_id: question.id, message: '正确窗口为 09:00–12:00。' });
+				assert.deepEqual(actionOptions(request, contactSubagentTool), ['answer']);
+				assert.deepEqual(actionOptions(request, manageSubagentsTool), ['list']);
+				return reply('', [
+					{ id: 'listed', name: manageSubagentsTool, input: { action: 'list' } },
+					{ id: 'answer', name: contactSubagentTool,
+						input: { action: 'answer', question_id: question.id, message: '正确窗口为 09:00–12:00。' } },
+					{ id: 'blocked-close', name: manageSubagentsTool, input: { action: 'close', target: question.from } },
+				]);
 			}
 			const result = notes.find(({ kind, review }) => kind === 'result' && review?.status === 'pending');
 			if (result) {
@@ -264,7 +330,7 @@ for (const variant of ['accept', 'repeated-error', 'revision-limit'] as const) {
 				nextRevision = true;
 				return tool(`revise-${correctAgain}`, 'review_subagent_result', {
 					result_id: result.id, decision: 'revise', reason: '未按实际时段重算。',
-					error_key: variant === 'revision-limit' ? `issue-${correctAgain}` : 'attendance-total',
+					error_key: variant === 'continued-revision' ? `issue-${correctAgain}` : 'attendance-total',
 					message: revision + '修订序号 ' + correctAgain,
 				});
 			}
@@ -307,8 +373,10 @@ for (const variant of ['accept', 'repeated-error', 'revision-limit'] as const) {
 		assert.equal(state.status, 'done', state.error);
 		assert.deepEqual(actions, ['budget', 'answer', 'draft']);
 		assert.match(state.messages.at(-1)?.content ?? '', /正式答复/);
+		assert.match(state.messages.find(({ toolCallId }) => toolCallId === 'listed')?.content ?? '', /出勤审核/u);
+		assert.equal(state.messages.find(({ toolCallId }) => toolCallId === 'blocked-close')?.skipped, true);
 		const markers = state.messages.filter(({ subagentActivity }) => subagentActivity?.kind === 'result');
-		assert.equal(markers.length, variant === 'revision-limit' ? 3 : 2);
+		assert.equal(markers.length, variant === 'continued-revision' ? 4 : 2);
 		const [first, second] = markers;
 		assert.ok(first?.subagentActivity && second?.subagentActivity);
 		assert.equal(first.subagentActivity.agentId, second.subagentActivity.agentId);
@@ -324,12 +392,12 @@ for (const variant of ['accept', 'repeated-error', 'revision-limit'] as const) {
 		assert.equal(submissions?.[first.subagentActivity.id]?.text, draft);
 		assert.deepEqual(submissions?.[first.subagentActivity.id]?.review, { status: 'returned', reason: '未按实际时段重算。' });
 		const finalSubmission = submissions?.[markers.at(-1)!.subagentActivity!.id];
-		if (variant === 'accept') {
+		if (variant !== 'repeated-error') {
 			assert.equal(finalSubmission?.review?.status, 'passed');
 			assert.equal(finalSubmission?.text, corrected);
 		} else {
 			assert.equal(finalSubmission?.review?.status, 'blocked');
-			assert.match(finalSubmission.review.reason ?? '', variant === 'repeated-error' ? /同一个关键错误/u : /返工两次/u);
+			assert.match(finalSubmission.review.reason ?? '', /同一个关键错误/u);
 			assert.match(state.messages.at(-1)?.content ?? '', /签到未通过/u);
 		}
 		assert.equal(saved.runs.at(-1)?.subagentReport, undefined);

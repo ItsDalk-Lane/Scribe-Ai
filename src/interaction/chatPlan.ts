@@ -33,9 +33,10 @@ export function submittedPlan(run?: SavedRun): ChatPlan | undefined {
 	return { request: { ...run.request, refs }, taskId: run.state.taskId, title, markdown, criteria };
 }
 
-export function approvedPlanRequest({ request, markdown }: ChatPlan): TaskRequest {
+export function approvedPlanRequest({ request, markdown, taskId }: ChatPlan): TaskRequest {
 	return {
 		conversationId: request.conversationId,
+		approvedPlanTaskId: taskId,
 		instruction: `${request.instruction}\n\n用户已确认以下计划，请在确认的范围内执行，遵守现有审批，并逐项核对验收条件。\n\n${markdown}`,
 		imageLinkEnd: request.instruction.length,
 		...(request.imageSourcePath && { imageSourcePath: request.imageSourcePath }),
