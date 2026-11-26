@@ -1,5 +1,6 @@
 import { parse as parseToml } from 'smol-toml';
 import { extractMcpArgumentSecrets } from './mcpArgumentSecrets';
+import { isSecureServiceUrl } from '../../communication/serviceAddress';
 
 export type McpTransport = 'stdio' | 'http' | 'sse';
 
@@ -116,15 +117,16 @@ function headerMap(value: unknown, isReference: boolean): Record<string, string>
 	return entries && Object.fromEntries(entries);
 }
 
-function validUrl(value: unknown): string {
+function validUrl(value: unknown, allowLegacyHttp = false): string {
 	try {
 		const raw = settingText(value, '服务器地址');
 		if (!raw) throw new Error();
 		const url = new URL(raw);
 		if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) throw new Error();
+		if (!allowLegacyHttp && !isSecureServiceUrl(url)) throw new Error();
 		return url.href;
 	} catch {
-		throw new Error('请输入有效的 HTTP 或 HTTPS 服务地址。');
+		throw new Error('请输入有效的 HTTPS 地址。本机回环地址允许 HTTP。');
 	}
 }
 
@@ -145,7 +147,7 @@ function secretIds(entries: Record<string, string> | undefined, allowEmpty = fal
 }
 
 /** 按当前连接类型取设置，保留准确的参数和密钥值。 */
-export function validateMcpDraft(draft: McpServerDraft): McpServerDraft {
+export function validateMcpDraft(draft: McpServerDraft, allowLegacyHttp = false): McpServerDraft {
 	const name = settingText(draft.name, '服务器名称');
 	if (!name) throw new Error('请输入服务器名称。');
 	const { type } = draft;
@@ -183,8 +185,8 @@ export function validateMcpDraft(draft: McpServerDraft): McpServerDraft {
 			} } : {}),
 		};
 	}
-	const url = validUrl(draft.url);
-	const privateUrl = draft.secrets?.url === undefined ? undefined : validUrl(draft.secrets.url);
+	const url = validUrl(draft.url, allowLegacyHttp);
+	const privateUrl = draft.secrets?.url === undefined ? undefined : validUrl(draft.secrets.url, allowLegacyHttp);
 	if (privateUrl && privateUrl.split('?')[0] !== url.split('?')[0]) throw new Error('私密地址与服务器地址不一致。');
 	const headers = headerMap(draft.secrets?.headers, false);
 	const envHeaders = headerMap(draft.envHeaders, true);
@@ -218,8 +220,13 @@ export function normalizeMcpSettings(raw: unknown): McpSettings {
 		const record = object(entry);
 		if (typeof record?.id !== 'string' || !record.id || seen.has(record.id)) return [];
 		try {
-			const { secrets: _secrets, ...server } = validateMcpDraft({ ...record, secrets: undefined } as McpServerDraft);
-			if (server.url) server.url = server.url.split('?')[0];
+			const { secrets: _secrets, ...server } = validateMcpDraft({ ...record, secrets: undefined } as McpServerDraft, true);
+			if (server.url) {
+				const address = new URL(server.url);
+				address.search = '';
+				server.url = address.href;
+				if (!isSecureServiceUrl(address)) server.enabled = false;
+			}
 			seen.add(server.id);
 			return [server];
 		} catch { return []; }

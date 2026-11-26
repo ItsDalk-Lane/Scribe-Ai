@@ -1,8 +1,8 @@
-import { App, Menu, Modal, Notice, setIcon } from 'obsidian';
+import { App, DropdownComponent, Menu, Modal, Notice, setIcon } from 'obsidian';
 import type ScribeAiPlugin from '../main';
-import { exportMcpJson, previewMcpImport, type McpSettings } from '../tools/external/mcpConfig';
+import { exportMcpJson, previewMcpImport } from '../tools/external/mcpConfig';
 import { McpSettingsEditor } from './McpSettingsEditor';
-import { mcpButton, mcpSearch, mcpSegments, mcpStatus, mcpSwitch, mcpTypeLabels, type McpServerView, type McpSettingsManager } from './mcpSettingsControls';
+import { mcpButton, mcpSearch, mcpSegments, mcpStatus, mcpSwitch, mcpTypeLabels, setMcpEnabled, type McpServerView, type McpSettingsManager } from './mcpSettingsControls';
 import { errorText, tr } from './skills/dialog';
 
 type StateFilter = 'all' | 'enabled' | 'disabled';
@@ -16,9 +16,7 @@ export function renderMcpSettings(panel: HTMLElement, plugin: ScribeAiPlugin): (
 	panel.addClass('scribe-mcp-panel');
 	const page = panel.createDiv({ cls: 'scribe-mcp-page' });
 	const heading = page.createDiv({ cls: 'scribe-mcp-header' });
-	const headingText = heading.createDiv({ cls: 'scribe-mcp-heading' });
-	headingText.createEl('h3', { text: tr('MCP 服务器', 'MCP servers') });
-	headingText.createEl('p', { text: tr('连接外部服务，让聊天可以使用它们提供的工具。', 'Connect external services to use their tools in chat.'), cls: 'scribe-mcp-description' });
+	const loading = heading.createDiv({ cls: 'scribe-mcp-loading' });
 	const add = mcpButton(heading, tr('添加服务器', 'Add server'), 'scribe-icon-text-button', 'plus');
 	setIcon(add.createSpan({ cls: 'scribe-icon-text-icon', attr: { 'aria-hidden': 'true' } }), 'chevron-down');
 	add.setAttribute('aria-haspopup', 'menu');
@@ -55,18 +53,20 @@ export function renderMcpSettings(panel: HTMLElement, plugin: ScribeAiPlugin): (
 		showMenu(add, menu);
 	});
 
-	const loading = page.createDiv({ cls: 'scribe-mcp-loading' });
-	const loadingLabel = loading.createDiv();
-	loadingLabel.createSpan({ text: tr('MCP 工具加载', 'MCP tool loading') });
-	const thresholdLabel = loadingLabel.createEl('label', { cls: 'scribe-mcp-threshold', text: tr('字符阈值', 'Character threshold') });
+	const thresholdLabel = loading.createEl('label', { cls: 'scribe-mcp-threshold', text: tr('字符阈值', 'Character threshold') });
 	const threshold = thresholdLabel.createEl('input', { attr: { type: 'number', min: '1', step: '1' } });
 	const readThreshold = () => {
 		const value = threshold.valueAsNumber;
 		return Number.isSafeInteger(value) && value > 0 ? value : manager.settings().threshold;
 	};
-	const setLoading = mcpSegments<McpSettings['loading']>(loading, tr('MCP 工具加载', 'MCP tool loading'), [
-		['auto', tr('自动', 'Auto')], ['deferred', tr('按需加载', 'On demand')], ['direct', tr('直接加载', 'Direct')],
-	], (mode) => void act(() => manager.setLoading(mode, readThreshold())));
+	const loadingMode = new DropdownComponent(loading)
+		.addOption('auto', tr('自动', 'Auto'))
+		.addOption('deferred', tr('按需加载', 'On demand'))
+		.addOption('direct', tr('直接加载', 'Direct'));
+	loadingMode.selectEl.setAttribute('aria-label', tr('MCP 工具加载', 'MCP tool loading'));
+	loadingMode.onChange((mode) => {
+		if (mode === 'auto' || mode === 'deferred' || mode === 'direct') void act(() => manager.setLoading(mode, readThreshold()));
+	});
 	const commitThreshold = () => {
 		const current = manager.settings();
 		const value = readThreshold();
@@ -113,7 +113,7 @@ export function renderMcpSettings(panel: HTMLElement, plugin: ScribeAiPlugin): (
 		const filtered = views.filter(({ server }) => (state === 'all' || (state === 'enabled') === server.enabled)
 			&& (typeFilter.size === 0 || typeFilter.has(server.type))
 			&& [server.name, server.description, ...(server.tags ?? [])].filter(Boolean).join(' ').toLowerCase().includes(query));
-		setLoading(current.loading);
+		loadingMode.setValue(current.loading);
 		thresholdLabel.hidden = current.loading !== 'auto';
 		if (threshold.ownerDocument.activeElement !== threshold) threshold.value = String(current.threshold);
 		setState(state);
@@ -175,7 +175,7 @@ export function renderMcpSettings(panel: HTMLElement, plugin: ScribeAiPlugin): (
 			row.createSpan({ cls: 'scribe-mcp-type', text: mcpTypeLabels[server.type] });
 			const toggle = mcpSwitch(row, tr(`启用 ${server.name}`, `Enable ${server.name}`), server.enabled, (enabled) => {
 				toggle.disabled = true;
-				void act(() => manager.setEnabled(server.id, enabled));
+				void act(() => setMcpEnabled(plugin.app, manager, server, enabled));
 			});
 			toggle.dataset.mcpAction = 'enable';
 			if (focusedServer === server.id && focusedAction) row.querySelector<HTMLElement>(`[data-mcp-action="${focusedAction}"]`)?.focus({ preventScroll: true });

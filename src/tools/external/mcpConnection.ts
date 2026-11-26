@@ -9,6 +9,7 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontex
 import { ErrorCode, McpError, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { createNodeFetch } from '../../communication/nodeFetch';
+import { isSecureServiceUrl } from '../../communication/serviceAddress';
 import type { ImageToolOutput } from '../../types';
 import { decodeToolImage, MAX_IMAGES, MAX_REQUEST_IMAGE_BYTES } from '../support/imageData';
 import { mcpArgumentSecretValues, restoreMcpArgumentSecrets } from './mcpArgumentSecrets';
@@ -210,10 +211,11 @@ export function createMcpConnection(options: ConnectionOptions): McpConnection {
 	};
 
 	function remoteTransport(url: URL, provider?: OAuthClientProvider, onChallenge?: (challenge: McpOAuthChallenge) => void) {
-		if (url.username || url.password || !['http:', 'https:'].includes(url.protocol)) throw new Error('请输入有效的 HTTP 或 HTTPS 地址。');
+		if (url.username || url.password || !isSecureServiceUrl(url)) throw new Error('远程 MCP 服务需要 HTTPS。本机回环地址允许 HTTP。');
 		const fetchMcp: typeof fetch = async (input, init) => {
 			const request = new Request(input, init);
 			const target = new URL(request.url);
+			if (!isSecureServiceUrl(target)) throw new Error('远程 MCP 请求需要 HTTPS。');
 			const message = rpcBody(init?.body);
 			const accept = request.headers.get('Accept') ?? '';
 			const mcpRequest = target.origin === url.origin && (Boolean(message) || accept.includes('text/event-stream') || request.method === 'DELETE');

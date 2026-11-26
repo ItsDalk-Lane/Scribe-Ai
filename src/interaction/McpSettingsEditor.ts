@@ -2,7 +2,7 @@ import { App, Modal, setIcon } from 'obsidian';
 import type { McpServerDraft } from '../tools/external/mcpConfig';
 import { confirmAction } from './ConfirmModal';
 import { renderMcpServerForm } from './mcpServerForm';
-import { mcpButton, mcpSearch, mcpSegments, mcpStatus, mcpSwitch, type McpServerView, type McpSettingsManager } from './mcpSettingsControls';
+import { mcpButton, mcpSearch, mcpSegments, mcpStatus, mcpSwitch, setMcpEnabled, type McpServerView, type McpSettingsManager } from './mcpSettingsControls';
 import { errorText, tr } from './skills/dialog';
 
 type EditorSection = 'general' | 'tools';
@@ -34,7 +34,7 @@ export class McpSettingsEditor extends Modal {
 		const enableSetting = heading.createDiv({ cls: 'scribe-mcp-tool-switch' });
 		const enabledLabel = tr('启用服务器', 'Enable server');
 		enableSetting.createSpan({ text: enabledLabel });
-		let enabled = original.enabled;
+		let enabled = manager.snapshot().find(({ server }) => server.id === serverId)?.server.enabled ?? false;
 		const enabledSwitch = mcpSwitch(enableSetting, enabledLabel, enabled, (checked) => {
 			enabled = checked;
 			enabledSwitch.setAttribute('aria-checked', String(enabled));
@@ -185,7 +185,12 @@ export class McpSettingsEditor extends Modal {
 			const draft = readDraft();
 			const buttons = actions.querySelectorAll('button');
 			buttons.forEach((button) => { button.disabled = true; });
-			try { await manager.save(draft); this.close(); }
+			try {
+				await manager.save(draft);
+				const saved = manager.snapshot().find(({ server }) => serverId ? server.id === serverId : server.name === draft.name)?.server;
+				if (saved && enabled && !saved.enabled) await setMcpEnabled(this.app, manager, saved, true);
+				this.close();
+			}
 			finally { buttons.forEach((button) => { button.disabled = false; }); }
 		});
 		save.addEventListener('click', doSave);

@@ -43,8 +43,9 @@ export function readMcpSecrets(storage: McpSecretStorage, refs: McpSecrets): Mcp
 }
 
 export function storeMcpSecrets(storage: McpSecretStorage, serverName: string, values: McpSecrets, staged: Set<string>): McpSecrets {
-	const base = serverName.normalize('NFKD').replace(/\p{Mark}/gu, '').toLowerCase()
+	const label = serverName.normalize('NFKD').replace(/\p{Mark}/gu, '').toLowerCase()
 		.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'mcp';
+	const base = label.startsWith('scribe-ai-mcp-grant-') ? 'server-' + label : label;
 	const existing = new Set(storage.listSecrets?.());
 	let next = 1;
 	return mapSecrets(values, (value) => {

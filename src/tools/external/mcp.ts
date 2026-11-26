@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { extractMcpArgumentSecrets, restoreMcpArgumentSecrets } from './mcpArgumentSecrets';
+import { hostname } from 'node:os';
+import { isSecureServiceUrl } from '../../communication/serviceAddress';
+import { extractMcpArgumentSecrets, restoreMcpArgumentSecrets, validateMcpArgumentRefs } from './mcpArgumentSecrets';
 import { createMcpConnection, McpAuthRequiredError } from './mcpConnection';
 import type { McpConnection, McpToolInfo } from './mcpConnection';
 import { validateMcpDraft } from './mcpConfig';
@@ -124,6 +126,15 @@ export function createMcpManager(options: ManagerOptions) {
 		return { ...validated, secrets: { ...validated.secrets, args: secrets.args } };
 	}
 
+	const localGrantKey = (id: string) => 'scribe-ai-mcp-grant-' + mcpDigest([hostname(), options.cwd, id]);
+	const localGrant = (server: McpServerDraft) => mcpDigest([server.command, server.cwd,
+		restoreMcpArgumentSecrets(server.args, server.secrets?.args), server.envVars, server.secretRefs, server.secrets?.env]);
+	function localApproved(server: McpServer): boolean {
+		if (server.type !== 'stdio') return true;
+		try { return options.storage.getSecret(localGrantKey(server.id)) === localGrant(connectionDraft(server.id)); }
+		catch { return false; }
+	}
+
 	function release(id: string) {
 		const entry = entries.get(id);
 		if (!entry) return;
@@ -167,8 +178,14 @@ export function createMcpManager(options: ManagerOptions) {
 		const key = oauthKey(server);
 		entry.pending = Promise.resolve().then(async () => {
 			if (!current()) return;
+			const draft = connectionDraft(id);
+			if (draft.type === 'stdio' && options.storage.getSecret(localGrantKey(id)) !== localGrant(draft)) {
+				entry.state = 'error';
+				entry.error = '请在设置中核对命令，并在此设备启用这项本地服务。';
+				return;
+			}
 			const connection = connect({
-				server: connectionDraft(id), cwd: options.cwd, clientInfo: options.clientInfo, signal: controller.signal,
+				server: draft, cwd: options.cwd, clientInfo: options.clientInfo, signal: controller.signal,
 				oauth: {
 					read: () => current() ? options.storage.getSecret(key) ?? undefined : undefined,
 					write: (value) => { if (current()) options.storage.setSecret(key, value); },
@@ -219,6 +236,10 @@ export function createMcpManager(options: ManagerOptions) {
 		reconcile();
 		for (const server of old) {
 			const updated = lookup(server.id);
+			if (server.type === 'stdio' && server.enabled && (!updated?.enabled || updated.type !== 'stdio')) {
+				const key = localGrantKey(server.id);
+				if (options.storage.getSecret(key)) erase(key);
+			}
 			if (server.secretKey && server.secretKey !== updated?.secretKey && !secretInUse(server.secretKey)) erase(server.secretKey);
 			if (!updated || oauthKey(server) !== oauthKey(updated)) erase(oauthKey(server));
 		}
@@ -255,10 +276,11 @@ export function createMcpManager(options: ManagerOptions) {
 					const legacy = old?.secretKey;
 					const secretKey = legacy && options.storage.getSecret(legacy) === JSON.stringify(inline) ? legacy : undefined;
 					const refs = mergeMcpSecrets(selected, secretKey ? undefined : storeMcpSecrets(options.storage, value.name, inline, staged));
-					restoreMcpArgumentSecrets(args, refs.args);
+					validateMcpArgumentRefs(args, refs.args);
 					const secretRefs = Object.values(refs).some((item) => item !== undefined) ? refs : undefined;
 					const server = { ...value, id: old?.id ?? randomUUID(), args, secretKey, secretRefs,
-						enabled: old?.enabled ?? false, ...(old && { enabledTools: old.enabledTools, disabledTools: old.disabledTools }) };
+						enabled: old?.enabled === true && value.enabled, ...(old && { enabledTools: old.enabledTools, disabledTools: old.disabledTools }) };
+					if (server.type === 'stdio' && old && connectionKey(server) !== connectionKey(old)) server.enabled = false;
 					if (old) servers[servers.findIndex((s) => s.id === old.id)] = server;
 					else servers.push(server);
 				}
@@ -303,14 +325,33 @@ export function createMcpManager(options: ManagerOptions) {
 				const entry = entries.get(server.id);
 				const catalog = entry?.catalog;
 				const raw = options.storage.getSecret(oauthKey(server));
-				return { server, state: server.enabled ? entry?.state ?? 'connecting' : 'disabled',
+				const enabled = server.enabled && localApproved(server);
+				return { server: enabled === server.enabled ? server : { ...server, enabled }, state: enabled ? entry?.state ?? 'connecting' : 'disabled',
 					error: entry?.error, version: catalog?.version, signedIn: Boolean(raw && /"access_token"\s*:/.test(raw)),
 					tools: catalog ? catalog.tools.map((tool) => ({ ...tool, enabled: toolEnabled(server, tool.name) })) : [] };
 			});
 		},
 		save: (value: McpServerDraft, reconnect = false) => saveMany([value], false, reconnect ? value.id : undefined),
 		import: (values: McpServerDraft[]) => saveMany(values, true),
-		setEnabled: (id: string, enabled: boolean) => update(id, (server) => ({ ...server, enabled })),
+		async migrateLegacyArguments() {
+			const legacy = settings().servers.filter((server) => server.type === 'stdio' && extractMcpArgumentSecrets(server.args).secrets);
+			if (legacy.length) await saveMany(legacy.map((server) => draft(server.id)!), false);
+		},
+		setEnabled: (id: string, enabled: boolean, expected?: McpServer) => serialize(async () => {
+			const server = lookup(id);
+			if (!server || (expected && connectionKey(server) !== connectionKey(expected))) throw new Error('服务器配置已变化，请重新核对。');
+			if (enabled && server.url && !isSecureServiceUrl(new URL(server.url))) throw new Error('远程 MCP 服务需要 HTTPS。请先修改服务器地址。');
+			const key = localGrantKey(id);
+			const granting = enabled && server.type === 'stdio';
+			const previous = granting && options.storage.getSecret(key);
+			if (granting) options.storage.setSecret(key, localGrant(connectionDraft(id)));
+			try {
+				await commit({ ...settings(), servers: settings().servers.map((item) => item.id === id ? { ...item, enabled } : item) }, id);
+			} catch (error) {
+				if (granting) options.storage.setSecret(key, previous || '');
+				throw error;
+			}
+		}),
 		remove: (id: string) => serialize(() => commit({ ...settings(), servers: settings().servers.filter((s) => s.id !== id) })),
 		reorder: (fromId: string, toId: string) => serialize(async () => {
 			const servers = [...settings().servers];

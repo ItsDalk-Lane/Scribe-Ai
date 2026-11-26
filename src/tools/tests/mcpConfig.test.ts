@@ -78,6 +78,58 @@ void test('旧 MCP 自动批准配置不会继续生效，也不影响服务器�
 	assert.equal('autoApproved' in servers[0], false);
 });
 
+void test('restored local MCP commands require this device to approve the saved configuration', async (t) => {
+	const original = { id: 'local', name: 'Local', type: 'stdio', command: 'fixture', args: ['one'], enabled: true };
+	let settings = normalizeMcpSettings({ servers: [original] });
+	const started: string[][] = [];
+	const keychain = new Map<string, string>();
+	const create = (keys: Map<string, string>) => {
+		const manager = createMcpManager({
+			settings: () => settings, commit: (next) => { settings = next; return Promise.resolve(); },
+			storage: { getSecret: (key) => keys.get(key) || null, setSecret: (key, value) => { keys.set(key, value); } },
+			cwd: process.cwd(), clientInfo: { name: 'fixture', version: '1' }, openBrowser: () => assert.fail(),
+			connect: ({ server }) => { started.push(server.args ?? []); throw new Error('fixture ended'); },
+		});
+		t.after(() => manager.dispose());
+		return manager;
+	};
+	const signal = new AbortController().signal;
+	const manager = create(keychain);
+	manager.reconcile();
+	await manager.waitForServer('local', signal);
+	await manager.retry('local');
+	assert.equal(manager.snapshot()[0]?.server.enabled, false);
+	assert.deepEqual(started, []);
+	await manager.setEnabled('local', true, settings.servers[0]);
+	await manager.waitForServer('local', signal);
+	assert.deepEqual(started, [['one']]);
+	manager.dispose();
+
+	const freshDevice = create(new Map());
+	await freshDevice.retry('local');
+	assert.deepEqual(started, [['one']]);
+	const reopened = create(keychain);
+	await reopened.waitForServer('local', signal);
+	assert.deepEqual(started, [['one'], ['one']]);
+	const previous = settings.servers[0]!;
+	settings = normalizeMcpSettings({ servers: [{ ...previous, args: ['two'] }] });
+	await reopened.retry('local');
+	await assert.rejects(reopened.setEnabled('local', true, previous), /已变化/);
+	assert.deepEqual(started, [['one'], ['one']]);
+	await reopened.setEnabled('local', true, settings.servers[0]);
+	await reopened.waitForServer('local', signal);
+	assert.deepEqual(started.at(-1), ['two']);
+	settings = normalizeMcpSettings({ servers: [{ ...original, args: ['https://bridge.test/mcp?k=migration-fixture'] }] });
+	await reopened.migrateLegacyArguments();
+	assert.doesNotMatch(JSON.stringify(settings), /migration-fixture/);
+	const saved = settings.servers[0]!;
+	const ref = saved.secretRefs?.args?.[0];
+	assert.ok(ref);
+	assert.deepEqual(restoreMcpArgumentSecrets(saved.args, { 0: keychain.get(ref)! }), ['https://bridge.test/mcp?k=migration-fixture']);
+	assert.equal(saved.enabled, false);
+	assert.equal(started.length, 3);
+});
+
 void test('MCP 配置校验拦截无效认证，且提示不会回显密钥', () => {
 	const secret = 'PRIVATE-VALUE';
 	const mixed = previewMcpImport(JSON.stringify({ example: {
@@ -87,6 +139,9 @@ void test('MCP 配置校验拦截无效认证，且提示不会回显密钥', ()
 	assert.doesNotMatch(mixed.issues.join(' '), /PRIVATE-VALUE/);
 	assert.throws(() => validateMcpDraft({ id: '', name: 'bad', type: 'http', enabled: false,
 		url: 'https://user:PRIVATE-VALUE@example.test/mcp' }), /有效/);
+	const insecure = { id: 'old', name: 'Old', type: 'sse', enabled: true, url: 'http://remote.example.test/mcp' } as const;
+	assert.throws(() => validateMcpDraft(insecure), /HTTPS/);
+	assert.equal(normalizeMcpSettings({ servers: [insecure] }).servers[0]?.enabled, false);
 	assert.deepEqual(normalizeMcpSettings({ loading: 'unknown', threshold: -4, servers: [{ id: 'invalid' }] }), {
 		loading: 'auto', threshold: 4000, servers: [],
 	});
@@ -119,7 +174,8 @@ void test('导入的 MCP 密钥使用服务器名称存入钥匙串，连接时�
 		'web-reader': { url: 'https://example.test/mcp?token=query-fixture',
 			headers: { 'X-Api-Key': 'header-fixture', Authorization: 'Bearer bearer-fixture' } },
 		'Local Dev': { command: 'fixture', env: { API_KEY: 'environment-fixture', EMPTY: '' },
-			args: ['--token', 'separate-fixture', '--api-key=inline-fixture', '--header', 'Authorization: Bearer cli-header-fixture', 'keep'] },
+			args: ['--token', 'separate-fixture', '--api-key=inline-fixture', '--header', 'Authorization: Bearer cli-header-fixture', 'keep',
+				'--', 'https://bridge.test/mcp?token=positional-fixture'] },
 	} }), ['Legacy']);
 	assert.deepEqual(issues, []);
 	await manager.import(drafts);
@@ -130,7 +186,8 @@ void test('导入的 MCP 密钥使用服务器名称存入钥匙串，连接时�
 	assert.equal(secrets.get('web-reader-2'), '');
 	assert.equal(web.secretRefs?.headers?.['x-api-key'], 'web-reader-3');
 	assert.equal(local.secretRefs?.env?.API_KEY, 'local-dev');
-	assert.doesNotMatch(JSON.stringify(settings) + exportMcpJson(settings.servers), /query-fixture|header-fixture|bearer-fixture|environment-fixture|separate-fixture|inline-fixture|legacy-token/);
+	assert.doesNotMatch(JSON.stringify(settings) + exportMcpJson(drafts) + exportMcpJson(settings.servers),
+		/query-fixture|header-fixture|bearer-fixture|environment-fixture|separate-fixture|inline-fixture|legacy-token|positional-fixture/);
 	const signal = new AbortController().signal;
 	for (const id of ['legacy', local.id, web.id]) {
 		await manager.setEnabled(id, true);
@@ -139,7 +196,8 @@ void test('导入的 MCP 密钥使用服务器名称存入钥匙串，连接时�
 	assert.equal(connections[0]?.secrets?.bearerToken, 'legacy-token');
 	assert.deepEqual(connections[1]?.secrets?.env, { API_KEY: 'environment-fixture', EMPTY: '' });
 	assert.deepEqual(restoreMcpArgumentSecrets(connections[1]?.args, connections[1]?.secrets?.args),
-		['--token', 'separate-fixture', '--api-key=inline-fixture', '--header', 'Authorization: Bearer cli-header-fixture', 'keep']);
+		['--token', 'separate-fixture', '--api-key=inline-fixture', '--header', 'Authorization: Bearer cli-header-fixture', 'keep',
+			'--', 'https://bridge.test/mcp?token=positional-fixture']);
 	assert.equal(connections[2]?.secrets?.url, 'https://example.test/mcp?token=query-fixture');
 	assert.equal(connections[2]?.secrets?.headers?.['x-api-key'], 'header-fixture');
 	assert.equal(connections[2]?.secrets?.bearerToken, 'bearer-fixture');

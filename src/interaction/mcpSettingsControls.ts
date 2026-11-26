@@ -1,4 +1,7 @@
 import { setIcon } from 'obsidian';
+import type { App } from 'obsidian';
+import { extractMcpArgumentSecrets } from '../tools/external/mcpArgumentSecrets';
+import { confirmAction } from './ConfirmModal';
 import type ScribeAiPlugin from '../main';
 import { tr } from './skills/dialog';
 
@@ -6,6 +9,22 @@ export type McpSettingsManager = NonNullable<ScribeAiPlugin['services']['tools']
 export type McpServerView = ReturnType<McpSettingsManager['snapshot']>[number];
 
 export const mcpTypeLabels = { stdio: 'STDIO', http: 'HTTP', sse: 'SSE' } as const;
+
+export async function setMcpEnabled(app: App, manager: McpSettingsManager, server: McpServerView['server'], enabled: boolean) {
+	if (enabled && server.type === 'stdio') {
+		const preview = JSON.stringify({ command: server.command, args: extractMcpArgumentSecrets(server.args).args ?? [],
+			cwd: server.cwd ?? '.', envVars: server.envVars, secretRefs: server.secretRefs }, null, 2)
+			.replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, (char) => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0'));
+		const approved = await new Promise<boolean>((answer) => confirmAction(app, {
+			title: tr('允许在此设备启动本地服务', 'Allow this local service on this device'),
+			message: tr('此程序将以你的账户权限运行。已批准的配置会在以后打开此库时自动启动。', 'This program will run with your account permissions. The approved configuration will start when this vault opens.') + '\n' + preview,
+			confirmText: tr('允许启动', 'Allow startup'), cancelText: tr('取消', 'Cancel'),
+			onConfirm: () => answer(true), onClose: () => answer(false),
+		}));
+		if (!approved) return;
+	}
+	await manager.setEnabled(server.id, enabled, server);
+}
 
 export function mcpButton(parent: HTMLElement, label: string, cls = '', icon?: string): HTMLButtonElement {
 	const button = parent.createEl('button', { cls, attr: { type: 'button' } });
