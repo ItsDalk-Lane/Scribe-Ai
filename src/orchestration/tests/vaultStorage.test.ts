@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Plugin } from 'obsidian';
 import { setProviderEnabled } from '../settings/modelAvailability';
+import { createConversationStore } from '../storage/conversationStore';
 import { initializePluginStorage } from '../storage/pluginStorage';
 import { executionModeKey } from '../storage/localState';
 import { readStoredJson, storageStat, writeStoredJson } from '../storage/jsonFile';
@@ -106,7 +107,8 @@ void test('聊天与配置验证后才收起旧版本，重启保留新位置上
 	t.after(() => rm(root, { recursive: true, force: true }));
 	const legacy = join(root, 'vault-config', 'plugins', 'scribe-ai', 'conversations');
 	await mkdir(legacy, { recursive: true });
-	const files = { 'chat.jsonl': '原会话\n', 'chat.title': '旧标题', 'last-opened': 'chat\n' };
+	const body = JSON.stringify({ type: 'queue-add', message: { id: 'q', request: { conversationId: 'chat', instruction: '原会话', refs: [] } } }) + '\n';
+	const files = { 'chat.jsonl': body, 'chat.title': '旧标题', 'last-opened': 'chat\n' };
 	for (const [name, content] of Object.entries(files)) {
 		const file = join(legacy, name);
 		await writeFile(file, content);
@@ -158,4 +160,38 @@ void test('旧记录在确认后又被修改时保留原件和已搬副本', asy
 	await assert.rejects(next.complete(unexpected, unexpected), /旧数据在迁移期间发生变化/u);
 	assert.equal(await readFile(file, 'utf8'), '另一处补写的聊天\n');
 	assert.equal(await readFile(join(first.paths.conversations, 'chat.jsonl'), 'utf8'), '旧聊天\n');
+});
+
+void test('迁移第二次启动遇到正文缺失或损坏保留旧件，用户主动删除或编辑后可以收尾', async (t) => {
+	for (const scenario of ['missing', 'damaged', 'truncated', 'removed', 'edited'] as const) {
+		const root = await realpath(await mkdtemp(join(tmpdir(), 'scribe-migration-body-')));
+		t.after(() => rm(root, { recursive: true, force: true }));
+		const legacy = join(root, 'legacy');
+		const data = { model: 'old' };
+		const log = 'chat.jsonl';
+		const prior = createConversationStore(legacy);
+		const task = { id: 'first', request: { conversationId: 'chat', instruction: 'first', refs: [] },
+			status: 'pending' as const, createdAt: 1, updatedAt: 1 };
+		const entry = { type: 'start' as const, task, model: { providerId: 'test', model: 'test' } };
+		await prior.append('chat', [entry, { type: 'finish', taskId: task.id, status: 'done', turn: 1 }]);
+		const first = await openVaultStorage(root, legacy, data);
+		await writeStoredJson(first.paths.settings, data);
+		await first.stageMigration(() => false);
+		const fresh = join(first.paths.conversations, log);
+		const current = createConversationStore(first.paths.conversations, first.recordConversationChange);
+		if (scenario === 'missing') await rm(fresh);
+		if (scenario === 'damaged') await writeFile(fresh, 'broken\n');
+		if (scenario === 'truncated') await writeFile(fresh, JSON.stringify(entry) + '\n');
+		if (scenario === 'removed') await current.delete('chat');
+		if (scenario === 'edited') await current.replaceFrom('chat', task.id, [{ ...entry, task: { ...task, id: 'revised' } }]);
+		const next = await openVaultStorage(root, legacy, data);
+		const finish = next.complete(() => Promise.resolve(), () => Promise.resolve());
+		if (scenario === 'removed' || scenario === 'edited') {
+			await finish;
+			assert.equal(await storageStat(legacy), undefined);
+		} else {
+			await assert.rejects(finish);
+			assert.ok(await storageStat(join(legacy, log)));
+		}
+	}
 });
