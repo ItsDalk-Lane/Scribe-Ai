@@ -595,9 +595,7 @@ void test('PowerShell background results and their read state survive reopening'
 	const reopened = reopen();
 	t.after(() => reopened.dispose());
 	assert.deepEqual(reopened.list(owner), []);
-	assert.deepEqual(await reopened.listSaved(owner), [{
-		id: started.id, name: 'PowerShell', status: 'failed', content: job.content, unread: true,
-	}]);
+	assert.deepEqual(await reopened.listSaved(owner), [{ ...job, unread: true }]);
 	assert.deepEqual(reopened.listUnread(owner), [{ id: started.id, status: 'failed' }]);
 	await reopened.markRead(owner, started.id);
 	assert.deepEqual(reopened.listUnread(owner), []);
