@@ -144,7 +144,7 @@ function runShell(
 			cleanup();
 			const { stdout, stderr } = output.text();
 			const retry = shellStatus === 'failed' && sandboxArgs
-				? '命令在受限环境中运行。确需访问库外或联网时，先核对已执行的步骤，再用 elevated 申请所需权限。'
+				? '命令在受限环境中运行。先核对已执行的步骤，修改库内笔记优先使用文件工具；确需命令写入时用 vault_write 申请，访问库外或联网用 elevated 申请。'
 				: '';
 			const content = [summary, retry, stdout, stderr && `错误输出\n${stderr}`].filter(Boolean).join('\n');
 			resolve({ content, shellStatus, exitCode });
@@ -196,7 +196,7 @@ function shellTool(name: ShellName, jobs?: ShellJobs): ToolDefinition {
 			const binary = process.platform === 'win32' && name === 'PowerShell' ? executable(name) : undefined;
 			// Windows 只在 PowerShell 7 安装目录和系统自带的 5.1 目录中查找。
 			const interpreter = binary ? (basename(binary) === 'pwsh.exe' ? 'PowerShell 7' : 'Windows PowerShell 5.1') : name;
-			return `使用真实的 ${interpreter} 执行无需交互输入的本地命令。普通命令优先在笔记库内离线运行，访问库外或联网需要额外权限。文件操作优先使用专用文件工具。`;
+			return `使用真实的 ${interpreter} 执行无需交互输入的本地命令。受限命令默认在笔记库内只读离线运行。命令写入、访问库外或联网需要额外权限。笔记编辑优先使用专用文件工具。`;
 		},
 		isReadOnly: false,
 		isAvailable: () => executable(name) !== undefined,
@@ -206,6 +206,7 @@ function shellTool(name: ShellName, jobs?: ShellJobs): ToolDefinition {
 			properties: {
 				command: { type: 'string', description: '要执行的完整命令。' },
 				cwd: { type: 'string', description: '工作目录。省略或留空时使用当前笔记库。' },
+				vault_write: { type: 'boolean', description: '需要在离线沙箱内用命令写入普通笔记库文件时设为 true，由用户确认。' },
 				elevated: { type: 'boolean', description: '仅在命令需要访问库外文件或联网时设为 true，以申请本次命令的额外权限。' },
 				timeout: {
 					type: 'integer', minimum: 1, maximum: MAX_TIMEOUT,
@@ -220,11 +221,12 @@ function shellTool(name: ShellName, jobs?: ShellJobs): ToolDefinition {
 			additionalProperties: false,
 		},
 		async prepare(input, ctx) {
-			const args = fileToolInput(input, ['command', 'cwd', 'elevated', 'timeout', 'description', 'run_in_background']);
+			const args = fileToolInput(input, ['command', 'cwd', 'elevated', 'vault_write', 'timeout', 'description', 'run_in_background']);
 			const command = requiredText(args, 'command');
 			if (hidesCommandText(command)) throw new Error('命令包含会妨碍确认的不可见控制符。');
 			if (args.description !== undefined) requiredText(args, 'description');
 			if (args.elevated !== undefined && typeof args.elevated !== 'boolean') throw new Error('elevated 必须是布尔值。');
+			if (args.vault_write !== undefined && typeof args.vault_write !== 'boolean') throw new Error('vault_write 必须是布尔值。');
 			if (args.run_in_background !== undefined && typeof args.run_in_background !== 'boolean') {
 				throw new Error('run_in_background 必须是布尔值。');
 			}
@@ -252,13 +254,16 @@ function shellTool(name: ShellName, jobs?: ShellJobs): ToolDefinition {
 			if (!cwd.stat?.isDirectory()) throw new Error('命令工作目录必须是文件夹。');
 			const inVault = cwd.vaultPath !== undefined && permissions.canRead(cwd.requestedPath) && permissions.canRead(cwd.absolutePath);
 			const restricted = limited && inVault && !args.elevated && name === 'Bash' && hasMacShellSandbox();
-			const reason = limited && (!inVault || args.elevated
-				? '此命令申请访问库外资料或联网。'
-				: '此系统或命令环境无法限制在笔记库内，运行前需要确认。');
-			const permission: Pick<PreparedTool, 'approval' | 'independent'> = restricted || mode === 'full-access'
+			const vaultWrite = args.vault_write === true;
+			if (vaultWrite && limited && !restricted) throw new Error('当前命令无法限制在笔记库内。请使用文件编辑工具，或另行申请解除限制。');
+			const reason = restricted && vaultWrite ? '此命令可修改或删除库内笔记。执行范围限于当前笔记库，网络仍关闭。'
+				: limited && (!inVault || args.elevated
+					? '此命令申请访问库外资料或联网。'
+					: '此系统或命令环境无法限制在笔记库内，运行前需要确认。');
+			const permission: Pick<PreparedTool, 'approval' | 'independent'> = (restricted && !vaultWrite) || mode === 'full-access'
 				? { independent: true }
-				: { approval: { title: name, target: cwd.absolutePath, after: command, kind: 'shell',
-					...(background && { background: true }), ...(reason ? { reason } : {}),
+				: { approval: { title: name, target: cwd.absolutePath, after: command, kind: restricted ? 'vault-shell' : 'shell',
+					...(limited && { humanRequired: true }), ...(background && { background: true }), ...(reason ? { reason } : {}),
 				} };
 			return {
 				...permission,
@@ -269,7 +274,7 @@ function shellTool(name: ShellName, jobs?: ShellJobs): ToolDefinition {
 						|| current.stat.ino !== cwd.stat?.ino || current.stat.dev !== cwd.stat?.dev) {
 						throw new Error('工作目录已变化，请重新确认命令。');
 					}
-					const sandboxArgs = restricted ? await macShellSandboxArgs(ctx) : undefined;
+					const sandboxArgs = restricted ? await macShellSandboxArgs(ctx, vaultWrite) : undefined;
 					ctx.signal.throwIfAborted();
 					const output = captureShellOutput(background ? undefined : ctx.onShellOutput);
 					const run = (signal: AbortSignal, deadline?: number) =>

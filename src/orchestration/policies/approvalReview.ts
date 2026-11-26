@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { approvalDiff } from '../../interaction/approvalDiff';
 import { ToolReviewDeniedError } from '../../types';
 import type { ModelService, RunContext, TaskRequest, ToolApproval } from '../../types';
 
@@ -18,7 +19,14 @@ export async function reviewToolApproval(
 	signal: AbortSignal,
 ): Promise<boolean> {
 	signal.throwIfAborted();
-	const content = JSON.stringify({ instruction: approvalSource ?? instruction, ...(approvalSource && { delegatedTask: instruction }), operation });
+	const { before, after, ...details } = operation;
+	let preview: object = operation;
+	if (before !== undefined && after !== undefined) {
+		const changes = approvalDiff(before, after)?.map((group) => group.filter(({ kind }) => kind !== 'context'));
+		if (!changes) throw new Error('无法生成完整的局部改动供自动审核，请使用人工审批。');
+		preview = { ...details, changes };
+	}
+	const content = JSON.stringify({ instruction: approvalSource ?? instruction, ...(approvalSource && { delegatedTask: instruction }), operation: preview });
 	const contextWindow = models.contextLimits?.(model)?.contextWindow || 32_000;
 	if (Buffer.byteLength(content) + Buffer.byteLength(reviewInstructions) > Math.min(64_000, contextWindow)) {
 		throw new Error('操作预览过长，AI 无法完整审核。请拆成较小的操作。');

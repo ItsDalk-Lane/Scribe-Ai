@@ -195,7 +195,7 @@ void test('macOS 受限命令保护内置文件与管理记录，个人技能的
 		await lib.list();
 		const permission = await createPermissionPolicy(root,'vault-settings',[],() => true,'ask');
 		const ctx = {cwd:root, app:{vault:{configDir:'vault-settings'}},task:{request:{refs:[]}}, permissions:permission} as unknown as ToolContext;
-		const args = await macShellSandboxArgs(ctx);
+		const args = await macShellSandboxArgs(ctx, true);
 		const command = (text: string, file: string) => promisify(execFile)(macSandboxExecutable,[...args,'/bin/bash','--noprofile','--norc','-c',text,'scribe',relative(root,file)],{cwd:root});
 		for (const file of ['.registry.json','knap/SKILL.md']) {
 			const target = join(lib.directory,file);

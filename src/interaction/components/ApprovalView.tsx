@@ -24,7 +24,7 @@ export default function ApprovalView({ approval, source }: { approval: ChatAppro
 	const warningId = useId();
 	if (!approval) return null;
 	const text = uiText();
-	const shell = approval.kind === 'shell';
+	const shell = approval.kind === 'shell' || approval.kind === 'vault-shell';
 	const access = approval.kind === 'access';
 	const mcp = approval.kind === 'mcp';
 	const webSearch = approval.kind === 'web-search';
@@ -42,7 +42,7 @@ export default function ApprovalView({ approval, source }: { approval: ChatAppro
 				{shell && <div>{text.chatWorkingFolder}</div>}
 				<div className="scribe-chat-path" dir="auto">{approval.target}</div>
 				{approval.reason && <p className="scribe-chat-disclosure">{approval.reason}</p>}
-				{shell && <p className="scribe-chat-disclosure">{text.chatShellDisclosure}</p>}
+				{approval.kind === 'shell' && <p className="scribe-chat-disclosure">{text.chatShellDisclosure}</p>}
 				{shell && approval.background && <p className="scribe-chat-disclosure">{text.chatBackgroundApproval}</p>}
 				{access && <p className="scribe-chat-disclosure">{text.chatApprovalPathDisclosure}</p>}
 				{approval.after !== undefined && (shell || mcp || webSearch ? <div>
