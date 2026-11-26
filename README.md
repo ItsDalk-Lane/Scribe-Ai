@@ -125,10 +125,15 @@ Copy `main.js` and `manifest.json` (plus `styles.css` if present) into
 
 ## Releasing
 
-Bump `minAppVersion` in `manifest.json`, then run `npm version patch|minor|major`
-to update `manifest.json` and `versions.json`. Create a GitHub release whose tag
-is the exact version number (no `v` prefix) and attach `manifest.json`,
-`main.js`, and `styles.css` (if present).
+Bump `minAppVersion` in `manifest.json` when the plugin needs a newer Obsidian
+version, then run `npm version patch|minor|major --no-git-tag-version`. This
+updates `package.json` and, through `version-bump.mjs`, `manifest.json` and
+`versions.json`. Keep `--no-git-tag-version`: without it, npm also commits and
+creates a local tag with a `v` prefix, which does not match the release tag.
+Commit and push the four updated files, then run `npm run build`.
+
+Create a GitHub release whose tag and title are the exact version number (no `v`
+prefix) and attach `manifest.json`, `main.js`, and `styles.css` (if present).
 
 ## Model communication (desktop)
 
