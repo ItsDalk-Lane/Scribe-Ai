@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { useRef, useState } from 'react';
-import type { ConversationStore, QueuedMessage, TaskRequest } from '../types';
+import type { ConversationStore, QueuedMessage, QueuedModelDestination, TaskRequest } from '../types';
 import { uiText } from './uiText';
 import type { SkillDraft } from './components/skillMentionText';
 
@@ -30,7 +30,7 @@ export function useMessageQueue(store: ConversationStore, onSaveError: () => voi
 	function persist(owner: QueueView, row: QueueRow, conversation: Promise<string>) {
 		const operation = owner.saving.then(async () => {
 			const conversationId = await conversation;
-			const message = { id: row.id, request: { ...row.request, conversationId } };
+			const message = { id: row.id, request: { ...row.request, conversationId }, destination: row.destination };
 			await store.enqueue(conversationId, message);
 			const saved = await store.getQueued(conversationId).catch(() => [message]);
 			update(owner, owner.rows.flatMap((item) => item.id !== row.id ? [item]
@@ -53,9 +53,9 @@ export function useMessageQueue(store: ConversationStore, onSaveError: () => voi
 		isUpdating: () => updates.current > 0,
 		sentToSide: (id: string) => acceptedSideQuestions.get(store)?.has(id) === true,
 		pause() { setPaused(true); },
-		add(request: TaskRequest, conversation: Promise<string>) {
+		add(request: TaskRequest, conversation: Promise<string>, destination: QueuedModelDestination) {
 			const owner = view.current;
-			const row = { id: randomUUID(), request, pending: true };
+			const row = { id: randomUUID(), request, destination, pending: true };
 			update(owner, [...owner.rows, row]);
 			persist(owner, row, conversation);
 		},

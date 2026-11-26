@@ -1,4 +1,6 @@
 import { meteredService } from '../meteredService';
+import { isModelAvailable } from '../settings/modelAvailability';
+import { queuedModelDestination, sameQueuedDestination } from '../settings/modelConnection';
 import { randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { setTimeout, clearTimeout } from 'node:timers';
@@ -97,7 +99,7 @@ export function createSubagentController(
 	store: ConversationStore,
 	runChild: (task: Task, model: Model, signal: AbortSignal, observer: RunObserver, mode: ExecutionMode | undefined, options: ChildRunOptions) => Promise<RunState>,
 	selectModel: (model: Model, restored?: boolean) => Model,
-	models?: Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin'>,
+	models?: Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin'> & Partial<Pick<ModelService, 'modelConnection'>>,
 	stopJobs?: (conversationId: string, ids: Set<string>) => Promise<void>,
 ) {
 	const groups = new Map<string, Group>();
@@ -163,10 +165,14 @@ export function createSubagentController(
 
 	async function composeReport(group: Group, taskId: string, delivery: PendingDelivery, sections: string[], signal: AbortSignal): Promise<string | undefined> {
 		const { model, agentIds } = delivery;
-		const origin = group.agents.get(agentIds[0]!)?.create.modelOrigin;
-		// 延迟回传和恢复旧对话时，仅把结果交给原先分工所用的模型地址。
-		if (!models || !origin || origin !== modelOrigin?.(model)
-			|| agentIds.some((id) => group.agents.get(id)?.create.modelOrigin !== origin)) return;
+		const creations = agentIds.map((id) => group.agents.get(id)?.create);
+		const destination = creations[0]?.reportDestination;
+		const authorized = () => Boolean(destination && isModelAvailable(settings, model)
+			&& sameQueuedDestination(destination, queuedModelDestination(model, models?.modelConnection))
+			&& creations.every((create) => create?.modelOrigin === URL.parse(destination.baseUrl)?.origin
+				&& sameQueuedDestination(destination, create?.reportDestination)));
+		if (!models || !destination || !authorized()) return;
+		const base = new URL(destination.baseUrl);
 		const { contextWindow, maxTokens } = models.contextLimits?.(model) ?? {};
 		const window = contextWindow || 32_000;
 		const output = Math.min(maxTokens || 6_000, 6_000, Math.floor(window / 3));
@@ -177,7 +183,11 @@ export function createSubagentController(
 				用户任务: delivery.request.instruction, 工作结果: sections,
 			}) }],
 			beforeSend: async (address) => {
-				if (new URL(address).origin !== origin) throw new Error('汇总使用的模型地址已变更。');
+				const actual = new URL(address);
+				if (!authorized() || actual.origin !== base.origin || (actual.pathname !== base.pathname
+					&& !actual.pathname.startsWith(base.pathname.replace(/\/+$/u, '') + '/'))) {
+					throw new Error('汇总使用的模型已停用或接收地址已变更。');
+				}
 			},
 		};
 		if (output <= 0 || inputBytes(request) > (window * 0.85 - output) * 2) return;
@@ -590,22 +600,18 @@ export function createSubagentController(
 		if (disposition === 'revise') {
 			const previous = agent.view.runs.at(-2);
 			const prior = previous && group.reviews.get(previous.state.taskId);
-			const first = agent.view.runs.at(-3);
-			const firstReview = first && group.reviews.get(first.state.taskId);
-			const attempts = prior?.disposition === 'revise' ? firstReview?.disposition === 'revise' ? 2 : 1 : 0;
 			const key = input.error_key!.normalize('NFKC').toLowerCase().replace(/[\s\p{P}]+/gu, '');
 			if (!key) throw new Error('请填写能识别关键错误的名称。');
 			record.errorKey = key;
-			const stopReason = attempts > 0 && prior?.errorKey === key ? '连续两稿出现同一个关键错误，已停止本项自动返工。'
-				: attempts >= 2 ? '这项工作已自动返工两次，已停止自动返工。' : undefined;
-			if (stopReason) {
+			if (prior?.disposition === 'revise' && prior.errorKey === key) {
+				const stopReason = '连续两稿出现同一个关键错误，已停止本项自动返工。';
 				await writeReview(group, item.agentId, { ...record, disposition: 'blocked', reason: `${input.reason}\n${stopReason}` });
 				return `${stopReason} 请先判断能否用现有资料修正并核对，可以就自己修。否则先完成其余工作，在最终答复标出本项未通过、具体卡点，并只问一个关键问题。`;
 			}
 			await launch(group, agent, taskFor(group, input.message!, latest.request, false, caller, !agent.create.readOnly),
 				caller.permissions.executionMode, { parentSignal: caller.signal, onWork: caller.observer.onWork,
 					beforeRun: () => writeReview(group, item.agentId, record) });
-			return JSON.stringify({ result_id: note.id, status: 'returned', agent: summarize(agent.view), attempt: attempts + 1 });
+			return JSON.stringify({ result_id: note.id, status: 'returned', agent: summarize(agent.view), attempt: agent.view.runs.length });
 		}
 		await writeReview(group, item.agentId, record);
 		return JSON.stringify({ result_id: note.id, status: disposition === 'blocked' ? 'blocked' : 'passed',
@@ -673,7 +679,7 @@ export function createSubagentController(
 		const selected = direct && await spawn({ agent_type: direct.role, message: caller.task.request.instruction }, direct.skills);
 		ctx.subagentPrompt = [
 			notesForPrompt,
-			agentId && `你是子 Agent ${agentId}，只处理当前分工。发现说明与资料不符或遇到不确定的关键事实，立即用 ask_parent 提出具体问题，收到答复再继续，不猜测。结果完成后交付正文，会自动送给派发方。`,
+			agentId && `你是子 Agent ${agentId}，只处理当前分工。发现说明与资料不符或遇到不确定的关键事实，立即用 contact_subagent 的 ask_parent 操作提出具体问题，收到答复再继续，不猜测。结果完成后交付正文，会自动送给派发方。`,
 			selected && `用户选定的子 Agent ${selected.name}（${selected.id}）已开始处理这次请求。你负责答疑、核对和汇总它的结果。依赖它完成的操作要等它交付再核对，避免重复执行。`,
 			userSelectedAgent && !selected && '继续核对现有分工及结果，保留此前已完成的操作。',
 			canModelSpawn && (options.mode === 'auto'
@@ -682,11 +688,11 @@ export function createSubagentController(
 			canModelSpawn && `可用角色：${JSON.stringify(Object.fromEntries(roles))}`,
 			canModelSpawn && '已有角色与职责匹配时填写 agent_type，否则用 system_instructions 给这一项编写专用系统提示词。无论哪种角色，具体任务和交付要求单独写在 message。',
 			'派工后立即做自己能独立完成的步骤，避免重复分派。只有下一步依赖子任务结果、且暂时没有可做的独立步骤时才用 wait_agent。',
-			'收到子 Agent 发来的 question 时，优先核对并用 answer_subagent 回答；回答后再继续原步骤。',
+			'收到子 Agent 发来的 question 时，优先核对并用 contact_subagent 的 answer 操作回答。回答后再继续原步骤。',
 			'每次收到待核对的 result，先对照任务和证据核对正文，再调用 review_subagent_result。下一步立即使用选 use，稍后使用选 defer，之后用 read_subagent_result 和所给路径重读。对于不达标的稿选 revise 指明错误、稳定的 error_key 和修改要求。相同关键错误沿用同一个 error_key。',
-			'返工上限或同一关键错误导致停止后，先用现有资料自行修正并核对，能解决就直接处理。缺资料或需用户决定时先完成其余工作，在正式回复中标明未通过的分项、卡点并只问一个关键问题。汇总只采用已通过的交稿和自己核对过的修正。',
+			'同一关键错误导致返工停止后，先用现有资料自行修正并核对，能解决就直接处理。缺资料或需用户决定时先完成其余工作，在正式回复中标明未通过的分项、卡点并只问一个关键问题。汇总只采用已通过的交稿和自己核对过的修正。',
 			'直接分析和执行。界面会显示分工、联系和完成动态，无需在正文里重复播报派工、等待或验收动作。用户需要阶段进展时，报告已经得到的实质结果。正常结束前收齐并核对自己派发的工作，给用户一份统一的正式答复。',
-			interrupted.length > 0 && `这些子任务在上次运行时中断。不要空等，可用 followup_task 交代剩余工作，也可以自行完成或明确说明卡点：${JSON.stringify(interrupted)}`,
+			interrupted.length > 0 && `这些子任务在上次运行时中断。不要空等。可用 contact_subagent 的 follow_up 操作交代剩余工作（该操作可用时），也可以自行完成或明确说明卡点：${JSON.stringify(interrupted)}`,
 			'默认只分配必要上下文。仅在用户明确指定另一家服务商时请求切换服务商。',
 		].filter(Boolean).join('\n');
 		async function spawn(input: Input, directSkills?: readonly SkillMention[]) {
@@ -716,7 +722,8 @@ export function createSubagentController(
 			const create: StartRecord = { kind: 'create', agent: identity, history,
 				instructions: input.system_instructions ?? role.instructions,
 				readOnly: readOnly || role.readOnly === true, allowProvider: Boolean(role.model) || sameProvider,
-				modelOrigin: role.model ? modelOrigin?.(model) : callerOrigin };
+				modelOrigin: role.model ? modelOrigin?.(model) : callerOrigin,
+				reportDestination: queuedModelDestination(caller.model, models?.modelConnection) };
 			const child = { create, view: { ...identity, status: 'idle' as const, runs: [] } };
 			const task = taskFor(group, input.message!, caller.task.request, Boolean(directSkills) || input.fork_turns === 'all', caller, !create.readOnly);
 			// 直接分派的技能由用户选定，无需等待主模型先收到同一份说明。

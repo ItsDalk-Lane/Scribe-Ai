@@ -1,4 +1,18 @@
-import type { ModelService, RunContext, ScribeSettings } from '../../types';
+import { createHash } from 'node:crypto';
+import type { ModelService, QueuedModelDestination, RunContext, ScribeSettings } from '../../types';
+
+export function queuedModelDestination({ providerId, model }: RunContext['model'], resolve?: ModelService['modelConnection']): QueuedModelDestination | undefined {
+	const route = resolve?.(providerId, model);
+	const url = route && !route.issue && URL.parse(route.baseUrl);
+	if (!route || !url) return;
+	return { providerId, model, baseUrl: url.origin + url.pathname, api: route.api,
+		fingerprint: createHash('sha256').update(url.href).digest('hex') };
+}
+
+export function sameQueuedDestination(a: QueuedModelDestination | undefined, b: QueuedModelDestination | undefined): boolean {
+	return a?.providerId === b?.providerId && a?.model === b?.model && a?.baseUrl === b?.baseUrl
+		&& a?.api === b?.api && a?.fingerprint === b?.fingerprint;
+}
 
 function connectionKey(settings: ScribeSettings, provider: string, model: string): string {
 	return JSON.stringify([
@@ -7,6 +21,7 @@ function connectionKey(settings: ScribeSettings, provider: string, model: string
 		settings.communication.protocols[provider],
 		settings.communication.credentialIds[provider],
 		settings.communication.proxyUrl,
+		settings.communication.proxyCredentialId,
 		settings.modelOverrides[provider]?.[model],
 		settings.providerModels[provider]?.[0],
 		settings.providerModels[provider]?.includes(model),
