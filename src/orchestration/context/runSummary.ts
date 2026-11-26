@@ -1,5 +1,5 @@
 import { inputBytes } from './contextBuilder';
-import { readOnlySkillTools } from '../../tools/skillTools';
+import { isSkillReadResult } from '../../tools/skillTools';
 import { excerpt, validatedSummary } from './historySummary';
 import type { Message, ModelRequest, ModelService, RunContext, RunSummary } from '../../types';
 
@@ -11,7 +11,7 @@ const instructions = [
 ].join('\n');
 
 function materialLine(message: Message, limit: number): string {
-	if (readOnlySkillTools.includes(message.toolName ?? '') || message.subagentActivity || message.incomplete || !message.content.trim() || message.role === 'system') return '';
+	if (isSkillReadResult(message.toolName) || message.subagentActivity || message.incomplete || !message.content.trim() || message.role === 'system') return '';
 	const label = message.role === 'tool' ? `${message.toolName ?? '工具'}${message.isError || message.skipped ? '未成功' : '结果'}`
 		: message.role === 'user' ? '用户' : '助手';
 	// 保留工具输出开头的来源和结尾的诊断，以便交接后重新核对。

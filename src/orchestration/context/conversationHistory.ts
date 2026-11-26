@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import { readOnlySkillTools } from '../../tools/skillTools';
+import { isSkillReadResult } from '../../tools/skillTools';
 import type { ConversationSnapshot, Message, RunContext, SavedRun, ToolCall } from '../../types';
 
 function compactionIndex(snapshot: ConversationSnapshot): number {
@@ -14,7 +14,7 @@ export function runsAfterManualCompaction(snapshot: ConversationSnapshot): Saved
 
 export function historicalMessages(messages: Message[]): Message[] {
 	return messages.filter(({ subagentActivity }) => !subagentActivity)
-		.map((m) => m.role === 'tool' && readOnlySkillTools.includes(m.toolName ?? '')
+		.map((m) => m.role === 'tool' && isSkillReadResult(m.toolName)
 			? { ...m, content: '（历史记录）上次的技能资料已省略，需要时请按本轮权限重新读取。' } : m);
 }
 

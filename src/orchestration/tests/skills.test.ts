@@ -7,10 +7,12 @@ import type { App } from 'obsidian';
 import { createSkillRegistry } from '../context/skills';
 import { createSkillRun, renderSkillCatalog } from '../context/skillRun';
 import { createContextBuilder, taskMessage } from '../context/contextBuilder';
+import { historicalMessages } from '../context/conversationHistory';
 import { createRunContext } from '../runContext';
 import { normalizeSettings } from '../settings/defaults';
 import { createTask } from '../taskManager';
 import { createToolRegistry } from '../../tools';
+import { createToolExecutor } from '../../tools/executor';
 import { skillTools } from '../../tools/skillTools';
 import { installSharedPackage } from '../../skills/installTarget';
 import { parseSkillReadReceipt, skillReadName } from '../../skills/readReceipt';
@@ -59,19 +61,36 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 	assert.ok(first.messages.some((m) => m.content.includes('项目 ' + body)));
 	assert.ok(!first.messages.some((m) => m.content.includes('个人 ' + body)));
 	assert.ok(!first.system!.includes('项目 ' + body));
-	assert.ok(first.tools.some((s) => s.name === 'read_skill'));
-	assert.ok(!first.tools.some((s) => s.name === 'propose_skill' || s.name === 'install_skill'));
+	assert.deepEqual(first.tools.map((s) => s.name).sort(), ['list_skills', 'read_skill']);
+	assert.equal(tools.find('list_skill_files'), undefined);
 	assert.doesNotMatch(initial.content, /摘录/);
-	const catalog = await runtime.list(0);
+	const executor = createToolExecutor(tools);
+	const lookup = (input: Record<string, unknown>) => executor.execute({ id: 'lookup', name: 'list_skills', input }, { ...ctx, app });
+	const catalog = (await lookup({})).content;
 	assert.ok(!catalog.includes(root) && !first.system!.includes(root) && first.messages.every((m) => !m.content.includes(root)));
-	const identities = (JSON.parse(catalog) as { items: { name: string; id: string }[] }).items.filter((skill) => skill.name === 'outline');
+	const catalogItems = (text: string) => (JSON.parse(text) as { items: { name: string; id: string }[] }).items;
+	const identities = catalogItems(catalog).filter((skill) => skill.name === 'outline');
 	assert.equal(identities.length, 2);
 	const localReference = identities.find(({ id }) => !first.system!.includes(id))!.id;
 	const personalReference = identities.find(({ id }) => first.system!.includes(id))!.id;
 	assert.match(personalReference, /^s_[\w-]{12}$/u);
 	const localReceipt = await runtime.read(localReference, 'example.md', 0);
 	assert.equal((JSON.parse(localReceipt.split('\n').at(-1)!) as { id: string }).id, local.id);
-	assert.match(await runtime.files(localReference), /example\.md/u);
+	assert.deepEqual(catalogItems((await lookup({ offset: 1 })).content), catalogItems(catalog).slice(1));
+	const filenames = (await lookup({ id: personalReference })).content;
+	assert.match(filenames, /example\.md/u);
+	assert.doesNotMatch(filenames, /资源内容/u);
+	assert.equal((await lookup({ id: personalReference, offset: 0 })).isError, true);
+	assert.equal((await lookup({ id: '' })).isError, true);
+	const listings: Message[] = ['list_skills', 'list_skill_files'].flatMap((name): Message[] => [
+		{ role: 'assistant', content: '', toolCalls: [{ id: name, name, input: { id: personalReference } }] },
+		{ role: 'tool', toolCallId: name, toolName: name, content: filenames },
+	]);
+	const withLists = await builder.build(ctx, [initial, ...listings], 100_000);
+	assert.deepEqual(withLists.messages.filter((m) => m.role === 'tool').map((m) => m.content), [filenames, filenames]);
+	assert.ok(!historicalMessages(listings).some((m) => m.content.includes('example.md')));
+	await writeFile(join(shared, 'outline/template.md'), '新模板');
+	await assert.rejects(withLists.beforeSend!('https://example.test/model'), /技能文件已变化/u);
 	const localText = await readFile(local.id, 'utf8');
 	const skillResult = await runtime.read(localReference, 'SKILL.md', 0);
 	const skillReceipt = parseSkillReadReceipt(skillResult)!;
@@ -115,6 +134,11 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 	assert.equal((await registry.library.checkDependencies('outline'))[0]?.ready, false);
 	assert.match(await registry.read(personal), /外部工具服务 example 尚未连接/u);
 	config.skillSettings!.sharedDirectories = [];
+	assert.equal((await lookup({ id: personalReference })).isError, true);
+	const revoked = await builder.build(ctx, [initial, ...listings], 100_000);
+	for (const { toolName } of listings.filter((m) => m.role === 'tool')) {
+		assert.match(revoked.messages.find((m) => m.toolName === toolName)?.content ?? '', /目录已失效/u);
+	}
 	await assert.rejects(runtime.read(personalReference, 'SKILL.md', 0), /不在本轮/);
 	await registry.setEnabled(local.id, false);
 	await assert.rejects(registry.readRecorded(skillReceipt, request.skillScope!), /技能已停用/u);

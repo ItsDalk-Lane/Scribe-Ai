@@ -7,6 +7,7 @@ import { parseSkillReadReceipt, skillReadDigest as fingerprint } from '../../ski
 import type { Message, SkillMention, SkillSettings, TaskRequest } from '../../types';
 import type { SkillRegistry } from './skills';
 import { compilePathGlob } from '../../tools/support/pathGlob';
+import { isSkillListing } from '../../tools/skillTools';
 
 const installer = 'scribe:skill-installer';
 const pageSize = 20_000;
@@ -197,15 +198,15 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 			const autoIds = new Set(automatic.map((skill) => skill.id));
 			const authorized = items.filter((item) => chosen.has(item.id) || autoIds.has(item.id));
 			const listingCalls = new Map(messages.flatMap((m) => m.role === 'assistant' ? m.toolCalls ?? [] : [])
-				.filter((call) => call.name === 'list_skills' || call.name === 'list_skill_files').map((call) => [call.id, call]));
+				.filter((call) => isSkillListing(call.name)).map((call) => [call.id, call]));
 			const fileLists = new Map<string, string>();
 			for (const m of messages) {
-				if (m.role === 'tool' && !m.isError && (m.toolName === 'list_skills' || m.toolName === 'list_skill_files')) {
+				if (m.role === 'tool' && !m.isError && isSkillListing(m.toolName)) {
 					const call = m.toolCallId ? listingCalls.get(m.toolCallId) : undefined;
 					const args = call?.input as { id?: string; offset?: number } | undefined;
 					let content = '此技能目录已失效，请按当前权限重新查询。';
 					if (autoAllowed && args && m.toolName === call?.name) {
-						if (call.name === 'list_skills') content = listItems(authorized, args.offset ?? 0, reference, issues.length > 0);
+						if (call.name === 'list_skills' && args.id === undefined) content = listItems(authorized, args.offset ?? 0, reference, issues.length > 0);
 						else {
 							const s = byReference(authorized, args.id);
 							if (s) try { content = await files(s); fileLists.set(s.id, content); } catch { signal.throwIfAborted(); }
