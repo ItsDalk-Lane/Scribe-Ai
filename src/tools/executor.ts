@@ -4,6 +4,7 @@ import { scribeDataPaths } from '../orchestration/storage/paths';
 import { MAX_IMAGES, MAX_REQUEST_IMAGE_BYTES, saveCachedImage } from './support/imageData';
 import { boundToolResult } from './support/resultSpill';
 import { toolExecutionInput } from './support/toolInput';
+import { isChatTaskMutation } from './chatTaskTools';
 import { TOOL_NOT_APPROVED } from '../types';
 import type { ImageReference, ToolExecutor, ToolRegistry } from '../types';
 
@@ -25,7 +26,8 @@ export function createToolExecutor(registry: ToolRegistry, cacheDirectory?: stri
 					|| JSON.stringify(prepared.approval) !== JSON.stringify(retryApproval.approval))) {
 					return failure('操作预览或工作目录已变化，请重新提交任务。');
 				}
-				if (!tool.isReadOnly && !prepared.approval && !(permissions.executionMode && prepared.independent)) {
+				const needsPreview = !tool.isReadOnly && !(prepared.independent && (permissions.executionMode || isChatTaskMutation(tool)));
+				if (needsPreview && !prepared.approval) {
 					return failure('工具未提供操作预览，无法批准。');
 				}
 				if (prepared.approval && !await approve?.(prepared.approval, prepared.approvalIdentity)) {

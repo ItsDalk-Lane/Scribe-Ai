@@ -21,9 +21,11 @@ import { createConversationStore } from '../../orchestration/storage/conversatio
 import { scribeDataPaths } from '../../orchestration/storage/paths';
 import { createTask } from '../../orchestration/taskManager';
 import { createToolLayer, createToolRegistry } from '../../tools';
+import { chatTaskTools } from '../../tools/chatTaskTools';
 import { createToolExecutor } from '../../tools/executor';
 import { shellTools } from '../../tools/external/shellTool';
 import { readTools } from '../../tools/readTools';
+import { contactSubagentTool, manageSubagentsTool, subagentTools } from '../../tools/subagentTools';
 import { writeTools } from '../../tools/writeTools';
 import { ContextOverflowError, RetryableModelError } from '../../types';
 import type {
@@ -296,7 +298,7 @@ void test('collaboration answers questions between tools and waits without expos
 	};
 	const first = { id: 'first', name: 'Write', input: {} };
 	const second = { id: 'second', name: 'Write', input: {} };
-	const answer = { id: 'answer', name: 'answer_subagent', input: {} };
+	const answer = { id: 'answer', name: 'contact_subagent', input: { action: 'answer' } };
 	const review = { id: 'review', name: 'review_subagent_result', input: {} };
 	const context = createContextBuilder(createToolRegistry([]));
 	const executed: string[] = [];
@@ -314,7 +316,8 @@ void test('collaboration answers questions between tools and waits without expos
 					assert.deepEqual(current.inbox?.(), [result]);
 					const request = await context.build(current, state.messages, 32_000);
 					assert.equal(request.messages.some(({ subagentActivity }) => subagentActivity !== undefined), false);
-					assert.match(request.system ?? '', /subagent-result:result/u);
+					assert.doesNotMatch(request.system ?? '', /subagent-result:result/u);
+					assert.ok(request.messages.some(({ role, content }) => role === 'user' && content.includes('subagent-result:result')));
 					return emptyModelResponse('', [review]);
 				}
 				default: return emptyModelResponse('核对完成');
@@ -695,6 +698,42 @@ void test('a failed verification can end with only the tool record when the mode
 	assert.deepEqual(rows.map(({ kind }) => kind), ['tool', 'tool']);
 });
 
+void test('resuming a saved task keeps the collaboration operations scoped and skips pending legacy calls', async (t) => {
+	const { app } = await fixture(t);
+	const conversationId = 'resume-subagents';
+	const list = { id: 'list', name: manageSubagentsTool, input: { action: 'list' } };
+	const legacy = { id: 'old-follow-up', name: 'followup_task', input: { target: 'worker', message: '继续' } };
+	const first = sessionsFor(app, { stream: () => fakeStream(emptyModelResponse('', [list, legacy])) }, [subagentTools]);
+	t.after(() => first.dispose());
+	const submitted = first.submit({ conversationId, instruction: '核对现有分工。', refs: [] }, {
+		onEvent(event) { if (event.type === 'tool-end' && event.call.id === list.id) first.pause(submitted.taskId); },
+	});
+	assert.equal((await submitted.result).status, 'interrupted');
+	assert.deepEqual((await first.openConversation(conversationId))?.runs[0]?.state.pendingCalls, [legacy]);
+
+	const followUp = { id: 'follow-up', name: contactSubagentTool, input: { action: 'follow_up', target: 'worker', message: '继续' } };
+	const reopen = { id: 'reopen', name: manageSubagentsTool, input: { action: 'reopen', target: 'worker' } };
+	let resumed = false;
+	const second = sessionsFor(app, { stream(request) {
+		if (resumed) return fakeStream(emptyModelResponse('已核对。'));
+		resumed = true;
+		const options = (name: string) => (request.tools.find((tool) => tool.name === name)?.inputSchema.properties as
+			{ action?: { enum: string[] } } | undefined)?.action?.enum;
+		assert.deepEqual(options(contactSubagentTool), ['send', 'answer']);
+		assert.deepEqual(options(manageSubagentsTool), ['list', 'interrupt', 'close']);
+		assert.ok(!request.tools.some(({ name }) => name === 'spawn_agent' || name === legacy.name));
+		return fakeStream(emptyModelResponse('', [followUp, reopen, { ...list, id: 'list-again' }]));
+	} }, [subagentTools]);
+	t.after(() => second.dispose());
+	const finished = await second.resume(conversationId, submitted.taskId).result;
+	assert.equal(finished.status, 'done', finished.error);
+	assert.equal(finished.messages.find(({ toolCallId }) => toolCallId === legacy.id)?.skipped, true);
+	for (const { id } of [followUp, reopen]) {
+		assert.match(finished.messages.find(({ toolCallId }) => toolCallId === id)?.content ?? '', /无法使用/u);
+	}
+	assert.equal(finished.messages.find(({ toolCallId }) => toolCallId === 'list-again')?.content, '[]');
+});
+
 for (const recheck of [false, true]) {
 	void test(`an interrupted verification is delivered back to the model ${recheck ? 'before checking again' : 'even when it ends without rechecking'}`, async (t) => {
 		const { app, cwd } = await fixture(t);
@@ -916,6 +955,7 @@ void test('a model disconnection restarts only the incomplete model turn and pre
 	assert.equal(saved?.runs.length, 1);
 	const savedRun = saved.runs[0]!;
 	assert.equal(savedRun.state.status, 'done');
+	assert.deepEqual(savedRun.state.auxiliaryUsage?.filter(({ kind }) => kind === 'main-attempt'), [{ kind: 'main-attempt' }]);
 	assert.ok(savedRun.state.messages.every(({ id }) => id !== disconnectedReplyId));
 	assert.deepEqual(restoreExecution(savedRun).items.flatMap((row) => (
 		(row.kind === 'text' || row.kind === 'thinking') && row.messageId === disconnectedReplyId ? [row.content] : []
@@ -979,6 +1019,32 @@ void test('repeated tool requests stop before the fourth unchanged operation', a
 	]);
 });
 
+void test('a resumed agent can reclaim a released checklist item after three identical prior receipts', async (t) => {
+	const { app } = await fixture(t);
+	const claim = (id: string) => ({ id, name: 'TaskUpdate', input: { taskId: '1', status: 'in_progress' } });
+	const calls = [
+		{ id: 'create', name: 'TaskCreate', input: { subject: '核对引用', description: '检查三处出处' } },
+		claim('first'), claim('second'), claim('third'), claim('reclaim'),
+		{ id: 'finish', name: 'TaskUpdate', input: { taskId: '1', status: 'completed' } },
+	];
+	const open = () => sessionsFor(app, { stream(request) {
+		const next = calls.shift();
+		return fakeStream(next ? emptyModelResponse('', [next]) : emptyModelResponse('核对完成。'), request.signal);
+	} }, [chatTaskTools]);
+	const conversationId = 'checklist-reclaim';
+	const sessions = open();
+	const run = sessions.submit({ conversationId, instruction: '核对引用', refs: [] }, { onEvent(event) {
+		if (event.type === 'state' && event.state.messages.at(-1)?.toolCallId === 'third') sessions.pause(event.state.taskId);
+	} });
+	assert.equal((await run.result).status, 'interrupted');
+	const resumed = await open().resume(conversationId, run.taskId).result;
+	assert.equal(resumed.status, 'done');
+	const receipt = resumed.messages.find(({ toolCallId }) => toolCallId === 'finish');
+	assert.equal(receipt?.isError, false);
+	assert.match(receipt.content, /"status":"completed"/u);
+	assert.ok(resumed.messages.every((message) => !message.noteChange));
+});
+
 void test('a new tool result allows another check after earlier identical results', async (t) => {
 	const { app } = await fixture(t);
 	let turn = 0;
@@ -1006,26 +1072,27 @@ void test('a new tool result allows another check after earlier identical result
 	assert.deepEqual(results, ['before', 'before', 'before', 'after', 'after']);
 });
 
-void test('continually changing tool requests cannot bypass the task round limit', async (t) => {
+void test('changing tool results continue beyond old turn and call caps until a final reply', async (t) => {
 	const { app } = await fixture(t);
 	let requests = 0;
 	let executions = 0;
 	const sessions = sessionsFor(app, {
 		stream(request) {
 			requests++;
-			assert.ok(requests <= 32);
-			return fakeStream(emptyModelResponse('', [{ id: `${requests}`, name: 'Echo', input: requests }]), request.signal);
+			const calls = requests <= 34 ? Array.from({ length: 8 }, (_, index) => ({
+				id: `${requests}-${index}`, name: 'Echo', input: requests * 8 + index,
+			})) : [];
+			return fakeStream(emptyModelResponse(calls.length ? '' : 'done', calls), request.signal);
 		},
 	}, [() => [{
 		name: 'Echo', description: 'test', inputSchema: {}, isReadOnly: true,
 		prepare: (input) => ({ run: () => { executions++; return String(input); } }),
 	}]]);
 	const result = await sessions.submit({ conversationId: 'round-limit', instruction: 'work', refs: [] }).result;
-	assert.equal(result.status, 'limit');
-	assert.match(result.error ?? '', /运行上限/);
-	assert.equal(requests, 32);
-	assert.equal(executions, 31);
-	assert.equal(result.messages.at(-1)?.isError, true);
+	assert.equal(result.status, 'done', result.error);
+	assert.equal(requests, 35);
+	assert.equal(executions, 272);
+	assert.equal(result.messages.at(-1)?.content, 'done');
 });
 
 void test('a real provider adapter resends the assistant call with the matching file result', async (t) => {
@@ -1668,18 +1735,19 @@ void test('pausing just after truncation resumes without repeating the saved ans
 	assert.deepEqual(stored?.map(({ content }) => content), [savedText, remainder]);
 });
 
-void test('repeated output truncation stops after two continuations and preserves the partial answer', async (t) => {
+void test('truncated output continues beyond the old cap and stops when no new text arrives', async (t) => {
 	const { app } = await fixture(t);
 	let requests = 0;
 	const sessions = sessionsFor(app, {
-		stream: ({ signal }) => fakeStream(emptyModelResponse(`partial ${++requests}`, [{ id: 'partial', name: 'Read', input: {} }], 'limit'), signal),
+		stream: ({ signal }) => fakeStream(emptyModelResponse(++requests <= 5 ? `part ${requests}\n` : '',
+			[{ id: 'partial', name: 'Read', input: {} }], 'limit'), signal),
 	}, [readTools]);
 	const result = await sessions.submit({ conversationId: 'limit', instruction: 'work', refs: [] }, {
 		onEvent(event) { assert.notEqual(event.type, 'tool-start'); },
 	}).result;
 	assert.equal(result.status, 'limit');
-	assert.equal(requests, 3);
-	assert.equal(result.messages.at(-1)?.content, 'partial 3');
+	assert.equal(requests, 6);
+	assert.equal(result.messages.at(-2)?.content, 'part 5\n');
 	assert.deepEqual(result.pendingCalls, []);
 });
 

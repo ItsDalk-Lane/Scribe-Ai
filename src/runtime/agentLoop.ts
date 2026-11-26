@@ -1,4 +1,5 @@
 import { realpath } from 'node:fs/promises';
+import { obsidianSearchToolName } from '../tools/workspaceTools';
 import { relative, resolve } from 'node:path';
 import { canUseToolWhileAnswering, taskMessage } from '../orchestration/context/contextBuilder';
 import { pauseRun } from '../orchestration/runResume';
@@ -7,6 +8,8 @@ import type { McpManager } from '../tools/external/mcp';
 import { createMcpRun } from '../tools/external/mcpTools';
 import { webSearchToolName } from '../tools/external/webTools';
 import { readOnlySkillTools } from '../tools/skillTools';
+import { chatTaskToolNames } from '../tools/chatTaskTools';
+import { contactSubagentTool, manageSubagentsTool } from '../tools/subagentTools';
 import { isWithinPath, toolAbsolutePath } from '../tools/support/pathUtils';
 import { toolSignature } from '../tools/support/toolSignature';
 import type { AgentLoop, Message, ModelCoordinator, ModelResponse, NoteRef, RunContext, RunEvent, RunState, SubagentNote, ToolApproval, ToolCall, ToolCoordinator, ToolResult } from '../types';
@@ -16,13 +19,10 @@ import { InitialContextBudgetError } from './modelCoordinator';
 import { explicitNoteTargets } from './noteTargets';
 import { assistantMessageId } from './runState';
 
-const MAX_TURNS = 32;
-const MAX_TOOL_CALLS = 256;
 const MAX_UNCHANGED_RESULTS = 3;
-const MAX_OUTPUT_CONTINUATIONS = 2;
 const fileChangeTools = new Set(['Write', 'Edit', 'NotebookEdit']);
-const resumeTools = new Set(['Read', 'Glob', 'Grep', webSearchToolName, ...readOnlySkillTools, ...fileChangeTools, 'list_agents', 'send_message', 'wait_agent', 'interrupt_agent', 'close_agent',
-	'ask_parent', 'answer_subagent', 'review_subagent_result', 'read_subagent_result']);
+const resumeTools = new Set(['Read', 'Glob', 'Grep', obsidianSearchToolName, webSearchToolName, ...readOnlySkillTools, ...fileChangeTools,
+	contactSubagentTool, manageSubagentsTool, 'wait_agent', 'review_subagent_result', 'read_subagent_result', ...chatTaskToolNames]);
 const repeatedToolsError = '工具多次返回相同结果，已停止重复操作。';
 const pendingResume = '退出前未执行。继续任务时请补做此步骤，修改文件仍需重新请求确认。';
 const legacyPendingResume = '退出前未执行。继续任务时需要重新请求确认。';
@@ -123,8 +123,6 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 			let state = initialState;
 			const { signal, observer, task, collaboration } = ctx;
 			const resuming = initialState.status === 'interrupted';
-			let callsRemaining = MAX_TOOL_CALLS;
-			let continuations = 0;
 			let outputSoFar: string | undefined;
 			let progressVersion = 0;
 			const toolOutcomes = new Map<string, { content: string; isError: boolean; unchanged: number; progressVersion: number }>();
@@ -157,7 +155,7 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 
 			const approve = async (approval: ToolApproval): Promise<boolean> => {
 				signal.throwIfAborted();
-				const decide = ctx.permissions.executionMode === 'auto-review' ? ctx.reviewTool : observer.approve;
+				const decide = ctx.permissions.executionMode === 'auto-review' && !approval.humanRequired ? ctx.reviewTool : observer.approve;
 				if (!decide) return false;
 				const userDecides = decide === observer.approve;
 				if (userDecides) observer.onWork?.(task.id, false);
@@ -204,14 +202,18 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					return direct && ctx.permissions.canWrite(direct) ? direct : notePath(target);
 				};
 				const { canRequestPath } = ctx.permissions;
-				const requestContext = resuming ? { ...ctx, permissions: {
-					...ctx.permissions,
-					canWrite: (path: string) => ctx.permissions.canWrite(path) && mayWrite(path),
-					canRequestPath: canRequestPath && ((path: string, operation: 'read' | 'write') =>
-						(operation === 'read' || mayWrite(path)) && canRequestPath(path, operation)),
-					canCallTool: (tool: Parameters<typeof ctx.permissions.canCallTool>[0]) =>
-						ctx.permissions.canCallTool(tool) && (resumeTools.has(tool.name) || Boolean(tool.mcp)),
-				} } : ctx;
+				const requestContext = resuming ? {
+					...ctx,
+					subagents: ctx.subagents && { ...ctx.subagents, resuming: true },
+					permissions: {
+						...ctx.permissions,
+						canWrite: (path: string) => ctx.permissions.canWrite(path) && mayWrite(path),
+						canRequestPath: canRequestPath && ((path: string, operation: 'read' | 'write') =>
+							(operation === 'read' || mayWrite(path)) && canRequestPath(path, operation)),
+						canCallTool: (tool: Parameters<typeof ctx.permissions.canCallTool>[0]) =>
+							ctx.permissions.canCallTool(tool) && (resumeTools.has(tool.name) || Boolean(tool.mcp)),
+					},
+				} : ctx;
 				const skipContinuation = async (call: ToolCall) => {
 					if (!fileChangeTools.has(call.name)) return;
 					const target = fileTarget(call);
@@ -227,7 +229,6 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 				};
 				const remember = (call: ToolCall, { content, isError }: ToolResult) => {
 					const signature = toolSignature(call);
-					callsRemaining--;
 					const previous = toolOutcomes.get(signature);
 					const sameResult = previous?.content === content && previous.isError === isError;
 					// 有新结果后重新累计，避免把后续核对当成旧操作的空转。
@@ -252,7 +253,8 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					for (const { call, pending, result } of savedResults(state.messages)) {
 						if (pending) await rememberResumeChange(call, 'pending');
 						else {
-							remember(call, result);
+							// 退出后认领会释放，协作者也能变更清单。续做时重新观察当前结果。
+							if (!chatTaskToolNames.has(call.name)) remember(call, result);
 							if (!result.isError) await rememberResumeChange(call, 'restored');
 						}
 					}
@@ -267,13 +269,9 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 				] });
 				let lateSteering: Awaited<ReturnType<typeof readSteering>> | undefined;
 				let earlyEndCheck: 'pending' | 'used' | undefined;
-					let awaitingCollaboration = false;
+				let awaitingCollaboration = false;
 				turns: while (true) {
 					signal.throwIfAborted();
-					if (state.turn >= MAX_TURNS) {
-						await stopAtLimit('已达到单次任务的模型轮数上限。');
-						break;
-					}
 					await update({ turn: state.turn + 1 });
 					const start = { type: 'turn-start' as const, turn: state.turn };
 					await ctx.record?.(start);
@@ -355,7 +353,7 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					if (calls.some((call) => !call.id) || new Set(calls.map((call) => call.id)).size !== calls.length) {
 						throw new Error('模型返回了无法配对的工具请求。');
 					}
-					if (finished && state.turn < MAX_TURNS) {
+					if (finished) {
 						if (ctx.takeSteering) {
 							const pending = await readSteering();
 							if (pending.length) lateSteering = pending;
@@ -364,7 +362,7 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 							earlyEndCheck = 'pending';
 						}
 					}
-					const newNote = finished && state.turn < MAX_TURNS && ctx.inbox?.().some((note) =>
+					const newNote = finished && ctx.inbox?.().some((note) =>
 						(note.from === 'user' || collaboration) && !inbox?.some(({ id }) => id === note.id));
 					const followUp = lateSteering !== undefined || earlyEndCheck === 'pending' || newNote || held;
 					await update({
@@ -375,8 +373,7 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					if (inbox?.length) await ctx.acceptInbox?.(inbox.map(({ id }) => id));
 
 					if (truncated) {
-						if (!response.structuredOutput && continuations < MAX_OUTPUT_CONTINUATIONS && state.turn < MAX_TURNS) {
-							continuations++;
+						if (!response.structuredOutput && content.trim()) {
 							outputSoFar = (outputSoFar ?? '') + content;
 							continue;
 						}
@@ -386,17 +383,12 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					outputSoFar = undefined;
 					if (calls.length === 0) {
 						if (response.stopReason === 'tool-calls') throw new Error('模型结束了本轮，却没有给出完整的工具请求。');
-						if (held && collaboration && !newNote && !lateSteering && state.turn < MAX_TURNS && !collaboration.pending().actionable) {
+						if (held && collaboration && !newNote && !lateSteering && !collaboration.pending().actionable) {
 							await collaboration.waitForProgress(signal);
 						}
 						if (followUp) continue;
 						break;
 					}
-					if (state.turn >= MAX_TURNS || calls.length > callsRemaining) {
-						await stopAtLimit('继续执行将超过单次任务的运行上限。');
-						break;
-					}
-
 					const signatures = new Map(calls.map((call) => [call.id, toolSignature(call)]));
 					const allStalled = (pending: ToolCall[]) => pending.length > 0 && pending.every((call) => {
 						const outcome = toolOutcomes.get(signatures.get(call.id)!);
@@ -408,8 +400,8 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					}
 
 					const skip = collaboration || resuming ? async (call: ToolCall) => {
-						if (collaboration?.pending().questions && (!answering || !canUseToolWhileAnswering(call.name))) {
-							return '子 Agent 正在等待答复。已保留此前完成的操作，答复后继续。';
+						if ((answering || collaboration?.pending().questions) && (!answering || !canUseToolWhileAnswering(call))) {
+							return '本轮优先答复子 Agent。已保留此前完成的操作，请在后续轮次继续。';
 						}
 						return resuming ? skipContinuation(call) : undefined;
 					} : undefined;

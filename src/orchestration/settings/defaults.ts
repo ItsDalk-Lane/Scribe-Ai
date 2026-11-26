@@ -28,6 +28,8 @@ export const DEFAULT_SETTINGS: ScribeSettings = {
 	thinkingByModel: {},
 	customProviders: {},
 	chatLocation: 'right-sidebar',
+	confirmChatRemoval: true,
+	logRetentionDays: 30,
 	spillCleanupDays: 30,
 	subagents: DEFAULT_SUBAGENT_SETTINGS,
 	skillSettings: normalizeSkillSettings(),
@@ -137,6 +139,12 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 			|| stored.chatLocation === 'editor-tab'
 			? stored.chatLocation
 			: DEFAULT_SETTINGS.chatLocation,
+		confirmChatRemoval: typeof stored.confirmChatRemoval === 'boolean'
+			? stored.confirmChatRemoval
+			: DEFAULT_SETTINGS.confirmChatRemoval,
+		logRetentionDays: typeof stored.logRetentionDays === 'number' && Number.isSafeInteger(stored.logRetentionDays) && stored.logRetentionDays >= 0
+			? stored.logRetentionDays
+			: DEFAULT_SETTINGS.logRetentionDays,
 		spillCleanupDays: typeof stored.spillCleanupDays === 'number'
 			&& Number.isSafeInteger(stored.spillCleanupDays)
 			&& stored.spillCleanupDays >= 0
@@ -154,6 +162,8 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 		communication: {
 			credentialIds: strings(stored.communication?.credentialIds),
 			proxyUrl: typeof stored.communication?.proxyUrl === 'string' ? stored.communication.proxyUrl : '',
+			...(typeof stored.communication?.proxyCredentialId === 'string' && stored.communication.proxyCredentialId
+				&& { proxyCredentialId: stored.communication.proxyCredentialId }),
 			providerNames: strings(stored.communication?.providerNames),
 			baseUrls: strings(stored.communication?.baseUrls),
 			protocols: strings(stored.communication?.protocols),

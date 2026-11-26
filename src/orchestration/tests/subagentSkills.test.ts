@@ -44,9 +44,9 @@ function respond(calls: ToolCall[] = [], beforeResult?: () => Promise<void>): Mo
 
 function reviewResults(request: ModelRequest): ToolCall[] {
 	const reviews: ToolCall[] = [];
-	for (const line of (request.system ?? '').split('\n')) {
-		if (!line.startsWith('{')) continue;
-		const note = JSON.parse(line) as Partial<SubagentNote>;
+	const prompt = request.messages.find(({ content }) => content.startsWith('协作资料，'));
+	const notes = prompt ? JSON.parse(prompt.content.slice(prompt.content.indexOf('\n') + 1)) as Partial<SubagentNote>[] : [];
+	for (const note of notes) {
 		if (note.kind === 'result' && note.review?.status === 'pending' && note.id) {
 			const decision = note.status === 'done' ? { decision:'use' } : { decision:'blocked', reason:'分派未完成。' };
 			reviews.push({ id:'review-' + note.id, name:'review_subagent_result', input:{result_id:note.id, ...decision} });
@@ -87,7 +87,9 @@ async function delegate(t: TestContext, scenario: Scenario) {
 	const skills = createSkillRegistry(app, settings, async () => {}, {
 		draft: async () => { dialogs.push('draft'); return false; }, install: async () => { dialogs.push('install'); return false; },
 	});
-	const mcpConfig = normalizeMcpSettings({servers: ['example', 'other'].map((id) => ({id, name:id, enabled:true, type:'stdio', command:'fixture'}))});
+	const mcpConfig = normalizeMcpSettings({servers: ['example', 'other'].map((id, index) => ({
+		id, name:id, enabled:true, type:'http', url:`http://127.0.0.1:${4000 + index}/`,
+	}))});
 	const mcp = scenario.mcp ? createMcpManager({settings:() => mcpConfig, commit:() => Promise.resolve(), cwd:root,
 		clientInfo:{name:'fixture',version:'1'}, openBrowser:() => {}, storage:{getSecret:() => null,setSecret:() => {}},
 		connect({server}) {

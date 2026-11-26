@@ -1,13 +1,15 @@
 import { Buffer } from 'node:buffer';
+import { obsidianSearchToolName } from '../tools/workspaceTools';
 import { isAbsolute, resolve } from 'node:path';
 import { MAX_REVIEW_MATERIAL_BYTES } from '../constants';
 import { readOnlySkillTools } from '../tools/skillTools';
+import { chatTaskToolNames } from '../tools/chatTaskTools';
 import { isWithinPath } from '../tools/support/pathUtils';
 import { createPermissionPolicy } from './policies/permissions';
 import { createReadDelivery } from '../runtime/readDelivery';
 import type { ExecutionMode, RunContext, Task } from '../types';
 
-const sideChatTools = new Set([...readOnlySkillTools, 'Read', 'Glob', 'Grep']);
+const sideChatTools = new Set([...readOnlySkillTools, 'Read', 'Glob', 'Grep', obsidianSearchToolName]);
 
 export async function createRunContext(
 	task: Task,
@@ -45,7 +47,8 @@ export async function createRunContext(
 			...permissions,
 			canRead: (path) => intent === 'plan' && permissions.canRead(path),
 			canWrite: () => false,
-			canCallTool: (tool) => intent === 'plan' && tool.isReadOnly && sideChatTools.has(tool.name) && permissions.canCallTool(tool),
+			canCallTool: (tool) => intent === 'plan' && (chatTaskToolNames.has(tool.name) || (tool.isReadOnly && sideChatTools.has(tool.name)))
+				&& permissions.canCallTool(tool),
 		} };
 	}
 	return { ...options, task, permissions, readFiles: new Map(), readDelivery };

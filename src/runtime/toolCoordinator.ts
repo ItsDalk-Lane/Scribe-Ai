@@ -1,4 +1,5 @@
 import type { App } from 'obsidian';
+import { subagentOperation } from '../tools/subagentTools';
 import { ToolReviewDeniedError } from '../types';
 import type { ToolContext, ToolCoordinator, ToolExecutor, ToolReviewStatus } from '../types';
 
@@ -23,16 +24,18 @@ export function createToolCoordinator(app: App, executor: ToolExecutor): ToolCoo
 				let waiting = 0;
 				let approvalReview: ToolReviewStatus | undefined;
 				let denied: ToolContext['retryApproval'];
-				const work = call.name === 'wait_agent' || call.name === 'ask_parent' ? undefined : observer.onWork;
+				const operation = subagentOperation(call);
+				const work = operation === 'wait_agent' || operation === 'ask_parent' ? undefined : observer.onWork;
 				work?.(task.id, true);
 				const result = await executor.execute(call, { app, task, signal, permissions, readFiles, readDelivery, cwd,
 					skillRun: ctx.skillRun, mcpRun: ctx.mcpRun, subagents: ctx.subagents, subagentId: ctx.subagentId,
+				chatTasks: ctx.chatTasks,
 					onShellOutput: observer.onEvent && ((output) => {
 						if (!signal.aborted) observer.onEvent?.({ type: 'tool-output', callId: call.id, output });
 					}),
 					approve: approve && (async (approval, identity) => {
 						const requested = performance.now();
-						const trackReview = permissions.executionMode === 'auto-review';
+							const trackReview = permissions.executionMode === 'auto-review' && !approval.humanRequired;
 						try {
 							const allowed = await approve(approval);
 							if (trackReview) approvalReview = allowed ? 'approved' : 'incomplete';

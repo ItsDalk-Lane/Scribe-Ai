@@ -8,6 +8,7 @@ import { isThinkingLevel } from '../settings/thinking';
 import { createSubagentRecordIndex } from './subagentRecords';
 import { validNoteChange } from '../../tools/support/noteChange';
 import { isCachedImagePath } from './paths';
+import { isChatTaskEvent } from './chatTasks';
 
 function record(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -154,6 +155,10 @@ function request(value: unknown): value is TaskRequest {
 		&& (value.imageSourcePath === undefined || text(value.imageSourcePath))
 		&& (value.imageLinkEnd === undefined || (count(value.imageLinkEnd) && Number(value.imageLinkEnd) <= value.instruction.length))
 		&& (value.intent === undefined || value.intent === 'plan' || value.intent === 'review')
+		&& (value.approvedPlanTaskId === undefined || (value.intent === undefined && text(value.approvedPlanTaskId)
+			&& value.approvedPlanTaskId.length > 0 && value.approvedPlanTaskId.length <= 128))
+		&& (value.revisesPlanTaskId === undefined || (value.intent === 'plan' && text(value.revisesPlanTaskId)
+			&& value.revisesPlanTaskId.length > 0 && value.revisesPlanTaskId.length <= 128))
 		&& (value.target === undefined || (value.intent === undefined && record(value.target)
 			&& (value.target.kind === 'mcp' || value.target.kind === 'agent')
 			&& text(value.target.id) && Boolean(value.target.id.trim()) && text(value.target.label) && Boolean(value.target.label.trim())))
@@ -192,11 +197,17 @@ function model(value: unknown): boolean {
 		&& (value.reasoning == null || isThinkingLevel(value.reasoning));
 }
 
+function queueDestination(value: unknown): boolean {
+	return value === undefined || (record(value) && model(value) && text(value.baseUrl) && Boolean(value.baseUrl)
+		&& text(value.api) && Boolean(value.api) && text(value.fingerprint) && /^[a-f0-9]{64}$/u.test(value.fingerprint));
+}
+
 export function isMainEntry(value: unknown): value is MainConversationEntry {
 	if (!record(value)) return false;
 	switch (value.type) {
 		case 'queue-add':
 			return record(value.message) && text(value.message.id) && value.message.id.length > 0
+				&& queueDestination(value.message.destination)
 				&& request(value.message.request) && Boolean(value.message.request.instruction.trim());
 		case 'queue-edit':
 			return text(value.messageId) && text(value.instruction) && Boolean(value.instruction.trim()) && validSkillMentions(value.skillMentions);
@@ -222,6 +233,9 @@ export function isMainEntry(value: unknown): value is MainConversationEntry {
 		case 'run-summary':
 			return record(value.summary) && count(value.summary.throughMessage) && value.summary.throughMessage > 1
 				&& text(value.summary.text) && Boolean(value.summary.text.trim()) && Buffer.byteLength(value.summary.text) <= 4_096;
+		case 'video-item':
+			return record(value.item) && text(value.item.key) && /^[a-f0-9]{64}$/u.test(value.item.key)
+				&& text(value.item.content) && Boolean(value.item.content.trim()) && Buffer.byteLength(value.item.content) <= 16_384;
 		case 'video-analysis':
 			return text(value.content) && Boolean(value.content.trim()) && Buffer.byteLength(value.content) <= 16_384
 				&& (value.sources === undefined || (Array.isArray(value.sources) && value.sources.length > 0 && value.sources.length <= 2
@@ -234,7 +248,7 @@ export function isMainEntry(value: unknown): value is MainConversationEntry {
 				&& (item.throughMessage === undefined || (count(item.throughMessage) && item.throughMessage > 1));
 		}
 		case 'auxiliary-usage':
-			return record(value.usage) && (value.usage.kind === 'review' || value.usage.kind === 'summary' || value.usage.kind === 'video')
+			return record(value.usage) && (value.usage.kind === 'review' || value.usage.kind === 'summary' || value.usage.kind === 'video' || value.usage.kind === 'main-attempt')
 				&& (value.usage.reportedUsage === undefined || reportedUsage(value.usage.reportedUsage))
 				&& (value.usage.cost === undefined || duration(value.usage.cost));
 		case 'retry': {
@@ -284,7 +298,7 @@ export function isSubagentEntry(value: unknown): value is Extract<ConversationEn
 				&& (item.instructions === undefined || text(item.instructions))
 				&& (item.readOnly === undefined || typeof item.readOnly === 'boolean')
 				&& (item.allowProvider === undefined || typeof item.allowProvider === 'boolean')
-				&& (item.modelOrigin === undefined || identifier(item.modelOrigin));
+				&& (item.modelOrigin === undefined || identifier(item.modelOrigin)) && queueDestination(item.reportDestination);
 		}
 		case 'run':
 			return isMainEntry(item.entry) && !isQueueEntry(item.entry)
@@ -318,7 +332,7 @@ export function isSubagentEntry(value: unknown): value is Extract<ConversationEn
 export function parseConversationEntry(line: string, number: number): ConversationEntry {
 	try {
 		const value: unknown = JSON.parse(line);
-		if (!isMainEntry(value) && !isSubagentEntry(value) && !isSubagentReportEntry(value)) throw new Error('对话记录格式无效。');
+		if (!isMainEntry(value) && !isSubagentEntry(value) && !isSubagentReportEntry(value) && !isChatTaskEvent(value)) throw new Error('对话记录格式无效。');
 		return value;
 	} catch (error) {
 		throw Object.assign(new ConversationRecordError(`无法读取对话记录的第 ${number} 行。`), { cause: error });
@@ -371,7 +385,7 @@ export async function replayConversation(id: string, entries: AsyncIterable<Conv
 			continue;
 		}
 		replayQueueEntry(id, queue, item);
-		if (isQueueEntry(item)) continue;
+		if (isQueueEntry(item) || item.type === 'chat-tasks') continue;
 		if (item.type === 'start') {
 			const { task, model } = item;
 			if (runs.has(task.id)) throw new Error('对话中的任务编号无效或重复。');
@@ -441,6 +455,9 @@ export async function replayConversation(id: string, entries: AsyncIterable<Conv
 					throw new ConversationRecordError('压缩记录与任务交接摘要的范围不符。');
 				}
 				state.contextCompaction = item.compaction;
+				break;
+			case 'video-item':
+				(run.videoItems ??= []).push(item.item);
 				break;
 			case 'video-analysis':
 				run.videoAnalysis = item.content;

@@ -1,7 +1,8 @@
 import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 import { videoMime } from '../../communication/modelVideo';
-import type { AuxiliaryUsage, ModelRequest, ModelService, RunContext, RunObserver, ScribeSettings, VideoSourceKind } from '../../types';
+import type { AuxiliaryUsage, ModelRequest, ModelService, RunContext, RunObserver, SavedVideoItem, ScribeSettings, VideoSourceKind } from '../../types';
 import { meteredService } from '../meteredService';
 import { isModelAvailable, videoModelFor } from '../settings/modelAvailability';
 import { guardModelConnection } from '../settings/modelConnection';
@@ -12,6 +13,7 @@ type VideoModels = Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin' |
 
 export function createVideoAnalysis(ctx: RunContext, settings: ScribeSettings, models: VideoModels,
 	record: (usage: AuxiliaryUsage) => Promise<void>, save: (content: string, kinds: VideoSourceKind[]) => Promise<void>,
+	items: { previous?: readonly SavedVideoItem[]; alreadySaved: boolean; save(item: SavedVideoItem): Promise<void> },
 	confirmResume?: RunObserver['confirmResume']): RunContext['videoAnalysis'] {
 	const { task, observer, signal } = ctx;
 	const sources = videoSources(task.request, transcodableVideo).flatMap((source) => {
@@ -36,6 +38,9 @@ export function createVideoAnalysis(ctx: RunContext, settings: ScribeSettings, m
 	const kinds = [...new Set(sources.map(({ kind }) => kind))];
 	const videoModels = meteredService(models, 'video', record);
 	const approved = new Set<string>();
+	const completed = new Map(items.previous?.map((item) => [item.key, item.content]));
+	const saved = new Set(items.alreadySaved ? completed.keys() : []);
+	const question = task.request.instruction.slice(0, task.request.imageLinkEnd);
 	let pending: Promise<string> | undefined;
 
 	async function analyze() {
@@ -55,6 +60,16 @@ export function createVideoAnalysis(ctx: RunContext, settings: ScribeSettings, m
 					video = { mimeType, url: source.url };
 				} else video = await prepareVideo(ctx, source, signal);
 				check();
+				const route = models.modelConnection?.(choice.providerId, choice.model);
+				const key = createHash('sha256').update(JSON.stringify([choice.providerId, choice.model, route?.api, route?.baseUrl, origin,
+					settings.communication.credentialIds[choice.providerId], question, source, video.data
+						? createHash('sha256').update(video.data, 'base64').digest('hex') : video.url])).digest('hex');
+				const previous = completed.get(key);
+				if (previous) {
+					if (!saved.has(key)) { await items.save({ key, content: previous }); saved.add(key); }
+					reports.push(label + '\n' + previous);
+					continue;
+				}
 				const checkAddress = (address: string) => {
 					check();
 					if (!origin || URL.parse(address)?.origin !== origin) throw new Error('视频解析请求的实际接收地址已变更。');
@@ -62,7 +77,7 @@ export function createVideoAnalysis(ctx: RunContext, settings: ScribeSettings, m
 				const request: ModelRequest = {
 					...choice,
 					system: '你负责分析一个视频。按照用户问题提取有用的事实。每行以 [MM:SS] 或 [HH:MM:SS] 开头，描述对应时刻的画面、文字或声音。不要添加无时间戳的标题；无法确认的细节应明确标注。',
-					messages: [{ role: 'user', content: task.request.instruction || '概述这段视频的主要内容。' }],
+					messages: [{ role: 'user', content: question || '概述这段视频的主要内容。' }],
 					tools: [], signal, maxTokens: 2_000, reasoning: null,
 					video: { messageIndex: 0, hasFiles: video.data !== undefined, load: (active) => {
 						active.throwIfAborted();
@@ -84,14 +99,19 @@ export function createVideoAnalysis(ctx: RunContext, settings: ScribeSettings, m
 				};
 				observer.onWork?.(task.id, true);
 				const response = await videoModels.send(request).finally(() => observer.onWork?.(task.id, false));
-				signal.throwIfAborted();
 				if (!response.reportedUsage?.videoInput) throw new Error('服务商未确认处理视频输入。');
 				if (response.stopReason !== 'end') throw new Error('视频解析结果未完整返回。');
 				const lines = response.content.trim().split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
 				if (!lines.length || lines.some((line) => !/^\[(?:\d{1,3}:[0-5]\d|\d{1,3}):[0-5]\d\]\s*\S/u.test(line))) {
 					throw new Error('视频模型没有返回有效的带时间戳解析结果。');
 				}
-				reports.push(label + '\n' + lines.join('\n'));
+				const content = lines.join('\n');
+				if (Buffer.byteLength(content) > 16_384) throw new Error('视频解析结果过长。');
+				await items.save({ key, content });
+				completed.set(key, content);
+				saved.add(key);
+				signal.throwIfAborted();
+				reports.push(label + '\n' + content);
 			} catch (error) {
 				signal.throwIfAborted();
 				throw Object.assign(new Error(label + '解析失败。' + (error instanceof Error ? error.message : String(error))), { cause: error });

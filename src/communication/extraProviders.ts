@@ -82,7 +82,7 @@ const BAILIAN_TOKEN_PLAN_COMMON = [
 const BAILIAN_CODING_MODELS = ['qwen3.7-plus', 'qwen3.6-plus', 'kimi-k2.5', 'glm-5', 'MiniMax-M2.5'];
 
 const BAILIAN_PAYG_MODELS = [
-	'deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-v4.1-flash',
+	'deepseek-v4-pro', 'deepseek-v4-flash-0731', 'deepseek-v4.1-flash',
 	'kimi-k2.6', 'glm-5.1', 'MiniMax-M2.5',
 	'qwen3.8-max', 'qwen3.8-flash', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-plus', 'qwen3.6-flash',
 ];

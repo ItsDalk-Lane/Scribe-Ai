@@ -9,7 +9,7 @@ import { createConversationStore } from '../storage/conversationStore';
 import { replayConversation } from '../storage/taskStore';
 import { conversationHistory } from '../context/conversationHistory';
 
-import { guardModelConnection } from '../settings/modelConnection';
+import { guardModelConnection, queuedModelDestination } from '../settings/modelConnection';
 import { manualConversationSummary } from '../context/manualConversationSummary';
 import { createSubagentController } from '../subagents/controller';
 import { normalizeSettings } from '../settings/defaults';
@@ -165,8 +165,10 @@ void test('后台汇总、进展小结和分批整理共享同一用量记录，
 	const parent = start(id, 'main', '主题'.repeat(230));
 	const model = parent.model;
 	const origin = 'https://example.test';
+	const modelConnection: ModelService['modelConnection'] = () => ({ baseUrl: origin, api: 'openai-completions', source: 'configured' });
+	const reportDestination = queuedModelDestination(model, modelConnection);
 	await store.append(id, [parent,
-		subagent('worker', { kind: 'create', modelOrigin: origin, agent: { id: 'worker', rootTaskId: 'main', name: '资料', role: 'worker', model } }),
+		subagent('worker', { kind: 'create', modelOrigin: origin, reportDestination, agent: { id: 'worker', rootTaskId: 'main', name: '资料', role: 'worker', model } }),
 		subagent('worker', { kind: 'run', entry: start(id, 'child', '查资料') }),
 		subagent('worker', { kind: 'run', entry: messages('child', { role: 'assistant', content: '已核对' }) }),
 		subagent('worker', { kind: 'run', entry: { type: 'finish', taskId: 'child', status: 'done', turn: 1 } }),
@@ -174,8 +176,8 @@ void test('后台汇总、进展小结和分批整理共享同一用量记录，
 		{ type: 'finish', taskId: 'main', status: 'done', turn: 1 },
 	]);
 	const sent: string[] = [];
-	const service: Pick<ModelService, 'send' | 'modelOrigin' | 'contextLimits'> = {
-		modelOrigin: () => origin,
+	const service: Pick<ModelService, 'send' | 'modelOrigin' | 'modelConnection' | 'contextLimits'> = {
+		modelConnection, modelOrigin: () => origin,
 		contextLimits: () => ({ contextWindow: 4096, maxTokens: 512 }),
 		async send(request) {
 			await request.beforeSend?.(origin + '/chat');
@@ -187,6 +189,34 @@ void test('后台汇总、进展小结和分批整理共享同一用量记录，
 	};
 	const settings = normalizeSettings({ ...model, providerModels: { [model.providerId]: ['another', model.model] } });
 	const checkModel = guardModelConnection(settings, model);
+	for (const changes of ['disabled', 'changed', 'legacy'] as const) {
+		const copy = changes + '-summary';
+		const records: ConversationEntry[] = [
+			start(copy, 'main', '原问题'),
+			subagent('worker', { kind: 'create', modelOrigin: origin, reportDestination: changes === 'legacy' ? undefined : reportDestination,
+				agent: { id: 'worker', rootTaskId: 'main', name: '资料', role: 'worker', model } }),
+			subagent('worker', { kind: 'run', entry: start(copy, 'child', '查资料') }),
+			subagent('worker', { kind: 'run', entry: messages('child', { role: 'assistant', content: '本地完成的原稿' }) }),
+			subagent('worker', { kind: 'run', entry: { type: 'finish', taskId: 'child', status: 'done', turn: 1 } }),
+			messages('main', { role: 'assistant', content: '已收到', local: true, deliveryAgents: ['worker'] }),
+			{ type: 'finish', taskId: 'main', status: 'done', turn: 1 },
+		];
+		await store.append(copy, records);
+		const restored = createSubagentController({ ...settings, disabledProviderIds: changes === 'disabled' ? [model.providerId] : [] },
+			store, () => assert.fail('不应重启已完成的子任务'), (value) => value, {
+				...service, modelConnection: changes === 'changed' ? () => ({ ...modelConnection(model.providerId, model.model), baseUrl: origin + '/other' }) : modelConnection,
+			});
+		const ready = new Promise<void>((resolve) => {
+			const unsubscribe = restored.controls.subscribe(copy, () => {
+				if (restored.controls.snapshot(copy).reports?.main) { unsubscribe(); resolve(); }
+			});
+		});
+		await restored.controls.load(copy);
+		await ready;
+		restored.dispose();
+		assert.match((await store.load(copy)).runs[0]?.subagentReport?.content ?? '', /本地完成的原稿/u);
+		assert.equal(sent.length, 0);
+	}
 	const controller = createSubagentController(settings, store, () => assert.fail('不应重启已完成的子任务'), (value) => value, service);
 	t.after(() => controller.dispose());
 	const ready = new Promise<void>((resolve) => {
@@ -250,7 +280,7 @@ void test('saved conversations can be listed, reopened and appended independentl
 void test('a saved goal is discoverable before its first round and deletion fences off late writes', async (t) => {
 	const { directory, store } = await fixture(t);
 	const id = 'goal-chat';
-	const goal = { objective: '检查会议纪要', status: 'active' as const, maxRounds: 5, usedRounds: 0, totalRounds: 0 };
+	const goal = { objective: '检查会议纪要', status: 'active' as const, usedRounds: 0, totalRounds: 0 };
 	const reopened = createConversationStore(directory);
 	assert.equal(await reopened.loadGoal(id), undefined);
 	const saving = store.saveGoal(id, goal);

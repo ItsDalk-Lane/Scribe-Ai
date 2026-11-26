@@ -1,4 +1,5 @@
 import { Notice, Plugin } from 'obsidian';
+import { diagnostics } from './communication/diagnostics';
 import { CHAT_VIEW_ICON, CHAT_VIEW_TYPE, SIDE_CHAT_VIEW_TYPE, SUBAGENT_VIEW_TYPE } from './constants';
 import { openGithubSkillReview, openSkillDraftReview } from './interaction/skills/skillUi';
 import { skillNameTokens } from './skills/mentions';
@@ -11,8 +12,9 @@ import { uiText } from './interaction/uiText';
 import { isModelAvailable, reconcileDefaultModel, setProviderEnabled } from './orchestration/settings/modelAvailability';
 import { updateChatThinking } from './orchestration/settings/thinking';
 import { initializePluginStorage } from './orchestration/storage/pluginStorage';
+import { storeProxyCredentials } from './communication/proxy';
 import { createServices } from './services';
-import { sweepSpillFiles } from './tools/support/spillCleanup';
+import { sweepRetainedFiles } from './interaction/dataDirectorySettings';
 import type { McpSettings } from './tools/external/mcpConfig';
 import { normalizeWebSearchSettings, type WebSearchSettings } from './tools/external/webSearchSettings';
 import type { ScribeServices, ScribeSettings, VideoSourceKind } from './types';
@@ -42,19 +44,23 @@ export default class ScribeAiPlugin extends Plugin {
 			install: (...args) => openGithubSkillReview(this.app, ...args),
 		}, (next) => this.saveMcpSettings(next), async (id) => {
 			this.conversationViews.closeConversation(id);
+			this.services.logs.remove(id);
 			try {
 				await localState.forgetConversation(id);
 			} catch {
 				new Notice(uiText().saveFailed);
 			}
 		});
-		this.app.workspace.onLayoutReady(() => this.services?.tools.mcp?.reconcile());
+		this.app.workspace.onLayoutReady(() => {
+			const mcp = this.services?.tools.mcp;
+			void mcp?.migrateLegacyArguments().then(() => mcp.reconcile(), () => {
+				new Notice('无法迁移旧服务参数中的认证信息，请检查 Obsidian 密钥库。');
+			});
+		});
 		const catalog = this.services.communication.modelCatalog;
 		this.app.workspace.onLayoutReady(() => { void catalog.refresh().catch(() => {}); });
 		this.register(() => catalog.dispose());
-		queueMicrotask(() => {
-			try { sweepSpillFiles({ cacheDirectory: cache, cleanupPeriodDays: settings.spillCleanupDays }); } catch { /* 清理失败时留待下次。 */ }
-		});
+		queueMicrotask(() => { void sweepRetainedFiles(this); });
 
 		this.registerView(CHAT_VIEW_TYPE, (leaf) => new ChatView(leaf, this));
 		this.registerView(SIDE_CHAT_VIEW_TYPE, (leaf) => new SideChatView(leaf, this));
@@ -76,6 +82,7 @@ export default class ScribeAiPlugin extends Plugin {
 	}
 
 	onunload() {
+		diagnostics.useSink(undefined);
 		this.services?.orchestration.sessions.dispose();
 		this.services?.tools.mcp?.dispose();
 	}
@@ -161,6 +168,17 @@ export default class ScribeAiPlugin extends Plugin {
 			await this.writeSettings(next);
 			settings.disabledProviderIds = next.disabledProviderIds;
 			reconcileDefaultModel(settings);
+		});
+	}
+
+	async saveProxy(value: string, forgetCredentials = false): Promise<void> {
+		await this.enqueueSettingsSave(async () => {
+			const { settings, communication } = this.services;
+			const next = storeProxyCredentials(value, this.app.secretStorage, forgetCredentials ? undefined : settings.communication);
+			const updated = { ...settings.communication, proxyCredentialId: undefined, ...next };
+			await this.writeSettings({ ...settings, communication: updated });
+			Object.assign(settings.communication, updated);
+			communication.transport.configure(settings.communication);
 		});
 	}
 

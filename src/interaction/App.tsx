@@ -1,6 +1,7 @@
-import { guardModelConnection } from '../orchestration/settings/modelConnection';
+import { guardModelConnection, queuedModelDestination } from '../orchestration/settings/modelConnection';
 import { realpath } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
+import { Notice } from 'obsidian';
 import type { FileSystemAdapter } from 'obsidian';
 import { MAX_REVIEW_MATERIAL_BYTES } from '../constants';
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
@@ -8,11 +9,13 @@ import { canResumeRun, ResumeThinkingUnavailable } from '../orchestration/runRes
 import { composerShortcut } from './composerKeyboard';
 import { manualConversationSummary } from '../orchestration/context/manualConversationSummary';
 import { confirmAction } from './ConfirmModal';
+import { logScope } from '../communication/diagnostics';
 import { approvedPlanRequest, submittedPlan } from './chatPlan';
 import { goalRoundInstruction, validGoalRef } from './chatGoal';
 import BackgroundShellJobs from './components/BackgroundShellJobs';
 import ChatGoalStatus from './components/ChatGoalStatus';
 import ChatPlanCard from './components/ChatPlanCard';
+import ChatTaskProgress from './components/ChatTaskProgress';
 import { ActivityMetric, ContextMetric, UsagePopover, useChatMetrics } from './components/ChatMetrics';
 import ChatNavigation, { ConversationList } from './components/ChatNavigation';
 import type { HistoryTrigger } from './components/ChatNavigation';
@@ -45,7 +48,7 @@ import { useChatGoal } from './useChatGoal';
 import type { ChatTabActivity } from './ChatTabs';
 import type ScribeAiPlugin from '../main';
 import { MissingConversationError } from '../types';
-import type { AutoReviewDenial, ConversationSnapshot, ConversationSummary, ExecutionMode, NoteRef, QueuedMessage, RunObserver,
+import type { AutoReviewDenial, ConversationSnapshot, ConversationSummary, ExecutionMode, NoteRef, QueuedMessage, RunObserver, SessionRunOptions,
 	RunEvent, RunState, SavedRun, SkillMention, SubagentSnapshot, TaskRequest, TaskTarget } from '../types';
 
 interface ActiveSubmission {
@@ -72,12 +75,13 @@ interface ComposerDraft extends SkillDraft {
 	imageSourcePath?: string;
 }
 
-function draftRequest(draft: ComposerDraft, conversationId: string, intent?: TaskRequest['intent']): TaskRequest {
+function draftRequest(draft: ComposerDraft, conversationId: string, intent?: TaskRequest['intent'], revisesPlanTaskId?: string): TaskRequest {
 	return {
 		conversationId,
 		instruction: draft.instruction,
 		...(draft.imageSourcePath && { imageSourcePath: draft.imageSourcePath }),
 		...(intent && { intent }),
+		...(intent === 'plan' && revisesPlanTaskId && { revisesPlanTaskId }),
 		...(!intent && draft.target && { target: draft.target }),
 		refs: draft.refs,
 		skillScope: draft.skillScope,
@@ -136,6 +140,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 	const [busy, setBusy] = useState(false);
 	const [composerMode, setComposerMode] = useState<'plan' | 'goal'>();
 	const planned = composerMode === 'plan';
+	const planDraftRun = useRef<string>(undefined);
 	const [loading, setLoading] = useState(false);
 	const [managingHistory, setManagingHistory] = useState(false);
 	const queue = useMessageQueue(services.orchestration.conversations, () => setError(text.queueSendFailed), conversation.queue);
@@ -311,14 +316,39 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		}
 	}
 
+	function setConfirmChatRemoval(enabled: boolean) {
+		services.settings.confirmChatRemoval = enabled;
+		void plugin.saveSettings().catch(() => new Notice(text.saveFailed));
+	}
+
+	function removalPrompt(execute: () => void | Promise<void>) {
+		// 勾选只在点确认时生效，取消不会改变设置。
+		let neverAsk = false;
+		return {
+			checkbox: {
+				label: text.chatRemovalNeverAsk,
+				checked: false,
+				onChange: (checked: boolean) => { neverAsk = checked; },
+			},
+			onConfirm: async () => {
+				if (neverAsk) setConfirmChatRemoval(false);
+				await execute();
+			},
+		};
+	}
+
 	function confirmDeleteConversation(conversation: ConversationSummary, trigger: HTMLButtonElement) {
 		if (navigating.current) return;
+		if (!services.settings.confirmChatRemoval) {
+			void manageConversation(conversation.id);
+			return;
+		}
 		confirmAction(services.app, {
 			title: text.chatDeleteConversation,
 			message: text.chatDeleteConfirm.replace('{title}', () => conversation.title || text.chatUntitled),
 			confirmText: text.chatDeleteConversation,
 			cancelText: text.cancel,
-			onConfirm: async () => { if (mounted.current) await manageConversation(conversation.id); },
+			...removalPrompt(async () => { if (mounted.current) await manageConversation(conversation.id); }),
 			onClose: restoreHistoryFocus(trigger),
 		});
 	}
@@ -333,29 +363,35 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		});
 	}
 
+	async function applyArchive(conversation: ConversationSummary, archive: boolean) {
+		if (!mounted.current || navigating.current) return;
+		navigating.current = true;
+		setManagingHistory(true);
+		setError('');
+		try {
+			await onArchive(conversation.id, archive);
+		} catch (cause) {
+			if (mounted.current) setError(cause instanceof Error ? cause.message : text.chatArchiveError);
+		} finally {
+			navigating.current = false;
+			if (mounted.current) setManagingHistory(false);
+		}
+	}
+
 	function confirmArchiveConversation(conversation: ConversationSummary, trigger: HTMLButtonElement) {
 		if (navigating.current) return;
 		const archive = !conversation.archived;
+		if (!services.settings.confirmChatRemoval) {
+			void applyArchive(conversation, archive);
+			return;
+		}
 		const action = archive ? text.chatArchiveConversation : text.chatUnarchiveConversation;
 		confirmAction(services.app, {
 			title: action,
 			message: conversation.title || text.chatUntitled,
 			confirmText: action,
 			cancelText: text.cancel,
-			onConfirm: async () => {
-				if (!mounted.current || navigating.current) return;
-				navigating.current = true;
-				setManagingHistory(true);
-				setError('');
-				try {
-					await onArchive(conversation.id, archive);
-				} catch (cause) {
-					if (mounted.current) setError(cause instanceof Error ? cause.message : text.chatArchiveError);
-				} finally {
-					navigating.current = false;
-					if (mounted.current) setManagingHistory(false);
-				}
-			},
+			...removalPrompt(() => applyArchive(conversation, archive)),
 			onClose: restoreHistoryFocus(trigger),
 		});
 	}
@@ -417,7 +453,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		setQuotes((previous) => previous === draft.quotes ? [] : previous);
 	}
 
-	async function askSideChat(request: TaskRequest, prompt = request.instruction) {
+	async function askSideChat(request: TaskRequest, prompt = request.instruction, queued?: Pick<QueuedMessage, 'destination'>) {
 		if (request.selection) throw new SideChatHandoffError(text.queueSelectionUnavailable);
 		if (request.target) throw new SideChatHandoffError(tr('这条任务已指定服务或子 Agent，请在主聊天中发送。', 'Send this targeted task in the main chat.'));
 		if (navigating.current) throw new SideChatHandoffError(text.sideChatOpenFailed);
@@ -438,6 +474,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 			const start = prompt === request.instruction ? 0 : Math.max(0, request.instruction.trimEnd().length - prompt.length);
 			await openSideChat(plugin, conversationId, parentRuns, {
 				prompt,
+				queued,
 				imageSourcePath: request.imageSourcePath,
 				skillScope: request.skillScope,
 				skillNotePaths: request.skillNotePaths,
@@ -505,7 +542,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 	const openAgent = useCallback<InspectSubagent>((id) => plugin.openSubagent(conversationId, id), [plugin, conversationId]);
 
 	async function perform(draft?: ComposerDraft, resume?: DisplayedRun, queued?: QueuedMessage,
-		command?: { request: TaskRequest; goal?: true }): Promise<RunState | undefined> {
+		command?: { request: TaskRequest; goal?: true }, confirmQueue = false): Promise<RunState | undefined> {
 		if (active.current || auxiliary.current || navigating.current || chatModel.isSaving()) return;
 		if (planned && ((resume && !resume.request.intent) || (queued && !queued.request.intent) || command?.goal)) return;
 		const choice = chatModel.choice;
@@ -558,16 +595,39 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				confirmResume: (preview, signal) => requestParent(submission, { kind: 'send', preview }, signal),
 			};
 			setExecution(displayed);
-			const editIntent = replaceFrom ? history.find(({ state }) => state.taskId === replaceFrom)?.request.intent : undefined;
+			const edited = replaceFrom ? history.find(({ state }) => state.taskId === replaceFrom)?.request : undefined;
 			const request = resume?.request ?? queued?.request ?? command?.request ??
-				(draft && draftRequest(draft, conversationId, planned ? 'plan' : editIntent));
+				(draft && draftRequest(draft, conversationId, planned ? 'plan' : edited?.intent,
+					replaceFrom ? edited?.revisesPlanTaskId : planDraftRun.current));
 			if (!request) return;
 			if (draft) request.skillNotePaths ??= services.orchestration.skills.notePaths(draft.refs);
-			const options = { model: choice, rememberConversation: false, executionMode: submission.executionMode };
+			const options: SessionRunOptions = { model: choice, rememberConversation: false, executionMode: submission.executionMode };
+			if (queued && confirmQueue) options.confirmQueuedDestination = (previous, current, signal) => new Promise((resolve) => {
+				signal.throwIfAborted();
+				let accepted = false;
+				const old = previous ? `${previous.providerId} / ${previous.model}\n${previous.baseUrl}` : tr('旧记录没有接收方', 'No destination saved');
+				const close = confirmAction(services.app, {
+					title: tr('确认排队消息的接收方', 'Confirm queued message destination'),
+					message: tr(`原接收方\n${old}\n\n将发送给\n${current.providerId} / ${current.model}\n${current.baseUrl}\n\n这条消息、相关聊天历史和附件将交给新接收方。`,
+						`Previous destination\n${old}\n\nSend to\n${current.providerId} / ${current.model}\n${current.baseUrl}\n\nThis message, related chat history, and attachments will be shared with this destination.`),
+					confirmText: tr('确认发送', 'Confirm send'), cancelText: text.cancel,
+					onConfirm: () => { accepted = mounted.current && active.current === submission && !submission.stopped; },
+					onClose: () => {
+						signal.removeEventListener('abort', close);
+						resolve(accepted);
+					},
+				});
+				signal.addEventListener('abort', close, { once: true });
+			});
 			const run = resume ? sessions.resume(conversationId, resume.state.taskId, observer, options)
-				: queued ? sessions.submitQueued(queued, observer, () => { if (active.current === submission) queue.remove(queued.id); }, options)
+				: queued ? sessions.submitQueued(queued, observer, () => {
+					if (active.current !== submission) return;
+					queue.remove(queued.id);
+					if (confirmQueue) queue.resume(Promise.resolve(conversationId));
+				}, options)
 					: sessions.submit(request, observer, replaceFrom, options);
 			submission.taskId = run.taskId;
+			if (request.intent === 'plan') planDraftRun.current = run.taskId;
 			setLiveRequest(request);
 			setLiveModel(resume?.model ?? choice);
 			if (draft && !replaceFrom) clearDraft(draft, true);
@@ -690,9 +750,15 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 			}
 			const current = active.current;
 			if (current) {
-				const request = draftRequest(draft, conversationId, planned ? 'plan' : undefined);
+				const choice = chatModel.choice;
+				const destination = choice && queuedModelDestination(choice, services.communication.models.modelConnection);
+				if (!destination) {
+					setError(tr('请先为当前模型配置明确的接收地址，再添加排队消息。', 'Set an explicit endpoint for this model before queuing a message.'));
+					return;
+				}
+				const request = draftRequest(draft, conversationId, planned ? 'plan' : undefined, planDraftRun.current);
 				request.skillNotePaths = services.orchestration.skills.notePaths(refs);
-				queue.add(request, Promise.resolve(conversationId));
+				queue.add(request, Promise.resolve(conversationId), destination);
 				clearDraft(draft);
 				setError('');
 			} else {
@@ -756,7 +822,8 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		auxiliary.current = controller;
 		setBusy(true);
 		try {
-			return await work(controller.signal);
+			// 界面发起的辅助请求也记入当前对话的日志。
+			return await logScope.run(conversationId.toLowerCase(), () => work(controller.signal));
 		} finally {
 			if (auxiliary.current === controller) {
 				auxiliary.current = null;
@@ -902,6 +969,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				const previous = active.current;
 				if (previous && !previous.goal) return false;
 				if (!await goal.pause('plan') || !mounted.current || !visible.current || navigating.current) return false;
+				planDraftRun.current = undefined;
 				setComposerMode('plan');
 				if (args) {
 					await previous?.settled;
@@ -955,9 +1023,12 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 	}
 
 	function continueQueue() {
-		if (active.current || navigating.current || queue.rows.some(({ pending }) => pending)) return;
+		if (active.current || navigating.current || queue.isUpdating() || queue.rows.some(({ pending }) => pending)) return;
 		setError('');
-		queue.resume(Promise.resolve(conversationId));
+		const next = queue.rows[0];
+		if (!next) return;
+		if (next.failed) queue.resume(Promise.resolve(conversationId));
+		else void perform(undefined, undefined, next, undefined, true);
 	}
 
 	const startNext = useEffectEvent((next: QueuedMessage) => {
@@ -1014,6 +1085,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				onEdit={busy || loading || hasActiveAgents ? undefined : editTurn} onFork={busy || loading ? undefined : (id) => void forkTurn(id)} />}
 			<SubagentRequests app={services.app} prompt={displayedPrompt} selected={selected} onInspect={openAgent} />
 			<div className="scribe-composer-capsules" key={`${conversationId}:capsules`}>
+				{selected && open && <ChatTaskProgress store={services.orchestration.conversations.chatTasks} conversationId={conversationId} />}
 				{!landing && <BackgroundShellJobs jobs={services.tools.shellJobs} conversationId={conversationId} />}
 				{selected && <SubagentsPanel controller={subagents} conversationId={conversationId} snapshot={agentSnapshot}
 					executionMode={active.current?.executionMode ?? mode} onSelect={openAgent} />}
@@ -1023,7 +1095,11 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				</>}
 			</div>
 			{planned && plan && <ChatPlanCard app={services.app} plan={plan} disabled={!eligiblePlan}
-				onRevise={() => { setInstruction(tr('请调整上面的计划：', 'Revise the plan above: ')); input.current?.focus(); }}
+				onRevise={() => {
+					planDraftRun.current = plan.taskId;
+					setInstruction(tr('请调整上面的计划：', 'Revise the plan above: '));
+					input.current?.focus();
+				}}
 				onExecute={confirmPlan} />}
 			<QueuedMessages app={services.app} skills={services.orchestration.skills} rows={queue.rows} canSteer={canSteer} inputRef={input}
 				onEdit={async (id, draft) => {
@@ -1043,7 +1119,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				}}
 				onSideChat={async (id, beforeRemove) => {
 					const message = queuedMessage(id);
-					await queue.delete(message, { ask: () => askSideChat(message.request), beforeRemove });
+					await queue.delete(message, { ask: () => askSideChat(message.request, message.request.instruction, { destination: message.destination }), beforeRemove });
 				}}
 			/>
 			<ChatGoalStatus goal={goal} hide={Boolean(composerMode)} />

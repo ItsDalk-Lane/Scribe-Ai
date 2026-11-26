@@ -17,6 +17,7 @@ import type { McpRun } from './tools/external/mcpTools';
 import type { WebSearchService } from './tools/external/webTools';
 import type { WebSearchSettings } from './tools/external/webSearchSettings';
 import type { ShellJobHistory, ShellJobs } from './tools/external/shellJobs';
+import type { ChatTask, ChatTaskBatch, ChatTaskCreate, ChatTaskEvent, ChatTaskStore, ChatTaskUpdate } from './orchestration/storage/chatTasks';
 
 /** 占位骨架期各层尚未实现的统一信号 */
 export class NotImplementedError extends Error {
@@ -63,7 +64,7 @@ export interface ModelUsageReceipt {
 }
 
 export interface AuxiliaryUsage extends ModelUsageReceipt {
-	kind: 'review' | 'summary' | 'video';
+	kind: 'review' | 'summary' | 'video' | 'main-attempt';
 }
 
 export interface Message {
@@ -155,6 +156,8 @@ export interface TaskRequest {
 	imageLinkEnd?: number;
 	target?: TaskTarget;
 	intent?: 'plan' | 'review';
+	approvedPlanTaskId?: string;
+	revisesPlanTaskId?: string;
 	reviewMaterial?: string;
 	goalRound?: true;
 	goalContext?: string;
@@ -181,6 +184,15 @@ export interface TaskRequest {
 export interface QueuedMessage {
 	id: string;
 	request: TaskRequest;
+	destination?: QueuedModelDestination;
+}
+
+export interface QueuedModelDestination {
+	providerId: string;
+	model: string;
+	baseUrl: string;
+	api: string;
+	fingerprint: string;
 }
 
 export type TaskStatus =
@@ -261,7 +273,15 @@ export interface ReadDelivery {
 	hasFullRead(path: string, fingerprint: string): boolean;
 }
 
+export interface RunChatTasks {
+	list(): Promise<ChatTaskBatch[]>;
+	get(id: string): Promise<ChatTask>;
+	create(input: ChatTaskCreate): Promise<ChatTask>;
+	update(input: ChatTaskUpdate): Promise<ChatTask>;
+}
+
 export interface ToolContext {
+	chatTasks?: RunChatTasks;
 	mcpRun?: McpRun;
 	skillRun?: SkillRun;
 	subagents?: SubagentToolAccess;
@@ -283,9 +303,10 @@ export interface ToolApproval {
 	target: string;
 	before?: string;
 	after?: string;
-	kind?: 'shell' | 'access' | 'mcp' | 'web-search' | 'web-image';
+	kind?: 'shell' | 'vault-shell' | 'access' | 'mcp' | 'web-search' | 'web-image';
 	reason?: string;
 	background?: true;
+	humanRequired?: true;
 }
 
 export interface ImageToolOutput {
@@ -578,7 +599,7 @@ export interface ModelService {
 	/** 自建/本地服务商：直接向它的 /models 查询模型清单 */
 	listCustomModels(providerId: string, baseUrl: string, signal?: AbortSignal): Promise<Omit<ModelCatalogResult, 'source'> & { baseUrl: string }>;
 	send(request: ModelRequest, onUsage?: (usage: ModelUsageReceipt) => void): Promise<ModelResponse>;
-	stream(request: ModelRequest): ModelStream;
+	stream(request: ModelRequest, onUsage?: (receipt: ModelUsageReceipt) => void): ModelStream;
 }
 
 export type ConnectionPhase = 'connecting' | 'streaming' | 'done' | 'error';
@@ -644,6 +665,7 @@ export interface ToolLayer {
 export class MissingConversationError extends Error {}
 
 export interface ConversationStore {
+	chatTasks: ChatTaskStore;
 	shellJobHistory: ShellJobHistory;
 	list(): Promise<ConversationSummary[]>;
 	load(id: string): Promise<ConversationSnapshot>;
@@ -671,6 +693,7 @@ export interface RunStep {
 }
 
 export type ConversationEntry = MainConversationEntry
+	| ChatTaskEvent
 	| ({ type: 'subagent' } & SavedSubagentEntry)
 	| { type: 'subagent-report'; taskId: string; report: SubagentReport };
 
@@ -684,6 +707,7 @@ export type MainConversationEntry =
 	| { type: 'retry'; taskId: string; retry: SavedRetry }
 	| { type: 'history-summary'; taskId: string; summary: HistorySummary }
 	| { type: 'run-summary'; taskId: string; summary: RunSummary }
+	| { type: 'video-item'; taskId: string; item: SavedVideoItem }
 	| { type: 'video-analysis'; taskId: string; content: string; sources?: VideoSourceKind[] }
 	| { type: 'context-compaction'; taskId: string; compaction: ContextCompaction }
 	| { type: 'auxiliary-usage'; taskId: string; usage: AuxiliaryUsage }
@@ -699,6 +723,11 @@ export interface RunSummary {
 	text: string;
 }
 
+export interface SavedVideoItem {
+	key: string;
+	content: string;
+}
+
 export interface SavedRun {
 	request: TaskRequest;
 	model: RunContext['model'];
@@ -710,6 +739,7 @@ export interface SavedRun {
 	retries?: SavedRetry[];
 	historySummary?: HistorySummary;
 	runSummary?: RunSummary;
+	videoItems?: SavedVideoItem[];
 	videoAnalysis?: string;
 	videoAnalysisSources?: VideoSourceKind[];
 }
@@ -754,7 +784,7 @@ export interface SubagentNote {
 }
 
 export type SubagentRecord =
-	| { kind: 'create'; agent: SubagentIdentity; history?: Message[]; instructions?: string; readOnly?: boolean; allowProvider?: boolean; modelOrigin?: string }
+	| { kind: 'create'; agent: SubagentIdentity; history?: Message[]; instructions?: string; readOnly?: boolean; allowProvider?: boolean; modelOrigin?: string; reportDestination?: QueuedModelDestination }
 	| { kind: 'run'; entry: Exclude<MainConversationEntry, { type: 'queue-add' | 'queue-edit' | 'queue-delete' }> }
 	| { kind: 'visibility'; closed: boolean }
 	| { kind: 'note'; note: SubagentNote }
@@ -807,6 +837,7 @@ export interface SubagentController {
 export interface SubagentToolAccess {
 	canSpawn: boolean;
 	canAskParent?: boolean;
+	resuming?: boolean;
 	execute(name: string, input: unknown, signal: AbortSignal): Promise<string>;
 }
 
@@ -831,6 +862,7 @@ export interface SessionRunOptions {
 	model?: RunContext['model'];
 	rememberConversation?: boolean;
 	executionMode?: ExecutionMode;
+	confirmQueuedDestination?: (previous: QueuedModelDestination | undefined, current: QueuedModelDestination, signal: AbortSignal) => Promise<boolean>;
 }
 
 export interface SessionController {
@@ -855,7 +887,9 @@ export interface SessionController {
 export interface SideChat {
 	id: string;
 	skillScope?: string[];
-	submit(draft: Pick<TaskRequest, 'instruction' | 'chatQuotes' | 'skillMentions' | 'skillScope' | 'skillNotePaths' | 'imageSourcePath'> & { refs?: NoteRef[]; model?: RunContext['model'] }, observer?: RunObserver): {
+	submit(draft: Pick<TaskRequest, 'instruction' | 'chatQuotes' | 'skillMentions' | 'skillScope' | 'skillNotePaths' | 'imageSourcePath'> & {
+		refs?: NoteRef[]; model?: RunContext['model']; queued?: { destination?: QueuedModelDestination };
+	}, observer?: RunObserver): {
 		taskId: string; request: TaskRequest; model: SavedRun['model']; result: Promise<RunState>;
 	};
 	stop(): void;
@@ -890,6 +924,7 @@ export interface PermissionPolicy {
 }
 
 export interface RunContext {
+	chatTasks?: RunChatTasks;
 	mcpRun?: McpRun;
 	videoAnalysis?: { sources: readonly VideoSourceKind[]; read(): Promise<string> };
 	manualSummary?: string;
@@ -930,6 +965,7 @@ export interface RunContext {
 	};
 	writingRules?: string;
 	record?: (event: RunCheckpoint) => Promise<void>;
+	recordUnfinishedRequest?: (receipt: ModelUsageReceipt) => Promise<void>;
 }
 
 export interface ContextBuilder {
@@ -985,6 +1021,7 @@ export interface CommunicationSettings {
 	/** SecretStorage 条目的 ID；条目的值才是凭据，不保存到这里 */
 	credentialIds: Record<string, string>;
 	proxyUrl: string;
+	proxyCredentialId?: string;
 	/** 仅影响显示名称，索引仍然用服务商 ID */
 	providerNames: Record<string, string>;
 	/** 端点覆盖：该服务商的所有模型都走这里，空表示用自带地址 */
@@ -1015,6 +1052,10 @@ export interface ScribeSettings {
 	providerModels: Record<string, string[]>;
 	disabledProviderIds: string[];
 	chatLocation: ChatLocation;
+	/** 删除、归档对话前是否弹出确认框；缺省视为开启。 */
+	confirmChatRemoval: boolean;
+	/** 诊断日志保留天数；超过该天数没有新写入的日志文件会被清理，0 表示永久保留。 */
+	logRetentionDays: number;
 	/** Days before the one-shot startup cleanup removes spill files; 0 disables cleanup. */
 	spillCleanupDays: number;
 	/** 仅用于读取并迁移旧版配置。 */
@@ -1033,6 +1074,9 @@ export interface ScribeSettings {
 export interface ScribeServices {
 	app: App;
 	settings: ScribeSettings;
+	/** 插件自己的数据目录，供设置界面展示与清理。 */
+	paths: { data: string; logs: string; cache: string };
+	logs: import('./orchestration/storage/conversationLog').ConversationLogStore;
 	localState: import('./orchestration/storage/localState').LocalState;
 	communication: CommunicationLayer;
 	tools: ToolLayer;

@@ -98,7 +98,7 @@ function usageBreakdown(messages: readonly Message[], auxiliary: readonly Auxili
 	const review: RequestUsage[] = [];
 	const summary: RequestUsage[] = [];
 	const video: RequestUsage[] = [];
-	const requests = { review, summary, video };
+	const requests = { review, summary, video, 'main-attempt': main };
 	for (const { kind, reportedUsage, cost } of auxiliary) {
 		requests[kind].push(normalizeUsage(reportedUsage, cost));
 	}

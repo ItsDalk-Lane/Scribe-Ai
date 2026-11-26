@@ -1,5 +1,8 @@
 import type { App, FileSystemAdapter, PluginManifest } from 'obsidian';
 import { nodeRequire } from './communication/nodeRequire';
+import { diagnostics } from './communication/diagnostics';
+import { createConversationLogStore } from './orchestration/storage/conversationLog';
+import { scribeDataPaths } from './orchestration/storage/paths';
 import { createCredentialStore } from './communication/credentials';
 import { createModelService } from './communication/providers';
 import { createTransport } from './communication/transport';
@@ -34,6 +37,10 @@ export async function createServices(app: App, settings: ScribeSettings, manifes
 	saveSettings: () => Promise<void>, skillReview: SkillReviewActions, saveMcp: (settings: McpSettings) => Promise<void>,
 	onConversationDeleted: (id: string) => Promise<void>): Promise<ScribeServices> {
 	const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
+	const paths = scribeDataPaths(cwd);
+	// 诊断日志写入当前笔记库的数据目录，按对话分文件保存。
+	const logs = createConversationLogStore(paths.logs);
+	diagnostics.useSink((scope, entry) => logs.append(scope, entry));
 	// 第四层：工具层（模型通信之外的执行能力）
 	const mcp = createMcpManager({
 		settings: () => settings.mcp ?? normalizeMcpSettings(undefined), commit: saveMcp,
@@ -50,11 +57,11 @@ export async function createServices(app: App, settings: ScribeSettings, manifes
 		},
 	});
 	const webSearch = createWebSearchService(settings, app.secretStorage, cwd, { name: manifest.id, version: manifest.version });
-	const tools = createToolLayer(conversations.shellJobHistory, mcp, cacheDirectory, webSearch.tools);
+	const tools = createToolLayer(conversations.shellJobHistory, mcp, cacheDirectory, webSearch.tools, app);
 
 	// 第五层：通信层（仅负责模型服务接入）
 	const credentials = createCredentialStore(app, settings.communication);
-	const transport = createTransport(settings.communication);
+	const transport = createTransport(settings.communication, app.secretStorage);
 	const modelService = createModelService(credentials, transport, {
 		baseUrls: () => settings.communication.baseUrls,
 		protocols: () => settings.communication.protocols,
@@ -99,5 +106,6 @@ export async function createServices(app: App, settings: ScribeSettings, manifes
 		conversations,
 	};
 
-	return { app, settings, localState, communication, tools, webSearch, orchestration, runtime };
+	return { app, settings, paths: { data: paths.root, logs: paths.logs, cache: paths.cache }, logs,
+		localState, communication, tools, webSearch, orchestration, runtime };
 }

@@ -13,7 +13,7 @@ export function MetricPopoverProvider({ children }: { children: ReactNode }) {
 }
 
 export default function MetricPopover({ label, icon, heading, value, children, wrapValues = false, hover = false }: {
-	label: string; icon: string | ReactNode; heading: string; value?: string; children: ReactNode; wrapValues?: boolean; hover?: boolean;
+	label: ReactNode; icon: string | ReactNode; heading: string; value?: string; children: ReactNode; wrapValues?: boolean; hover?: boolean;
 }) {
 	const id = useId();
 	const [active, setActive] = useContext(ActiveMetric);
@@ -86,7 +86,7 @@ export default function MetricPopover({ label, icon, heading, value, children, w
 		};
 		const outside = (event: Event) => {
 			const path = event.composedPath();
-			if (!path.includes(button) && !path.includes(popup)) close(pinned);
+			if (!path.includes(button) && !path.includes(popup)) close(false);
 		};
 		const blur = () => close(pinned);
 		const resize = new win.ResizeObserver(position);

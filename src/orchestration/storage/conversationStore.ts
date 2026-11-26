@@ -15,7 +15,12 @@ import {
 	parseConversationEntry, parseSavedShellJobs,
 	replayConversation, replayQueueEntry, SAVED_SHELL_JOBS_FILE_LIMIT,
 } from './taskStore';
+import { draftImagePaths, savedImagePaths, retainedImagePaths } from './retainedImages';
+import { removeConversationSpills } from '../../tools/support/spillCleanup';
 import { createSubagentRecordIndex } from './subagentRecords';
+import { sameQueuedDestination } from '../settings/modelConnection';
+import { ChatTaskBoard } from './chatTasks';
+import type { ChatTask } from './chatTasks';
 
 const idPattern = /^(?!(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$)[A-Z0-9][A-Z0-9-]{0,95}$/i;
 const titleLimit = 120;
@@ -23,6 +28,7 @@ const goalSuffix = '.goal.json';
 const goalSizeLimit = 1024 * 1024;
 const writeQueue = new Map<string, Promise<unknown>>();
 const deletedLogs = new Set<string>();
+const taskSubscribers = new Map<string, Set<() => void>>();
 const subagentIndexes = new Map<string, ReturnType<typeof createSubagentRecordIndex>>();
 const noFollow = constants.O_NOFOLLOW ?? 0;
 
@@ -106,12 +112,10 @@ async function writeAtomically(path: string, value: string): Promise<void> {
 }
 
 /** 只回放以换行结尾的记录，未写完的末行留待下次追加时清理。 */
-async function* readRecords(file: FileHandle, size: number) {
+async function* readRecords(file: FileHandle, size: number, position = 0, lineNumber = 0) {
 	const buffer = Buffer.allocUnsafe(8192);
 	const decoder = new StringDecoder('utf8');
 	let tail = '';
-	let lineNumber = 0;
-	let position = 0;
 	while (position < size) {
 		const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, size - position), position);
 		if (!bytesRead) return;
@@ -120,6 +124,17 @@ async function* readRecords(file: FileHandle, size: number) {
 		tail = lines.pop() ?? '';
 		for (const line of lines) yield parseConversationEntry(line, ++lineNumber);
 	}
+}
+
+export async function verifyConversationBody(path: string, id: string): Promise<void> {
+	const { file, stat } = await openRegularFile(path);
+	try {
+		if (stat.size) {
+			const last = Buffer.alloc(1);
+			if ((await file.read(last, 0, 1, stat.size - 1)).bytesRead !== 1 || last[0] !== 10) throw new Error('迁移后的对话末行不完整。');
+		}
+		await replayConversation(id, readRecords(file, stat.size));
+	} finally { await file.close(); }
 }
 
 async function readThroughTask(path: string, id: string, taskId: string, inclusive: boolean): Promise<ConversationEntry[]> {
@@ -224,7 +239,9 @@ function consumeQueued(entries: ConversationEntry[], queue: Map<string, QueuedMe
 	}
 	for (const message of messages) {
 		const current = findQueued(queue, message.id);
-		if (JSON.stringify(current.request) !== JSON.stringify(message.request)) throw new Error('排队消息已经变更。');
+		if (!sameQueuedDestination(current.destination, message.destination) || JSON.stringify(current.request) !== JSON.stringify(message.request)) {
+			throw new Error('排队消息已经变更。');
+		}
 	}
 	// 与开始任务或插话正文写在同一行，重开时不会只恢复其中一半。
 	return [{ ...first, consumedQueueIds: ids }, ...remaining];
@@ -256,7 +273,7 @@ async function conversationSummary(path: string, id: string): Promise<Conversati
 }
 
 /** 每个会话在当前笔记库的插件目录拥有独立的本地记录。 */
-export function createConversationStore(directory: string): ConversationStore {
+export function createConversationStore(directory: string, recordMigrationChange?: (id: string, body: string | null) => Promise<void>, cacheDirectory?: string): ConversationStore {
 	const root = resolve(directory);
 	const pointer = join(root, 'last-opened');
 	const logPath = (id: string) => {
@@ -353,7 +370,85 @@ export function createConversationStore(directory: string): ConversationStore {
 		});
 	}
 
-	return {
+	// 只保留最近使用的清单；普通追加只解析新记录，改写或替换会使索引失效。
+	const boards = new Map<string, { board: ChatTaskBoard; ino: number; size: number; mtime: number; lines: number }>();
+	async function readBoard(id: string, path: string) {
+		const opened = await openIfExists(path);
+		if (!opened) { boards.delete(path); return new ChatTaskBoard(id); }
+		const { file, stat } = opened;
+		const cached = boards.get(path);
+		const prefix = cached && stat.ino === cached.ino && (stat.size > cached.size || (stat.size === cached.size && stat.mtimeMs === cached.mtime))
+			? cached : undefined;
+		const board = prefix?.board ?? new ChatTaskBoard(id);
+		let lines = prefix?.lines ?? 0;
+		boards.delete(path);
+		try {
+			for await (const entry of readRecords(file, stat.size, prefix?.size, lines)) {
+				board.observe(entry);
+				lines++;
+			}
+			const lastByte = Buffer.alloc(1);
+			if (!stat.size || (await file.read(lastByte, 0, 1, stat.size - 1)).bytesRead === 1 && lastByte[0] === 10) {
+				if (boards.size >= 8) boards.delete(boards.keys().next().value!);
+				boards.set(path, { board, ino: stat.ino, size: stat.size, mtime: stat.mtimeMs, lines });
+			}
+			return board.copy();
+		} finally { await file.close(); }
+	}
+
+	function changedTasks(path: string) {
+		for (const refresh of taskSubscribers.get(path.toLowerCase()) ?? []) {
+			try { refresh(); } catch { /* 单个界面的异常不影响已保存的记录和其他窗口。 */ }
+		}
+	}
+
+	async function mutateTask(id: string, change: (board: ChatTaskBoard) => ReturnType<ChatTaskBoard['update']>) {
+		let item: ChatTask | undefined;
+		await write(id, async (path) => {
+			const result = change(await readBoard(id, path));
+			item = result.item;
+			return [result.event];
+		});
+		changedTasks(logPath(id));
+		return item!;
+	}
+
+	const store: ConversationStore = {
+		chatTasks: {
+			async list(id) {
+				const path = logPath(id);
+				return enqueue(path, async () => (await readBoard(id, path)).batches);
+			},
+			async get(id, itemId) {
+				const path = logPath(id);
+				return enqueue(path, async () => (await readBoard(id, path)).get(itemId).item);
+			},
+			create: (id, actor, input) => mutateTask(id, (board) => board.create(actor, input)),
+			update: (id, actor, input) => mutateTask(id, (board) => board.update(actor, input)),
+			async release(id, runId) {
+				let changed = false;
+				await write(id, async (path) => {
+					const events = (await readBoard(id, path)).release(runId);
+					changed = events.length > 0;
+					return events;
+				});
+				if (changed) changedTasks(logPath(id));
+			},
+			async approvePlan(id, planRunId) {
+				await write(id, async (path) => (await readBoard(id, path)).approve(planRunId));
+				changedTasks(logPath(id));
+			},
+			subscribe(id, listener) {
+				const path = logPath(id).toLowerCase();
+				let listeners = taskSubscribers.get(path);
+				if (!listeners) { listeners = new Set(); taskSubscribers.set(path, listeners); }
+				listeners.add(listener);
+				return () => {
+					listeners.delete(listener);
+					if (!listeners.size) taskSubscribers.delete(path);
+				};
+			},
+		},
 		shellJobHistory: {
 			async list(id) {
 				const path = logPath(id);
@@ -523,9 +618,12 @@ export function createConversationStore(directory: string): ConversationStore {
 				const pending = [...(await readQueued(path, id)).values()].map((message): ConversationEntry => ({ type: 'queue-add', message }));
 				const replacement = [...kept, ...entries, ...pending];
 				await replayConversation(id, replacement);
-				await writeAtomically(path, serialize(replacement));
+				const body = serialize(replacement);
+				await recordMigrationChange?.(id, body);
+				await writeAtomically(path, body);
 				subagentIndexes.delete(path);
 			});
+			changedTasks(path);
 		},
 		async rename(id, title) {
 			const path = logPath(id);
@@ -558,8 +656,11 @@ export function createConversationStore(directory: string): ConversationStore {
 		},
 		async delete(id) {
 			const path = logPath(id);
+			const referenced = cacheDirectory ? await savedImagePaths(store, id).catch(() => new Set<string>()) : new Set<string>();
+			for (const image of draftImagePaths(store, id)) referenced.add(image);
 			await enqueue(path, () => enqueue(pointer, async () => {
 				const selected = await readPointer(pointer);
+				await recordMigrationChange?.(id, null);
 				await unlinkIfExists(shellJobsPath(id));
 				await unlinkIfExists(goalPath(id));
 				await unlinkIfExists(titlePath(id));
@@ -568,9 +669,12 @@ export function createConversationStore(directory: string): ConversationStore {
 				await unlinkIfExists(path);
 				// 阻止已经排队的旧写入在删除后重新建立记录。
 				deletedLogs.add(path.toLowerCase());
+				boards.delete(path);
 				subagentIndexes.delete(path);
 				if (selected?.toLowerCase() === id.toLowerCase()) await unlinkIfExists(pointer);
 			}));
+			changedTasks(path);
+			if (cacheDirectory) await removeConversationSpills(cacheDirectory, id, referenced, () => retainedImagePaths(store, id));
 		},
 		async lastOpened() {
 			await writeQueue.get(pointer.toLowerCase())?.catch(() => {});
@@ -596,4 +700,5 @@ export function createConversationStore(directory: string): ConversationStore {
 				? consumeQueued(entries, await readQueued(path, id), consumption) : entries);
 		},
 	};
+	return store;
 }

@@ -1,3 +1,5 @@
+import type { App } from 'obsidian';
+import { chatTaskTools } from './chatTaskTools';
 import { createToolExecutor } from './executor';
 import { readTools } from './readTools';
 import { skillTools } from './skillTools';
@@ -23,15 +25,16 @@ export function createToolRegistry(modules: ToolModule[]): ToolRegistry {
 }
 
 /** 工具层的统一出口：能力清单 + 统一执行入口 */
-export function createToolLayer(history?: ShellJobHistory, mcp?: McpManager, cacheDirectory?: string, web: ToolModule = () => []): ToolLayer {
+export function createToolLayer(history?: ShellJobHistory, mcp?: McpManager, cacheDirectory?: string, web: ToolModule = () => [], app?: App): ToolLayer {
 	const shellJobs = new ShellJobs(history, cacheDirectory);
 	const external = { web, shell: () => shellTools(shellJobs), mcp: () => mcp ? createMcpTools(mcp) : [] };
 	const registry = createToolRegistry([
 		readTools,
 		writeTools,
 		searchTools,
-		workspaceTools,
+		() => workspaceTools(app),
 		() => taskTools(shellJobs),
+		chatTaskTools,
 		subagentTools,
 		structuredOutputTool,
 		skillTools,

@@ -20,17 +20,19 @@ import { createRunState } from '../../runtime/runState';
 import { createToolCoordinator } from '../../runtime/toolCoordinator';
 import { createToolRegistry } from '../../tools';
 import { createToolExecutor } from '../../tools/executor';
+import { chatTaskTools } from '../../tools/chatTaskTools';
 import { shellTools } from '../../tools/external/shellTool';
 import { readTools } from '../../tools/readTools';
 import { searchTools } from '../../tools/searchTools';
 import { readOnlySkillTools, skillTools } from '../../tools/skillTools';
 import { writeTools } from '../../tools/writeTools';
 import { MissingConversationError } from '../../types';
-import type { AutoReviewDenial, Message, ModelRequest, ModelService, ModelStream, ReportedUsage, RunState, RuntimeLayer, ScribeSettings, Task, TaskRequest, ToolCall } from '../../types';
+import type { Message, ModelRequest, ModelService, ModelStream, ReportedUsage, RunState, RuntimeLayer, ScribeSettings, Task, TaskRequest, ToolCall } from '../../types';
 import { createContextBuilder } from '../context/contextBuilder';
 import { createSkillRegistry } from '../context/skills';
 import { createSessionController } from '../sessionController';
 import { normalizeSettings } from '../settings/defaults';
+import { queuedModelDestination } from '../settings/modelConnection';
 import { chatModelKey } from '../settings/thinking';
 import { createConversationStore } from '../storage/conversationStore';
 
@@ -108,7 +110,7 @@ async function fixture(t: TestContext) {
 			const skills = withSkills ? createSkillRegistry(app, settings, async () => {}, {
 				draft: async () => false, install: async () => false,
 			}) : undefined;
-			const registry = createToolRegistry([readTools, searchTools, writeTools, shellTools, ...(skills ? [skillTools] : [])]);
+			const registry = createToolRegistry([readTools, searchTools, writeTools, shellTools, chatTaskTools, ...(skills ? [skillTools] : [])]);
 			const models = createModelCoordinator({ stream, contextLimits: modelService?.contextLimits }, createContextBuilder(registry));
 			const tools = createToolCoordinator(app, createToolExecutor(registry));
 			const runtime: RuntimeLayer = {
@@ -169,7 +171,7 @@ void test('video service converts an attachment, requires a media receipt, and r
 	const saved = (await createConversationStore(directory).load(id)).runs[0];
 	assert.match(saved?.videoAnalysis ?? '', /\[00:00\] A red screen/u);
 	assert.deepEqual(saved?.videoAnalysisSources, ['file']);
-	assert.deepEqual(saved?.state.auxiliaryUsage?.map(({ kind }) => kind), ['video']);
+	assert.deepEqual(saved?.state.auxiliaryUsage?.filter(({ kind }) => kind === 'video').length, 1);
 	assert.deepEqual(await readdir(join(cwd, '.scribe-ai', 'cache', id, 'root')), []);
 	assert.equal(runUsage(interrupted)?.byKind.video?.count, 1);
 	submits.dispose();
@@ -233,6 +235,65 @@ void test('a link-only video model handles HTTPS embeds while local attachments 
 	assert.equal(requests, 1);
 });
 
+void test('video processing checkpoints each confirmed item and ignores quoted examples and appended plan links', async (t) => {
+	const { directory, connect } = await fixture(t);
+	const serviceModel = { providerId: 'video-fixture', model: 'link-model' };
+	const urls = ['https://media.example.invalid/a.mp4', 'https://media.example.invalid/b.mp4'];
+	const example = 'https://media.example.invalid/example.mp4';
+	const objective = '解释 `![代码示例](' + example + ')`，并分析 ' + urls.map((url) => '![片段](' + url + ')').join(' ');
+	const instruction = objective + '\n\n计划示例 ![计划](' + example + ')';
+	const settings = { ...firstModel, videoLinkModel: serviceModel, providerModels: {
+		[firstModel.providerId]: [firstModel.model], [serviceModel.providerId]: [serviceModel.model],
+	} };
+	const submitted: string[] = [];
+	let fail = true;
+	let pauseAtReceipt: (() => void) | undefined;
+	function reopen() {
+		return connect((request) => {
+			const analysis = request.messages.find((message) => message.role === 'user' && message.content.includes('视频模型的带时间戳解析'));
+			assert.ok(analysis);
+			assert.match(analysis.content, /第一项/u);
+			assert.match(analysis.content, /第二项/u);
+			return reply('已完成');
+		}, settings, undefined, {
+			modelOrigin: () => 'https://video.example',
+			modelCapabilities: () => ({ structuredOutput: false, videoAnalysis: 'link' }),
+			async send(request) {
+				assert.equal(request.messages[0]?.content, objective);
+				const [video] = await request.video!.load(request.signal!);
+				const url = video!.url!;
+				submitted.push(url);
+				if (url === urls[1] && fail) throw new Error('暂时不可用');
+				pauseAtReceipt?.();
+				return reply('[00:00] ' + (url === urls[0] ? '第一项' : '第二项'), [], { reportedUsage: { videoInput: 12 } }).result();
+			},
+		});
+	}
+	let sessions = reopen();
+	const id = await sessions.createConversation();
+	const task = { conversationId: id, instruction, imageLinkEnd: objective.length, refs: [] };
+	assert.equal((await sessions.submit(task).result).status, 'failed');
+	assert.equal((await createConversationStore(directory).load(id)).runs[0]?.videoItems?.length, 1);
+	sessions.dispose();
+	sessions = reopen();
+	t.after(() => sessions.dispose());
+	assert.equal((await sessions.submit(task).result).status, 'failed');
+	fail = false;
+	const finished = await sessions.submit(task).result;
+	assert.equal(finished.status, 'done', finished.error);
+	assert.deepEqual(submitted, [urls[0], urls[1], urls[1], urls[1]]);
+	const otherId = await sessions.createConversation();
+	const active = sessions.submit({ ...task, conversationId: otherId });
+	pauseAtReceipt = () => sessions.pause(active.taskId);
+	assert.equal((await active.result).status, 'interrupted');
+	const savedItem = (await createConversationStore(directory).load(otherId)).runs[0]?.videoItems;
+	assert.equal(savedItem?.length, 1);
+	pauseAtReceipt = undefined;
+	const resumed = await sessions.resume(otherId, active.taskId).result;
+	assert.equal(resumed.status, 'done', resumed.error);
+	assert.deepEqual(submitted.slice(4), urls);
+});
+
 void test('a catalog tool denial hides tools and prevents an unsolicited model call from reading a file', async (t) => {
 	const { cwd, connect } = await fixture(t);
 	await writeFile(join(cwd, 'fact.md'), 'content-not-sent');
@@ -288,6 +349,82 @@ void test('new submissions reject a disabled provider and use the remaining chat
 	assert.deepEqual(requests, []);
 	assert.equal((await sessions.submit(request).result).status, 'done');
 	assert.deepEqual(requests, [secondModel.providerId]);
+});
+
+void test('queued messages keep their saved destination and need confirmation before switching services', async (t) => {
+	const { connect, directory } = await fixture(t);
+	const localAddress = 'http://127.0.0.1:2010/v1';
+	let remoteAddress = 'https://cloud.example/v1';
+	const modelConnection: NonNullable<ModelService['modelConnection']> = (providerId) => ({
+		api: 'openai-completions', source: 'configured', baseUrl: providerId === firstModel.providerId ? localAddress : remoteAddress,
+	});
+	const received: string[] = [];
+	const sessions = connect((request) => {
+		received.push(request.providerId);
+		return reply('已回答。');
+	}, { ...firstModel, providerModels: { [firstModel.providerId]: [firstModel.model], [secondModel.providerId]: [secondModel.model] } },
+	undefined, { modelConnection, send: async () => assert.fail('unexpected auxiliary request') });
+	t.after(() => sessions.dispose());
+	const store = createConversationStore(directory);
+	const id = await sessions.createConversation();
+	const row = { id: 'queued-local', request: { conversationId: id, instruction: '本地分析', refs: [] },
+		destination: queuedModelDestination(firstModel, modelConnection) };
+	await store.enqueue(id, row);
+	const unexpectedStart = () => assert.fail('queue entry was consumed before authorization');
+	await assert.rejects(sessions.submitQueued(row, {}, unexpectedStart, { model: secondModel }).result, /接收方已变更/u);
+	await assert.rejects(sessions.submitQueued(row, {}, unexpectedStart, { model: secondModel,
+		confirmQueuedDestination: async (previous, current) => {
+			assert.equal(previous?.baseUrl, localAddress);
+			assert.equal(current.baseUrl, remoteAddress);
+			remoteAddress = 'https://new.example/v1';
+			return true;
+		} }).result, /再次变更/u);
+	assert.deepEqual(received, []);
+	assert.deepEqual(await store.getQueued(id), [row]);
+	const accepted = await sessions.submitQueued(row, {}, () => {}, { model: secondModel,
+		confirmQueuedDestination: async (_previous, current) => current.baseUrl === remoteAddress }).result;
+	assert.equal(accepted.status, 'done', accepted.error);
+	assert.deepEqual(received, [secondModel.providerId]);
+	assert.deepEqual(await store.getQueued(id), []);
+
+	const side = sessions.createSideChat([]);
+	assert.throws(() => side.submit({ instruction: '转交', model: secondModel, queued: { destination: row.destination } }), /接收方与排队记录不一致/u);
+	assert.throws(() => side.submit({ instruction: '旧排队消息', model: firstModel, queued: {} }), /接收方与排队记录不一致/u);
+	const running = sessions.submit({ conversationId: id, instruction: '原任务', refs: [] }, {}, undefined, { model: secondModel });
+	await assert.rejects(sessions.steer(running.taskId, row), /接收方与排队记录不一致/u);
+	assert.equal((await running.result).status, 'done');
+	assert.deepEqual(received, [secondModel.providerId, secondModel.providerId]);
+});
+
+void test('automatic review sees only changed lines and delegates persistent rule changes to the user', async (t) => {
+	const { cwd, connect } = await fixture(t);
+	const outside = join(cwd, '..', 'approval-diff.txt');
+	await writeFile(outside, 'replace this\nprivate unchanged line\n');
+	const turns: ToolCall[][] = [
+		[{ id: 'read', name: 'Read', input: { file_path: outside, limit: 1 } }],
+		[{ id: 'edit', name: 'Edit', input: { file_path: outside, old_string: 'replace this', new_string: 'updated' } }],
+		[{ id: 'root-rule', name: 'Write', input: { file_path: 'AGENTS.md', content: 'Persistent rule' } }],
+	];
+	const reviews: string[] = [];
+	const human: string[] = [];
+	const sessions = connect(() => {
+		const calls = turns.shift();
+		return calls ? reply('', calls) : reply('已完成。');
+	}, firstModel, undefined, { async send(request) {
+		reviews.push(request.messages[0]!.content);
+		return reply('APPROVE').result();
+	} });
+	t.after(() => sessions.dispose());
+	const id = await sessions.createConversation();
+	const result = await sessions.submit({ conversationId: id, refs: [], instruction: '调整已指定的内容' }, {
+		approve: async (approval) => { human.push(approval.target); return false; },
+	}, undefined, { executionMode: 'auto-review' }).result;
+	assert.equal(result.status, 'done', result.error);
+	assert.deepEqual(human, ['AGENTS.md']);
+	assert.equal(reviews.length, 2);
+	assert.match(reviews[1]!, /updated/u);
+	assert.doesNotMatch(reviews[1]!, /private unchanged line|Persistent rule/u);
+	assert.equal(await readFile(outside, 'utf8'), 'updated\nprivate unchanged line\n');
 });
 
 void test('chat execution modes run vault edits directly and route outside actions to the selected approver', async (t) => {
@@ -360,7 +497,8 @@ void test('plan and review do not regain write permissions and review sends only
 	assert.equal(plan.messages.find(({ toolCallId }) => toolCallId === planReads[0]?.id)?.isError, true);
 	assert.match(plan.messages.find(({ toolCallId }) => toolCallId === planReads[1]?.id)?.content ?? '', /vault detail/);
 	await assert.rejects(access(join(cwd, 'forbidden.md')), { code: 'ENOENT' });
-	assert.deepEqual(requests.find(({ system }) => system?.includes('本次为只读计划模式'))?.tools.map(({ name }) => name).sort(), ['Glob', 'Grep', 'Read']);
+	assert.deepEqual(requests.find(({ system }) => system?.includes('本次为只读计划模式'))?.tools.map(({ name }) => name).sort(),
+		['Glob', 'Grep', 'Read', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate']);
 	const reviewMaterial = 'selected snapshot';
 	await sessions.submit({ conversationId, intent: 'review', instruction: '检查事实', refs: [], reviewMaterial }, {}, undefined,
 		{ executionMode: 'full-access' }).result;
@@ -374,6 +512,57 @@ void test('plan and review do not regain write permissions and review sends only
 	assert.equal((await createConversationStore(directory).load(conversationId)).runs.at(-1)?.request.reviewMaterial, reviewMaterial);
 	await sessions.submit({ conversationId, instruction: '下一个普通问题', refs: [] }).result;
 	assert.ok(requests.at(-1)?.messages.every(({ content }) => !content.includes(reviewMaterial)));
+});
+
+void test('a planned checklist stays locked until confirmed, releases stopped work and survives reopening', async (t) => {
+	const { connect, directory } = await fixture(t);
+	const store = createConversationStore(directory);
+	const create = (subject: string, blockedBy: string[] = []): ToolCall => ({
+		id: subject, name: 'TaskCreate', input: { subject, description: subject, blockedBy },
+	});
+	const update = (id: string, taskId: string, status: string): ToolCall => ({ id, name: 'TaskUpdate', input: { taskId, status } });
+	const responses = (steps: ModelStream[]) => connect(() => {
+		const next = steps.shift();
+		assert.ok(next, '模型收到了意外的额外请求');
+		return next;
+	});
+	const sessions = responses([
+		reply('', [create('核对来源'), create('整理结果', ['1']), create('复查结论', ['2'])]),
+		reply('<!-- scribe-plan -->\n# 分步核对\n## 验收条件\n- 复查结论\n<!-- /scribe-plan -->'),
+		reply('', [update('claim-first', '1', 'in_progress'), update('finish-first', '1', 'completed'), update('claim-second', '2', 'in_progress')]),
+		reply('开始整理。'),
+	]);
+	const id = await sessions.createConversation();
+	const planned = await sessions.submit({ conversationId: id, intent: 'plan', instruction: '列出核对步骤', refs: [] }).result;
+	assert.equal(planned.status, 'done', planned.error);
+	const plan = submittedPlan((await store.load(id)).runs.at(-1));
+	assert.ok(plan);
+	const states = async (conversationId: string) => (await store.chatTasks.list(conversationId)).at(-1)?.tasks.map(({ status }) => status);
+	assert.deepEqual(await states(id), ['pending', 'pending', 'pending']);
+
+	const fork = await sessions.forkConversation(id, plan.taskId);
+	const bypass = responses([reply('', [update('unapproved', '1', 'in_progress')]), reply('等待确认。')]);
+	const blocked = await bypass.submit({ conversationId: fork.id, instruction: '继续', refs: [] }).result;
+	assert.equal(blocked.messages.find(({ toolCallId }) => toolCallId === 'unapproved')?.isError, true);
+	assert.deepEqual(await states(fork.id), ['pending', 'pending', 'pending']);
+	bypass.dispose();
+
+	const run = sessions.submit(approvedPlanRequest(plan), { onEvent(event) {
+		if (event.type === 'text-delta') sessions.pause(run.taskId);
+	} });
+	assert.equal((await run.result).status, 'interrupted');
+	assert.deepEqual(await states(id), ['completed', 'stopped', 'pending']);
+	sessions.dispose();
+	const reopened = responses([
+		reply('', [update('reclaim-second', '2', 'in_progress'), update('finish-second', '2', 'completed'),
+			update('claim-third', '3', 'in_progress'), update('finish-third', '3', 'completed')]),
+		reply('已复查。'),
+	]);
+	const resumed = await reopened.resume(id, run.taskId).result;
+	assert.equal(resumed.status, 'done', resumed.error);
+	assert.deepEqual(await states(id), ['completed', 'completed', 'completed']);
+	assert.deepEqual(await states(fork.id), ['pending', 'pending', 'pending']);
+	reopened.dispose();
 });
 
 void test('a confirmed plan keeps its attachments and a saved goal resumes with checked evidence', async (t) => {
@@ -430,7 +619,7 @@ void test('a confirmed plan keeps its attachments and a saved goal resumes with 
 	await sessions.submit(approved, {}, undefined, { executionMode: 'ask' }).result;
 	assert.match(await readFile(join(cwd, index), 'utf8'), /\[\[会议\.md\]\]/u);
 
-	const goal: ChatGoal = { objective: plan.title, status: 'active', maxRounds: 5, usedRounds: 0, totalRounds: 0,
+	const goal: ChatGoal = { objective: plan.title, status: 'active', usedRounds: 0, totalRounds: 0,
 		criteria: plan.criteria, plan: plan.markdown, refs: plan.request.refs, chatQuotes: plan.request.chatQuotes };
 	await store.saveGoal(conversationId, goal);
 	const runGoal = (value: ChatGoal) => sessions.submit({ conversationId, instruction: value.objective, refs: value.refs ?? [],
@@ -666,7 +855,7 @@ void test('a long chat keeps its confirmed decision and counts the summary and a
 	const repeated = await ask(reopened, recallPrompt);
 	assert.equal(recalled.messages.find(({ toolCallId }) => toolCallId === 'reviewed-read')?.approvalReview, 'approved');
 	assert.equal(repeated.messages.find(({ toolCallId }) => toolCallId === 'reviewed-read')?.approvalReview, 'denied');
-	const goal = finishGoalRound({ objective: recallPrompt, status: 'active', maxRounds: 3, usedRounds: 1, totalRounds: 1 }, repeated);
+	const goal = finishGoalRound({ objective: recallPrompt, status: 'active', usedRounds: 1, totalRounds: 1 }, repeated);
 	assert.equal(goal.status, 'paused');
 	assert.equal(goal.reason, 'blocked');
 	assert.equal(repeated.messages.at(-1)?.content, recalled.messages.at(-1)?.content);
@@ -721,73 +910,43 @@ void test('stopping during an automatic review saves its usage once even when th
 	assert.equal(runUsage(stopped)?.byKind.review?.cost, undefined);
 });
 
-void test('Bash waits for the automatic reviewer and saves its decision beside the command result', {
+void test('an unrestricted shell in automatic review mode waits for the user before writing', {
 	skip: !shellTools().find(({ name }) => name === 'Bash')?.isAvailable?.(),
 	timeout: 10_000,
 }, async (t) => {
 	const { cwd, connect, directory } = await fixture(t);
-	for (const [decision, expected] of [
-		['APPROVE', 'approved'], ['DENY', 'denied'], ['APPROVE with extra text', 'incomplete'],
-	] as const) {
-		const marker = `bash-ran-${expected}.txt`;
-		const command = `printf 'ran\\n' >> ${marker}`;
+	for (const allowed of [false, true]) {
+		const marker = `bash-ran-${allowed}.txt`;
+		const command = `printf done > ${marker}`;
 		const call: ToolCall = { id: 'checked-shell', name: 'Bash', input: { command, elevated: true } };
-		let markReviewStarted = (_request: ModelRequest) => {};
-		let releaseReview = () => {};
-		const reviewStarted = new Promise<ModelRequest>((resolve) => { markReviewStarted = resolve; });
-		const reviewHeld = new Promise<void>((resolve) => { releaseReview = resolve; });
-		let reviews = 0;
 		let first = true;
+		let reviews = 0;
+		let prompts = 0;
 		const sessions = connect(() => {
 			if (!first) return reply('检查结束。');
 			first = false;
 			return reply('', [call]);
-		}, firstModel, undefined, {
-			async send(request) {
-				reviews++;
-				markReviewStarted(request);
-				await reviewHeld;
-				return reply(decision).result();
-			},
-		});
-		t.after(() => { releaseReview(); sessions.dispose(); });
+		}, firstModel, undefined, { async send() { reviews++; return reply('APPROVE').result(); } });
+		t.after(() => sessions.dispose());
 		const id = await sessions.createConversation();
-		let liveStatus: RunState['status'] | undefined;
-		let denial: AutoReviewDenial | undefined;
-		const run = sessions.submit({ conversationId: id, instruction: '审核后运行测试命令。', refs: [] }, {
-			onEvent(event) { if (event.type === 'state') liveStatus = event.state.status; },
-			onAutoReviewDenied(operation) { denial = operation; },
-		}, undefined, { executionMode: 'auto-review' });
-		const request = await Promise.race([reviewStarted, run.result.then(() => assert.fail('未发起独立审核'))]);
-		assert.equal(liveStatus, 'awaiting-approval');
-		const { operation } = JSON.parse(request.messages[0]!.content) as { operation: { kind: string; after: string } };
-		assert.equal(operation.kind, 'shell');
-		assert.equal(operation.after, command);
-		await assert.rejects(access(join(cwd, marker)), { code: 'ENOENT' });
-		releaseReview();
-
-		const state = await run.result;
-		assert.equal(reviews, 1);
-		const [result] = state.messages.filter(({ toolCallId }) => toolCallId === call.id);
-		assert.equal(result?.approvalReview, expected);
-		assert.equal(result.isError, expected !== 'approved');
-		assert.equal(result.shellStatus, expected === 'approved' ? 'success' : undefined);
-		if (expected === 'approved') assert.equal(await readFile(join(cwd, marker), 'utf8'), 'ran\n');
+		const state = await sessions.submit({ conversationId: id, instruction: '确认后运行测试命令。', refs: [] }, {
+			async approve(operation) {
+				prompts++;
+				assert.equal(operation.after, command);
+				assert.equal(operation.humanRequired, true);
+				await assert.rejects(access(join(cwd, marker)), { code: 'ENOENT' });
+				return allowed;
+			},
+		}, undefined, { executionMode: 'auto-review' }).result;
+		assert.equal(prompts, 1);
+		assert.equal(reviews, 0);
+		const result = state.messages.find(({ toolCallId }) => toolCallId === call.id);
+		assert.equal(result?.approvalReview, undefined);
+		assert.equal(result?.isError, !allowed);
+		if (allowed) assert.equal(await readFile(join(cwd, marker), 'utf8'), 'done');
 		else await assert.rejects(access(join(cwd, marker)), { code: 'ENOENT' });
 		const [saved] = (await createConversationStore(directory).load(id)).runs;
-		assert.ok(saved);
-		const row = restoreExecution(saved).items.find((item) => item.kind === 'tool' && item.call.id === call.id);
-		assert.ok(row?.kind === 'tool');
-		assert.equal(row.result?.approvalReview, expected);
-		if (expected === 'denied') {
-			assert.ok(denial);
-			assert.equal(denial.approval.after, command);
-			const retry = await denial.retry(new AbortController().signal);
-			assert.equal(retry.shellStatus, 'success');
-			await assert.rejects(denial.retry(new AbortController().signal), /已经尝试/);
-			assert.equal(await readFile(join(cwd, marker), 'utf8'), 'ran\n');
-		} else assert.equal(denial, undefined);
-		sessions.dispose();
+		assert.equal(saved?.state.messages.find(({ toolCallId }) => toolCallId === call.id)?.isError, !allowed);
 	}
 });
 

@@ -1,4 +1,7 @@
-import { guardModelConnection } from './settings/modelConnection';
+import { guardModelConnection, queuedModelDestination, sameQueuedDestination } from './settings/modelConnection';
+import { approvedPlanRequest, submittedPlan } from '../interaction/chatPlan';
+import { obsidianSearchToolName } from '../tools/workspaceTools';
+import { chatTaskReadTools } from '../tools/chatTaskTools';
 import { isModelAvailable, isProviderEnabled, videoModelFor } from './settings/modelAvailability';
 import { createSkillRun } from './context/skillRun';
 import { bindSkillMentions } from '../skills/mentions';
@@ -7,6 +10,7 @@ import { readOnlySkillTools } from '../tools/skillTools';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import type { App, FileSystemAdapter } from 'obsidian';
+import { logScope } from '../communication/diagnostics';
 import { meteredService } from './meteredService';
 import { createVideoAnalysis } from './context/videoAnalysis';
 import { transcodableVideo } from './context/videoEncoding';
@@ -28,14 +32,15 @@ import { structuredOutputToolName } from '../tools/structuredOutputTool';
 import type { ShellJobs } from '../tools/external/shellJobs';
 import { MissingConversationError } from '../types';
 import type {
-	ConversationSnapshot, ConversationStore, ExecutionMode, ModelService, QueuedMessage, RunContext, RunObserver, RunState, RuntimeLayer, SavedRun, ScribeSettings, SessionController, SkillMention, Task, TaskRequest,
+	ConversationSnapshot, ConversationStore, ExecutionMode, ModelService, QueuedMessage, QueuedModelDestination, RunContext, RunObserver, RunState, RuntimeLayer, SavedRun, ScribeSettings, SessionController, SkillMention, Task, TaskRequest,
 } from '../types';
 
 type RunModels = Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin' | 'modelCapabilities'> & Partial<Pick<ModelService, 'modelConnection'>>;
-const readOnlyTools = new Set([...readOnlySkillTools, 'Read', 'Glob', 'Grep', ...subagentToolNames]);
+const readOnlyTools = new Set([...readOnlySkillTools, ...chatTaskReadTools, 'Read', 'Glob', 'Grep', obsidianSearchToolName, ...subagentToolNames]);
 
 interface Steering {
 	accepting: boolean;
+	destination?: QueuedModelDestination;
 	pending: Map<string, { message: QueuedMessage; request: TaskRequest; resolve: () => void; reject: (reason: Error) => void }>;
 }
 
@@ -79,7 +84,7 @@ async function runTask(
 	observer: RunObserver,
 	{ restored, replaceFromTaskId, sideSnapshot, queued, steering, rememberConversation = true, executionMode, models, subagents, child, skills }: {
 		restored?: { run: SavedRun; conversation: ConversationSnapshot }; replaceFromTaskId?: string; sideSnapshot?: ConversationSnapshot;
-		queued?: { message: QueuedMessage; onStarted: () => void }; steering?: Steering; rememberConversation?: boolean;
+		queued?: { message: QueuedMessage; address?: string; onStarted: () => void }; steering?: Steering; rememberConversation?: boolean;
 		executionMode?: ExecutionMode; models?: RunModels; subagents?: ReturnType<typeof createSubagentController>; child?: ChildRunOptions; skills?: SkillRegistry;
 	} = {},
 ): Promise<RunState> {
@@ -97,6 +102,7 @@ async function runTask(
 		task.request.skillNotePaths ??= skills.notePaths(refs, restored ? '' : activeNote);
 	}
 	const checkModel = guardModelConnection(settings, selection, models?.modelConnection);
+	if (steering) steering.destination = queuedModelDestination(selection, models?.modelConnection);
 	let current: RunState | undefined;
 	const trackingObserver: RunObserver = {
 		...observer,
@@ -107,7 +113,7 @@ async function runTask(
 	};
 	const transcript = trackRun(child ? {
 		append: (_id, entries) => child.append(entries.flatMap((entry) =>
-			entry.type === 'subagent' || entry.type === 'subagent-report' || entry.type === 'queue-add' || entry.type === 'queue-edit' || entry.type === 'queue-delete' ? [] : [entry])),
+			entry.type === 'subagent' || entry.type === 'subagent-report' || entry.type === 'chat-tasks' || entry.type === 'queue-add' || entry.type === 'queue-edit' || entry.type === 'queue-delete' ? [] : [entry])),
 	} : sideSnapshot ? undefined : {
 		async append(id, entries) {
 			if (entries[0]?.type === 'start') {
@@ -142,6 +148,7 @@ async function runTask(
 		: undefined;
 	const runSignal = review?.signal ?? signal;
 	let started = false;
+	let claimedTask = false;
 	let state: RunState;
 	try {
 		const conversationId = task.request.conversationId;
@@ -151,6 +158,17 @@ async function runTask(
 		if (replaceAt === -1) throw new Error('对话中找不到这条消息。');
 		const saved = restored || replaceAt !== undefined
 			? { ...snapshot, runs: snapshot.runs.slice(0, restored ? -1 : replaceAt) } : snapshot;
+		const { approvedPlanTaskId, revisesPlanTaskId } = task.request;
+		if (approvedPlanTaskId) {
+			const plan = submittedPlan(saved.runs.at(-1));
+			if (child || sideSnapshot || intent || !plan || plan.taskId !== approvedPlanTaskId
+				|| approvedPlanRequest(plan).instruction !== task.request.instruction) throw new Error('待执行计划已变化，请重新核对并确认。');
+		}
+		if (revisesPlanTaskId) {
+			const previous = saved.runs.at(-1);
+			if (child || sideSnapshot || intent !== 'plan' || previous?.request.intent !== 'plan'
+				|| previous.state.taskId !== revisesPlanTaskId) throw new Error('正在修改的计划已变化，请重新选择计划。');
+		}
 		if (!child && !sideSnapshot && rememberConversation) await conversations.setLastOpened(conversationId);
 		const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
 		let ctx: RunContext | undefined;
@@ -178,6 +196,17 @@ async function runTask(
 				} : {}),
 				...(intent !== 'review' && conversationHistory(saved)),
 			}, app.vault.configDir, () => toolsEnabledAtStart && toolsEnabled(), Boolean(sideSnapshot), executionMode);
+			if (queued?.address) {
+				const expected = new URL(queued.address);
+				const prefix = expected.pathname.replace(/\/+$/u, '');
+				ctx.destinationCheck = async (_request, address) => {
+					const actual = new URL(address);
+					if (actual.origin !== expected.origin || (actual.pathname !== prefix && !actual.pathname.startsWith(prefix + '/'))) {
+						throw new Error('排队消息的实际接收地址已变更，请检查模型设置。');
+					}
+				};
+			}
+			ctx.recordUnfinishedRequest = (receipt) => transcript.recordUsage({ kind: 'main-attempt', ...receipt });
 			const runPermissions = ctx.permissions;
 			ctx.permissions = { ...runPermissions, canCallTool: (tool) => runPermissions.canCallTool(tool)
 				&& (tool.name !== structuredOutputToolName || models?.modelCapabilities?.(providerId, model).structuredOutput === true) };
@@ -195,6 +224,18 @@ async function runTask(
 				}
 			}
 			if (!sideSnapshot && intent !== 'review') {
+				const list = conversations.chatTasks;
+				const actor = { owner: child?.agentId ?? 'root', runId: task.id, planRunId: intent === 'plan' ? task.id : undefined };
+				ctx.chatTasks = {
+					list: () => list.list(conversationId),
+					get: (id) => list.get(conversationId, id),
+					create: (input) => list.create(conversationId, actor, input),
+					async update(input) {
+						const changed = await list.update(conversationId, actor, input);
+						if (changed.status === 'in_progress') claimedTask = true;
+						return changed;
+					},
+				};
 				const summaryModels = sendingModels ? meteredService(sendingModels, 'summary', transcript.recordUsage) : undefined;
 				const save = (entries: Parameters<ChildRunOptions['append']>[0]) => child
 					? child.append(entries) : conversations.append(conversationId, entries);
@@ -217,6 +258,7 @@ async function runTask(
 			}
 		}
 		started = true;
+		if (approvedPlanTaskId) await conversations.chatTasks.approvePlan(conversationId, approvedPlanTaskId);
 		if (ctx && subagents && !sideSnapshot && !intent) {
 			if (replaceFromTaskId) await subagents.reload(conversationId);
 			else await subagents.controls.load(conversationId);
@@ -231,8 +273,11 @@ async function runTask(
 		if (ctx && savedVideo) {
 			ctx.videoAnalysis = { sources: restored.run.videoAnalysisSources ?? ['file', 'link'], read: () => Promise.resolve(savedVideo) };
 		} else if (ctx && models && !sideSnapshot && !child && !intent) {
+			const prior = restored?.run ?? (replaceAt !== undefined ? snapshot.runs[replaceAt] : saved.runs.at(-1));
+			const previous = prior && ['interrupted', 'failed', 'cancelled'].includes(prior.state.status) ? prior.videoItems : undefined;
 			ctx.videoAnalysis = createVideoAnalysis(ctx, settings, models, transcript.recordUsage,
 				(content, sources) => conversations.append(task.request.conversationId, [{ type: 'video-analysis', taskId: task.id, content, sources }]),
+				{ previous, alreadySaved: Boolean(restored), save: (item) => conversations.append(task.request.conversationId, [{ type: 'video-item', taskId: task.id, item }]) },
 				restored ? observer.confirmResume : undefined);
 		}
 		const agent = runtime.createAgent(ctx, restored?.run.state);
@@ -252,6 +297,7 @@ async function runTask(
 	}
 	if (started) {
 		try {
+			if (claimedTask) await conversations.chatTasks.release(task.request.conversationId, task.id);
 			state = await transcript.finish(state);
 		} catch {
 			state = { ...state, status: 'failed', error: '无法保存最后的操作进度，请检查本地对话记录。' };
@@ -310,17 +356,19 @@ export function createSessionController(
 		const controller = new AbortController();
 		const steering: Steering = { accepting: true, pending: new Map() };
 		active.set(taskId, { conversationId: key, controller, steering });
-		const result = run(controller.signal, steering);
+		// 这段任务发起的所有模型请求都记入该对话的日志文件。
+		const result = logScope.run(conversationId.toLowerCase(), () => run(controller.signal, steering));
 		return { taskId, result: result.finally(() => {
 			rejectSteering(steering, steering.pending.keys());
 			active.delete(taskId);
 		}) };
 	}
 	const subagents = createSubagentController(settings, conversations,
-		(task, model, signal, observer, executionMode, child) => runTask(task, app, settings, runtime, conversations, model, signal, observer, {
-			executionMode, child, models, subagents, skills,
-			restored: child.restored && { run: child.restored, conversation: child.snapshot },
-		}), (model, restored) => restored ? restoredModel(modelChoice(model)) : selectedModel(model), models,
+		(task, model, signal, observer, executionMode, child) => logScope.run(task.request.conversationId.toLowerCase(),
+			() => runTask(task, app, settings, runtime, conversations, model, signal, observer, {
+				executionMode, child, models, subagents, skills,
+				restored: child.restored && { run: child.restored, conversation: child.snapshot },
+			})), (model, restored) => restored ? restoredModel(modelChoice(model)) : selectedModel(model), models,
 		shellJobs && ((id, agents) => shellJobs.stopSubagents(id, agents)));
 	return {
 		subagents: subagents.controls,
@@ -396,6 +444,10 @@ export function createSessionController(
 					if ('target' in draft && draft.target) throw new Error('请在普通聊天中指定工具或子 Agent。');
 					if (!instruction.trim()) throw new Error('请输入问题。');
 					const model = selectedModel(choice);
+					if (draft.queued && (!draft.queued.destination
+						|| !sameQueuedDestination(draft.queued.destination, queuedModelDestination(model, models?.modelConnection)))) {
+						throw new Error('侧聊的接收方与排队记录不一致。请切换到原模型，或在主聊天确认接收方后发送。');
+					}
 					const allowedRefs = refs.filter((ref) => !isAbsolute(ref.path) || (ref.kind === 'file' && wasSharedRef(ref)));
 					const notePaths = skills?.notePaths(allowedRefs, '');
 					const task = createTask({ conversationId: id, instruction, skillMentions,
@@ -405,8 +457,10 @@ export function createSessionController(
 					const request = task.request;
 					const controller = new AbortController();
 					running = controller;
-					const result = runTask(task, app, settings, runtime, conversations, model, controller.signal,
-						{ onEvent: observer.onEvent }, { sideSnapshot, skills, models }).then((state) => {
+					// 侧聊不单独存档，它的请求记录归到所属对话。
+					const logOwner = (parentRuns.at(-1)?.request.conversationId ?? id).toLowerCase();
+					const result = logScope.run(logOwner, () => runTask(task, app, settings, runtime, conversations, model, controller.signal,
+						{ onEvent: observer.onEvent }, { sideSnapshot, skills, models })).then((state) => {
 						// 关闭后，已取消的请求可以收尾，不能恢复已清空的对话。
 						if (!closed && state.messages.some(({ role }) => role === 'user')) {
 							runs.push({ request, model, state });
@@ -426,11 +480,31 @@ export function createSessionController(
 			return launch(request.conversationId, task.id, (signal, steering) =>
 				runTask(task, app, settings, runtime, conversations, selection, signal, observer, { replaceFromTaskId, steering, rememberConversation, executionMode, models, subagents, skills }));
 		},
-		submitQueued(message, observer, onStarted, { model, rememberConversation, executionMode } = {}) {
+		submitQueued(message, observer, onStarted, { model, rememberConversation, executionMode, confirmQueuedDestination } = {}) {
 			const selection = selectedModel(model);
 			const task = mainTask(message.request, true);
-			return launch(message.request.conversationId, task.id, (signal, steering) =>
-				runTask(task, app, settings, runtime, conversations, selection, signal, observer, { queued: { message, onStarted }, steering, rememberConversation, executionMode, models, subagents, skills }));
+			return launch(message.request.conversationId, task.id, async (signal, steering) => {
+				let address: string | undefined;
+				if (models?.modelConnection) {
+					const destination = queuedModelDestination(selection, models.modelConnection);
+					if (!destination) throw new Error('无法确认排队消息的模型地址，请检查模型设置。');
+					if (!sameQueuedDestination(message.destination, destination)) {
+						if (!await confirmQueuedDestination?.(message.destination, destination, signal)) {
+							signal.throwIfAborted();
+							throw new Error('排队消息的接收方已变更或未保存。请选择继续队列并确认发送。');
+						}
+						signal.throwIfAborted();
+						modelChoice(selection);
+						if (!sameQueuedDestination(destination, queuedModelDestination(selection, models.modelConnection))) {
+							throw new Error('确认后模型地址再次变更，请重新确认。');
+						}
+					}
+					address = destination.baseUrl;
+				}
+				return runTask(task, app, settings, runtime, conversations, selection, signal, observer, {
+					queued: { message, address, onStarted }, steering, rememberConversation, executionMode, models, subagents, skills,
+				});
+			});
 		},
 		canSteer(conversationId, taskId) {
 			const running = active.get(taskId);
@@ -447,6 +521,9 @@ export function createSessionController(
 			if (!running || running.conversationId !== message.request.conversationId.toLowerCase()
 				|| !running.steering.accepting || running.controller.signal.aborted || running.steering.pending.has(message.id)) {
 				return Promise.reject(new Error('当前任务无法接受这条插话。'));
+			}
+			if (models?.modelConnection && (!message.destination || !sameQueuedDestination(message.destination, running.steering.destination))) {
+				return Promise.reject(new Error('当前任务的接收方与排队记录不一致。请从队列确认后独立发送。'));
 			}
 			return new Promise((resolve, reject) => {
 				const request = message.request.skillNotePaths || !skills ? message.request

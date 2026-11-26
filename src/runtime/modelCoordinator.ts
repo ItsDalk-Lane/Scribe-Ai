@@ -2,7 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { ContextBudgetError, inputBytes } from '../orchestration/context/contextBuilder';
 import { SkillAccessChangedError, SkillSteeringError } from '../skills/mentions';
 import { ContextOverflowError, RetryableModelError } from '../types';
-import type { ContextBuilder, ModelCoordinator, ModelRequest, ModelService } from '../types';
+import type { ContextBuilder, ModelCoordinator, ModelRequest, ModelService, ModelUsageReceipt } from '../types';
 import { splitResponseIntent, thinkingHeadingIntent } from './responseIntent';
 import { assistantMessageId } from './runState';
 
@@ -47,10 +47,12 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 				let firstDelta: number | undefined;
 				let firstDeltaMs: number | undefined;
 				let reviewMs = 0;
+				const destinations = new Set<string>();
+				let receipt: ModelUsageReceipt = {};
 				const stream = service.stream({
 					...input,
 					...(attempts === 0 ? {} : { maxRetries: 0 }),
-					...((review || ctx.destinationCheck || input.beforeSend || (input.images && ctx.checkModel)) ? { beforeSend: async (address: string) => {
+					beforeSend: async (address: string) => {
 						const waitingAt = performance.now();
 						const mayWaitForUser = Boolean(review || ctx.destinationCheck);
 						if (mayWaitForUser) work(false);
@@ -60,13 +62,19 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 							await ctx.destinationCheck?.(input, address);
 							await input.beforeSend?.(address);
 							ctx.checkModel?.();
+							// A same-origin redirect can introduce a second address without a new model attempt.
+							if (destinations.has(address)) {
+								await ctx.recordUnfinishedRequest?.({});
+								destinations.clear();
+							}
+							destinations.add(address);
 							transmitted = true;
 						} finally {
 							reviewMs += performance.now() - waitingAt;
 							if (mayWaitForUser && !ctx.signal.aborted) work(true);
 						}
-					} } : {}),
-				});
+					},
+				}, (usage) => { receipt = usage; });
 				let modelIntent: string | undefined;
 				const publishIntent = (intent: string | undefined) => {
 					if (!intent || intent === modelIntent) return;
@@ -164,6 +172,9 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 					return { ...response, raw: { ...response.raw, content } };
 				} catch (error) {
 					stream.cancel(error);
+					if (destinations.size || visibleText || visibleThinking || error instanceof RetryableModelError || error instanceof ContextOverflowError) {
+						await ctx.recordUnfinishedRequest?.(receipt);
+					}
 					throw error;
 				}
 			};
