@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
-import { realpath, stat, writeFile } from 'node:fs/promises';
-import { join, relative, sep } from 'node:path';
+import { realpath, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { dirname, join, relative, sep } from 'node:path';
 import type { ImageContent } from '@earendil-works/pi-ai';
 import { IMAGE_CACHE_PREFIX, isCachedImagePath } from '../../orchestration/storage/paths';
 import { openToolFile } from './fileAccess';
@@ -64,6 +64,15 @@ export async function saveCachedImage(cwd: string, location: SpillLocation, byte
 	const path = join(directory, name + '.' + extension);
 	await writeFile(path, bytes, { flag: 'wx', mode: 0o600 });
 	return relative(root, path).split(sep).join('/');
+}
+
+/** 粘贴落盘时原窗口可能已关闭；仅回收本次新建且从未交付的截图。 */
+export async function discardUnattachedScreenshot(cwd: string, path: string): Promise<void> {
+	if (!isCachedImagePath(path) || !path.split('/').at(-1)?.startsWith('screenshot.')) return;
+	const file = join(await realpath(cwd), path);
+	if (await realpath(file) !== file) throw new Error('图片缓存的位置已变化。');
+	await unlink(file);
+	await rmdir(dirname(file));
 }
 
 export async function readCachedImage(cwd: string, path: string, signal: AbortSignal, conversationId?: string, subagentId?: string) {

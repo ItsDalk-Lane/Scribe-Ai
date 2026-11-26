@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { readdir, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -107,6 +107,13 @@ void test('attached, pasted, linked and tool images reach the vision API after r
 	const file = new File([new Uint8Array(bytes)], 'Screenshot.png', { type: 'image/png' });
 	const clipboard = { files: [], items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] } as unknown as DataTransfer;
 	assert.deepEqual(clipboardImages(clipboard), [file]);
+	let stillOpen = true;
+	await assert.rejects(saveClipboardImage(app, 'closed-during-paste', file, () => {
+		const current = stillOpen;
+		stillOpen = false;
+		return current;
+	}), /聊天窗口已关闭/);
+	assert.deepEqual(await readdir(join(cwd, '.scribe-ai', 'cache', 'closed-during-paste', 'root')), []);
 	const pasted = await saveClipboardImage(app, conversationId, file);
 	assert.match(pasted.path, /^\.scribe-ai\/cache\/context-test\/root\/scribe-ai-image-/u);
 	assert.deepEqual(await readFile(join(cwd, pasted.path)), bytes);

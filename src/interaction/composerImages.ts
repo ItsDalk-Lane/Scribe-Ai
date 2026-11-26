@@ -2,7 +2,7 @@ import { Buffer } from 'node:buffer';
 import type { App, FileSystemAdapter } from 'obsidian';
 import { userImageReferences } from '../orchestration/context/imageAttachments';
 import { scribeDataPaths } from '../orchestration/storage/paths';
-import { MAX_IMAGE_BYTES, saveCachedImage } from '../tools/support/imageData';
+import { discardUnattachedScreenshot, MAX_IMAGE_BYTES, saveCachedImage } from '../tools/support/imageData';
 import type { NoteRef } from '../types';
 
 export function clipboardImages(clipboard: Pick<DataTransfer, 'files' | 'items'>): File[] {
@@ -18,10 +18,15 @@ export function imageLinkSource(app: App, instruction: string, previous?: string
 	return previous ?? app.workspace.getActiveFile()?.path;
 }
 
-export async function saveClipboardImage(app: App, conversationId: string, file: File): Promise<NoteRef> {
+export async function saveClipboardImage(app: App, conversationId: string, file: File, current: () => boolean = () => true): Promise<NoteRef> {
 	if (file.size > MAX_IMAGE_BYTES) throw new Error('单张图片不能超过 5 MiB。');
 	const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
-	const path = await saveCachedImage(cwd, { cacheDirectory: scribeDataPaths(cwd).cache, conversationId },
-		Buffer.from(await file.arrayBuffer()), 'screenshot');
+	const bytes = Buffer.from(await file.arrayBuffer());
+	if (!current()) throw new Error('聊天窗口已关闭。');
+	const path = await saveCachedImage(cwd, { cacheDirectory: scribeDataPaths(cwd).cache, conversationId }, bytes, 'screenshot');
+	if (!current()) {
+		await discardUnattachedScreenshot(cwd, path);
+		throw new Error('聊天窗口已关闭。');
+	}
 	return { path, kind: 'file', pastedImage: true };
 }

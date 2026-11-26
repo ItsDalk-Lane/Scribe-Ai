@@ -25,7 +25,9 @@ import { ShellJobs, FOREGROUND_WAIT_MS } from '../external/shellJobs';
 import { captureShellOutput } from '../external/shellOutput';
 import { shellTools } from '../external/shellTool';
 import { boundToolResult, estimateResultTokens, MAX_INLINE_TOKENS } from '../support/resultSpill';
-import { sweepSpillFiles } from '../support/spillCleanup';
+import { clearSpillFiles, sweepSpillFiles } from '../support/spillCleanup';
+import { retainDraftImages, retainedImagePaths } from '../../orchestration/storage/retainedImages';
+import { saveCachedImage } from '../support/imageData';
 
 const { registry, executor } = createToolLayer();
 const shells = shellTools();
@@ -230,9 +232,9 @@ void test('macOS Bash restricts vault commands until a single escalation is appr
 		return approved;
 	};
 	ctx.permissions = { ...baseline, executionMode: 'ask', canRequestPath: (path) => path === denied };
-	const local = await execute(ctx, 'Bash', { command: 'printf work > note.md && cat note.md' });
-	assert.equal(local.isError, false, local.content);
-	assert.match(local.content, /work/);
+	const write = 'printf work > note.md';
+	assert.equal((await execute(ctx, 'Bash', { command: write })).isError, true);
+	await assert.rejects(readFile(join(ctx.cwd, 'note.md')), { code: 'ENOENT' });
 	for (const command of ['cat link.txt', 'printf changed > link.txt', 'cat plugin-config/private.txt', 'cat lines.txt',
 		'cat .scribe-ai/settings.json', 'cat .scribe-ai/cache/private.txt', 'printf changed > .scribe-ai/state.json', connect]) {
 		assert.equal((await execute(ctx, 'Bash', { command })).isError, true, command);
@@ -249,10 +251,17 @@ void test('macOS Bash restricts vault commands until a single escalation is appr
 	assert.equal(outside.isError, false, outside.content);
 	assert.match(outside.content, /private/);
 	assert.equal(approvals[1]?.target, denied);
+	const local = await execute(ctx, 'Bash', { command: write, vault_write: true });
+	assert.equal(local.isError, false, local.content);
+	assert.equal(await readFile(join(ctx.cwd, 'note.md'), 'utf8'), 'work');
+	assert.equal(approvals[2]?.kind, 'vault-shell');
+	assert.equal(approvals[2]?.humanRequired, true);
+	assert.equal((await execute(ctx, 'Bash', { command: 'printf changed > AGENTS.md', vault_write: true })).isError, true);
+	await assert.rejects(readFile(join(ctx.cwd, 'AGENTS.md')), { code: 'ENOENT' });
 
 	ctx.permissions = { ...baseline, executionMode: 'full-access', canRead: () => true };
 	assert.equal((await execute(ctx, 'Bash', { command: connect, cwd: denied })).isError, false);
-	assert.equal(approvals.length, 2);
+	assert.equal(approvals.length, 4);
 });
 
 void test('Bash without a native vault boundary requires approval before running', {
@@ -363,13 +372,13 @@ void test('spill cleanup removes files older than the retention period and prune
 	await Promise.all([writeFile(oldPath, 'old'), writeFile(freshPath, 'fresh')]);
 	const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
 	await utimes(oldPath, old, old);
-	sweepSpillFiles({ baseDir: base, now: Date.now(), cleanupPeriodDays: 0 });
+	await sweepSpillFiles({ baseDir: base, now: Date.now(), cleanupPeriodDays: 0 });
 	assert.equal(fs.existsSync(oldPath), true);
-	sweepSpillFiles({ baseDir: base, now: Date.now(), cleanupPeriodDays: 30 });
+	await sweepSpillFiles({ baseDir: base, now: Date.now(), cleanupPeriodDays: 30 });
 	assert.equal(fs.existsSync(oldPath), false);
 	assert.equal(fs.existsSync(freshPath), true);
 	await rm(freshPath);
-	sweepSpillFiles({ baseDir: base, now: Date.now(), cleanupPeriodDays: 30 });
+	await sweepSpillFiles({ baseDir: base, now: Date.now(), cleanupPeriodDays: 30 });
 	assert.equal(fs.existsSync(root), false);
 });
 
@@ -388,12 +397,46 @@ void test('startup removes expired cache outputs for this vault and leaves fresh
 	const past = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
 	await Promise.all([utimes(old, past, past), utimes(other, past, past)]);
 	const options = { cacheDirectory, baseDir: join(ctx.cwd, 'empty-legacy'), now: Date.now() };
-	sweepSpillFiles({ ...options, cleanupPeriodDays: 0 });
+	await sweepSpillFiles({ ...options, cleanupPeriodDays: 0 });
 	assert.equal(fs.existsSync(old), true);
-	sweepSpillFiles(options);
+	await sweepSpillFiles(options);
 	assert.equal(fs.existsSync(join(cacheDirectory, 'old')), false);
 	assert.equal(fs.existsSync(fresh), true);
 	assert.equal(fs.existsSync(other), true);
+});
+
+void test('排队、待续做、分支和草稿中的图片跨清理保留，删除最后一段引用时清除原图', async (t) => {
+	const { ctx } = await fixture(t);
+	const { conversations, cache } = scribeDataPaths(ctx.cwd);
+	const store = createConversationStore(conversations, undefined, cache);
+	const image = (conversationId: string) => saveCachedImage(ctx.cwd, { cacheDirectory: cache, conversationId },
+		Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), 'screenshot');
+	const screenshot = await image('first'), queued = await image('queue'), draft = await image('unsent'), unused = await image('unused');
+	const ref = (path: string): NoteRef => ({ kind: 'file', path, pastedImage: true });
+	const start = { type: 'start' as const, task: { id: 'run', status: 'pending' as const, createdAt: 1, updatedAt: 1,
+		request: { conversationId: 'first', instruction: '查看附图', refs: [ref(screenshot)] } }, model: { providerId: 'test', model: 'test' } };
+	await store.append('first', [start]);
+	await store.enqueue('queue', { id: 'q', request: { conversationId: 'queue', instruction: '查看排队截图', refs: [ref(queued)] } });
+	const fork = await store.fork('first', 'run');
+	const release = retainDraftImages(store, 'unsent', [ref(draft)]);
+	t.after(release);
+	const keep = () => retainedImagePaths(store);
+	const exists = (path: string) => fs.existsSync(join(ctx.cwd, path));
+	const old = new Date(Date.now() - 40 * 86_400_000);
+	for (const path of [screenshot, queued, draft, unused]) await utimes(join(ctx.cwd, path), old, old);
+	await sweepSpillFiles({ baseDir: join(ctx.cwd, 'no-legacy'), cacheDirectory: cache }, keep);
+	assert.deepEqual([screenshot, queued, draft, unused].map(exists), [true, true, true, false]);
+	await clearSpillFiles(cache, keep);
+	assert.deepEqual([screenshot, queued, draft].map(exists), [true, true, true]);
+	await store.delete('first');
+	assert.equal(exists(screenshot), true);
+	await store.delete(fork.id);
+	assert.equal(exists(screenshot), false);
+	await store.delete('queue');
+	assert.equal(exists(queued), false);
+	release();
+	await clearSpillFiles(cache, keep);
+	assert.equal(exists(draft), false);
 });
 
 void test('background reads preserve split UTF-8, skip consumed bytes and mark gaps', () => {

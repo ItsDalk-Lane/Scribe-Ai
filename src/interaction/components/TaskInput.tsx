@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SIDE_CHAT_ICON } from '../../constants';
+import { retainDraftImages } from '../../orchestration/storage/retainedImages';
 import { userImageReferences } from '../../orchestration/context/imageAttachments';
 import type { ExecutionMode, SkillInfo, SkillMention, SkillRegistry, TaskTarget } from '../../types';
 import { clipboardImages, saveClipboardImage } from '../composerImages';
@@ -110,6 +111,7 @@ export default function TaskInput({
 	const draftRevision = useRef(0);
 	const mounted = useRef(false);
 	const pastePending = useRef(false);
+	useLayoutEffect(() => retainDraftImages(context.conversationStore, conversationId, context.refs), [context.conversationStore, conversationId, context.refs]);
 	const pasteConversation = useRef(conversationId);
 	useLayoutEffect(() => { pasteConversation.current = conversationId; }, [conversationId]);
 	useLayoutEffect(() => { draftRevision.current++; }, [conversationId, instruction, skillMentions, skillScope]);
@@ -249,7 +251,7 @@ export default function TaskInput({
 				event.preventDefault();
 				void submit();
 			}}>
-				<ContextChips refs={context.refs} quotes={context.quotes}
+				<ContextChips app={context.app} refs={context.refs} quotes={context.quotes}
 					disabled={contextLocked} onRemove={context.onRemove}
 					onRemoveQuotes={context.onRemoveQuotes} onFocusInput={focusInput} />
 				<SkillTextArea
@@ -293,8 +295,9 @@ export default function TaskInput({
 						setSkillError('');
 						void (async () => {
 							for (const file of files) {
-								const ref = await saveClipboardImage(context.app, conversationId, file);
-								if (mounted.current && pasteConversation.current === conversationId) context.onAdd(ref);
+								const ref = await saveClipboardImage(context.app, conversationId, file,
+									() => mounted.current && pasteConversation.current === conversationId);
+								context.onAdd(ref);
 							}
 						})().catch((cause: unknown) => {
 							if (mounted.current && pasteConversation.current === conversationId) setSkillError(cause instanceof Error ? cause.message : text.chatFailed);

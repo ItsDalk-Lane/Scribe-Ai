@@ -1,6 +1,6 @@
 import { ItemView } from 'obsidian';
 import type { WorkspaceLeaf } from 'obsidian';
-import { useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
@@ -8,7 +8,7 @@ import { SIDE_CHAT_ICON, SIDE_CHAT_VIEW_TYPE } from '../constants';
 import type ScribeAiPlugin from '../main';
 import { isModelAvailable } from '../orchestration/settings/modelAvailability';
 import { chatModelKey } from '../orchestration/settings/thinking';
-import type { NoteRef, RunContext, SavedRun, SideChat, SkillMention } from '../types';
+import type { NoteRef, QueuedMessage, RunContext, SavedRun, SideChat, SkillMention } from '../types';
 import { composerShortcut } from './composerKeyboard';
 import { exportSlash, showSlashMcp, showSlashWarnings } from './slashActions';
 import { tr } from './skills/dialog';
@@ -20,10 +20,13 @@ import type { DisplayedRun } from './context';
 import { uiText } from './uiText';
 import { useChatModel } from './useChatModel';
 import { imageLinkSource } from './composerImages';
+import { draftImagePaths, retainDraftImages, retainedImagePaths } from '../orchestration/storage/retainedImages';
+import { removeConversationSpills } from '../tools/support/spillCleanup';
 import { isImageFile } from '../tools/support/imageData';
 
 export interface SideChatOpening {
 	prompt?: string;
+	queued?: Pick<QueuedMessage, 'destination'>;
 	imageSourcePath?: string;
 	refs?: NoteRef[];
 	quotes?: string[];
@@ -66,6 +69,10 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 	const [history, setHistory] = useState<DisplayedRun[]>([]);
 	const [execution, setExecution] = useState(emptyExecution);
 	const [live, setLive] = useState<Pick<DisplayedRun, 'request' | 'model'>>();
+	const store = plugin.services.orchestration.conversations;
+	useLayoutEffect(() => retainDraftImages(store, chat.id, [
+		...history.flatMap(({ request }) => request.refs), ...(live?.request.refs ?? []),
+	]), [store, chat.id, history, live]);
 	const input = useRef<HTMLTextAreaElement>(null);
 	const mounted = useRef(false);
 	const running = useRef(false);
@@ -75,14 +82,15 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 		}
 		return model;
 	}
-	function submit(question: string, references: NoteRef[], excerpts: string[], mentions: SkillMention[], scope?: string[], skillNotePaths?: string[], imageSourcePath?: string) {
+	function submit(question: string, references: NoteRef[], excerpts: string[], mentions: SkillMention[], scope?: string[], skillNotePaths?: string[], imageSourcePath?: string,
+		queued?: SideChatOpening['queued']) {
 		if (running.current) throw new SideChatHandoffError(text.sideChatBusy);
 		const selectedModel = requireModel();
 		let displayed = emptyExecution;
 		const run = chat.submit({ instruction: question, refs: references, chatQuotes: excerpts,
 			imageSourcePath: imageLinkSource(plugin.app, question, imageSourcePath),
 			skillMentions: mentions, skillScope: scope, skillNotePaths,
-			model: { ...selectedModel, reasoning: thinking.level } }, { onEvent: (event) => {
+			model: { ...selectedModel, reasoning: thinking.level }, queued }, { onEvent: (event) => {
 			if (!mounted.current) return;
 			displayed = updateExecution(displayed, event);
 			setExecution(displayed);
@@ -117,7 +125,12 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 			const { prompt = '', refs: incomingRefs = [], quotes: incomingQuotes = [] } = opening;
 			if (opening.skillScope) setParentScope(opening.skillScope);
 			if (prompt.trim()) {
-				submit(prompt, incomingRefs, incomingQuotes, opening.skillMentions ?? [], opening.skillScope, opening.skillNotePaths, opening.imageSourcePath);
+				try {
+					submit(prompt, incomingRefs, incomingQuotes, opening.skillMentions ?? [], opening.skillScope, opening.skillNotePaths, opening.imageSourcePath, opening.queued);
+				} catch (cause) {
+					if (cause instanceof Error) throw new SideChatHandoffError(cause.message);
+					throw cause;
+				}
 			} else {
 				if (incomingRefs.length) setRefs((previous) => Array.from(
 					new Map([...previous, ...incomingRefs].map((ref) => [ref.path, ref])).values()));
@@ -226,11 +239,15 @@ export class SideChatView extends ItemView {
 	}
 
 	override async onClose() {
+		const store = this.plugin.services.orchestration.conversations;
+		const id = this.chat?.id;
+		const images = id && draftImagePaths(store, id);
 		this.chat?.close();
 		this.chat = undefined;
 		this.plugin.conversationViews.sideChatParents.delete(this.leaf);
 		this.root?.unmount();
 		this.root = undefined;
+		if (id && images) await removeConversationSpills(this.plugin.services.paths.cache, id, images, () => retainedImagePaths(store, id));
 	}
 }
 
