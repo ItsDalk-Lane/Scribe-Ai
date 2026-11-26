@@ -110,7 +110,8 @@ async function fixture(t: TestContext) {
 			const skills = withSkills ? createSkillRegistry(app, settings, async () => {}, {
 				draft: async () => false, install: async () => false,
 			}) : undefined;
-			const registry = createToolRegistry([readTools, searchTools, writeTools, shellTools, chatTaskTools, ...(skills ? [skillTools] : [])]);
+			// 工具列表不随本机是否装有 PowerShell 变化，否则按上下文余量触发的压缩在各平台结果不同。
+			const registry = createToolRegistry([readTools, searchTools, writeTools, () => shellTools().filter(({ name }) => name === 'Bash'), chatTaskTools, ...(skills ? [skillTools] : [])]);
 			const models = createModelCoordinator({ stream, contextLimits: modelService?.contextLimits }, createContextBuilder(registry));
 			const tools = createToolCoordinator(app, createToolExecutor(registry));
 			const runtime: RuntimeLayer = {
