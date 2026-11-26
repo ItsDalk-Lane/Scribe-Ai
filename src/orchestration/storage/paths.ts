@@ -12,6 +12,7 @@ export function scribeDataPaths(vaultRoot: string) {
 		settings: join(root, 'settings.json'),
 		state: join(root, 'state.json'),
 		conversations: join(root, 'conversations'),
+		logs: join(root, 'logs'),
 		cache: join(root, 'cache'),
 		modelCatalog: join(root, 'cache', 'model-catalog.json'),
 		skills: join(vaultRoot, SKILL_LIBRARY),

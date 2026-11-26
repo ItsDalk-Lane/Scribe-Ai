@@ -15,5 +15,6 @@ export interface NodeFetchEvent {
 export type NodeFetchObserver = (event: NodeFetchEvent) => void;
 
 export function toLogEntry(event: NodeFetchEvent): CommunicationLogEntry {
-	return { ...event };
+	const { error, path: _path, ...entry } = event;
+	return { ...entry, ...(error !== undefined && { error: 'Network request failed' }) };
 }
