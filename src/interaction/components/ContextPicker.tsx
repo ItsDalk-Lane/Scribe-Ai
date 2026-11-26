@@ -5,12 +5,14 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, RefObject } from 'react';
 import type { ConversationStore, ConversationSummary, NoteRef } from '../../types';
 import { isImageFile } from '../../tools/support/imageData';
+import { pastedImagePreview } from '../chatMedia';
 import { composerShortcut, isImeComposing, referenceQuery, removeReferenceQuery } from '../composerKeyboard';
 import { conversationReference, conversationReferenceTitle } from '../conversationReference';
 import { externalReferenceAt, pickExternalReference } from '../externalReferencePicker';
 import type { ExternalReferenceMode } from '../externalReferencePicker';
 import { uiText } from '../uiText';
 import ChatIcon from './ChatIcon';
+import PastedImageThumbnail from './PastedImageThumbnail';
 import { useComposerPopoverPosition } from './useComposerPopoverPosition';
 
 export interface ContextPickerProps {
@@ -27,8 +29,8 @@ export interface ContextPickerProps {
 	onFocusInput?: () => void;
 }
 
-export function ContextChips({ refs, quotes, disabled, onRemove, onRemoveQuotes, onFocusInput }: Pick<
-	ContextPickerProps, 'refs' | 'quotes' | 'disabled' | 'onRemove' | 'onRemoveQuotes' | 'onFocusInput'
+export function ContextChips({ app, refs, quotes, disabled, onRemove, onRemoveQuotes, onFocusInput }: Pick<
+	ContextPickerProps, 'app' | 'refs' | 'quotes' | 'disabled' | 'onRemove' | 'onRemoveQuotes' | 'onFocusInput'
 >) {
 	const text = uiText();
 	if (!quotes?.length && refs.length === 0) return null;
@@ -54,13 +56,16 @@ export function ContextChips({ refs, quotes, disabled, onRemove, onRemoveQuotes,
 					}}><ChatIcon name="x" /></button>
 			</li>)}
 			{refs.map((ref) => {
-				const label = `${text.remove} ${ref.pastedImage ? basename(ref.path) : ref.path}`;
+				const name = basename(ref.path) || ref.path;
+				const label = `${text.remove} ${ref.pastedImage ? name : ref.path}`;
+				const source = pastedImagePreview(app.vault.adapter, ref);
+				const fileLabel = <>
+					<ChatIcon name={ref.kind === 'folder' ? 'folder' : isImageFile(ref.path) ? 'image' : 'file-text'} />
+					<span className="scribe-context-name" title={ref.path}>{isAbsolute(ref.path) ? ref.path : name}</span>
+				</>;
 				return (
 					<li className="scribe-context-chip" key={ref.path}>
-						<ChatIcon name={ref.kind === 'folder' ? 'folder' : isImageFile(ref.path) ? 'image' : 'file-text'} />
-						<span className="scribe-context-name" title={ref.path}>
-							{isAbsolute(ref.path) ? ref.path : basename(ref.path) || ref.path}
-						</span>
+						{source ? <PastedImageThumbnail key={source} app={app} source={source} label={name} fallback={fileLabel} /> : fileLabel}
 						<button
 							type="button"
 							className="scribe-context-chip-remove"

@@ -14,12 +14,19 @@ export function videoSourceKind(source: VideoSource): VideoSourceKind {
 	return source.path === undefined ? 'link' : 'file';
 }
 
+/** 只识别用户正文中的媒体，代码示例与执行时追加的计划仍是文字。 */
+export function mediaInstruction({ instruction, imageLinkEnd }: Pick<TaskRequest, 'instruction' | 'imageLinkEnd'>): string {
+	return instruction.slice(0, imageLinkEnd)
+		.replace(/^[ \t]*([~\x60]{3,})[^\n]*\n[\s\S]*?(?:^[ \t]*\1[ \t]*$|$(?![\s\S]))/gmu, '')
+		.replace(/\x60+[^\n\x60]+\x60+/gu, '');
+}
+
 export function videoSources(request: TaskRequest, detect = videoMime): VideoSource[] {
 	const files = request.refs.flatMap(({ path, kind, lines, addedExternal }) => {
 		const mimeType = kind !== 'folder' && !lines && (!isAbsolute(path) || addedExternal) && detect(path);
 		return mimeType ? [{ path, mimeType }] : [];
 	});
-	const links = [...request.instruction.matchAll(/!\[[^\]\n]*\]\((https:\/\/[^\s)]+)\)/gu)].flatMap((match) => {
+	const links = [...mediaInstruction(request).matchAll(/!\[[^\]\n]*\]\((https:\/\/[^\s)]+)\)/gu)].flatMap((match) => {
 		const url = URL.parse(match[1]!);
 		const mimeType = url && !url.username && !url.password && detect(url.pathname);
 		return mimeType ? [{ url: url.href, mimeType }] : [];

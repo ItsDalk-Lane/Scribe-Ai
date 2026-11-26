@@ -3,6 +3,7 @@ import { isAbsolute, posix } from 'node:path';
 import type { App } from 'obsidian';
 import type { ImageContent } from '@earendil-works/pi-ai';
 import { videoMime } from '../../communication/modelVideo';
+import { mediaInstruction } from './videoAttachments';
 import type { ImageReference, Message, ModelRequest, RunContext, TaskRequest } from '../../types';
 import { isImageFile, MAX_IMAGES, MAX_REQUEST_IMAGE_BYTES, readCachedImage, readImageFile } from '../../tools/support/imageData';
 import { normalizeVaultRelativePath, resolveToolPath } from '../../tools/support/pathUtils';
@@ -29,9 +30,7 @@ export function userImageReferences({ refs, instruction, imageSourcePath, imageL
 			add({ kind: 'vault-link', path, sourcePath: imageSourcePath });
 		}
 	};
-	const text = instruction.slice(0, imageLinkEnd)
-		.replace(/^[ \t]*([~\x60]{3,})[^\n]*\n[\s\S]*?(?:^[ \t]*\1[ \t]*$|$(?![\s\S]))/gmu, '')
-		.replace(/\x60+[^\n\x60]+\x60+/gu, '')
+	const text = mediaInstruction({ instruction, imageLinkEnd })
 		.replace(/!?\[\[([^\]|\n]+)(?:\|[^\]\n]*)?\]\]/gu, (match, path: string, offset: number) => {
 			links.push({ path, offset });
 			return ' '.repeat(match.length);

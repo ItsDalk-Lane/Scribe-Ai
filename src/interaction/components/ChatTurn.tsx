@@ -123,7 +123,7 @@ export function UserMessage({ app, content, request, timestamp, editing, onEdit,
 			)}
 			<div id={id} ref={prompt} className="scribe-user-prompt" data-clamped={clampable && !expanded}
 				onFocus={() => { if (clampable) setExpanded(true); }}>
-				<AnswerContent app={app} content={content} />
+				<AnswerContent app={app} content={content} media={false} />
 			</div>
 			{clampable && <button type="button" className="scribe-expand-message" aria-controls={id} aria-expanded={expanded}
 				onClick={() => setExpanded(!expanded)}>{expanded ? text.chatCollapseMessage : text.chatExpandMessage}</button>}
