@@ -5,7 +5,7 @@ import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import type { App } from 'obsidian';
 import type { CredentialStore, Provider } from '@earendil-works/pi-ai';
-import { createProvider } from '@earendil-works/pi-ai';
+import { createProvider, PI_AI_VERSION } from '@earendil-works/pi-ai';
 import * as openAI from '@earendil-works/pi-ai/api/openai-completions';
 import * as google from '@earendil-works/pi-ai/api/google-generative-ai';
 import * as bedrock from '@earendil-works/pi-ai/api/bedrock-converse-stream';
@@ -22,11 +22,25 @@ import { providerIcon } from '../../interaction/providerIcons';
 import { applyModelDraft } from '../../interaction/modelDraft';
 import { normalizeSettings } from '../../orchestration/settings/defaults';
 import { chatModelKey, updateChatThinking } from '../../orchestration/settings/thinking';
-import { configureProxy } from '../proxy';
+import { configureProxy, matchesLegacyProxy, readConfiguredProxy, storeProxyCredentials } from '../proxy';
 import type { CommunicationSettings, ModelUsageReceipt, Transport } from '../../types';
 
 let baseUrl = '';
 let proxyUrl = '';
+
+void test('proxy settings persist only an endpoint and a secret bound to that endpoint', () => {
+	const values = new Map<string, string>();
+	const secrets = { getSecret: (id: string) => values.get(id), setSecret: (id: string, value: string) => { values.set(id, value); } };
+	const address = 'socks5://account:demo-only@proxy.example:4321';
+	const saved = storeProxyCredentials(address, secrets);
+	assert.equal(saved.proxyUrl, 'socks5://proxy.example:4321');
+	assert.doesNotMatch(JSON.stringify(saved), /demo-only|account/u);
+	assert.equal(readConfiguredProxy(saved, secrets), address);
+	assert.ok(matchesLegacyProxy(address, saved, secrets));
+	assert.deepEqual(storeProxyCredentials(saved.proxyUrl, secrets, saved), saved);
+	assert.throws(() => readConfiguredProxy({ ...saved, proxyUrl: 'socks5://other.example:4321' }, secrets), /没有匹配/u);
+	assert.throws(() => readConfiguredProxy(saved), /没有匹配/u);
+});
 let openAIBody: Record<string, unknown> = {};
 let openAIAuthorization = '';
 let mirroredPath = '';
@@ -156,7 +170,8 @@ const server = http.createServer((request, response) => {
 			response.end(`data: ${JSON.stringify({ id: 'chat-mirror', object: 'chat.completion.chunk', created: 1, model: 'test-model', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`);
 			return;
 		}
-		if (url.startsWith('/v1beta/models/test-model:streamGenerateContent')) {
+		if (url.startsWith('/v1beta/models/test-model:streamGenerateContent')
+			|| url.startsWith('/v1beta/publishers/google/models/test-model:streamGenerateContent')) {
 			const videoReceipt = body.includes('Check receipt')
 				? { promptTokensDetails: [{ modality: 'TEXT', tokenCount: 1 }, { modality: 'VIDEO', tokenCount: 30 }] } : {};
 			response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -273,8 +288,9 @@ void test('SecretStorage credentials preserve raw keys and serialize OAuth updat
 			assert.equal(current?.type, 'oauth');
 			return { ...current, expires: 1 };
 		}),
-		store.modify('openai', async (current) => {
+		createCredentialStore(app, { ...settings, credentialIds: { alternate: 'scribe-ai-openai' } }).modify('alternate', async (current) => {
 			assert.equal(current?.type, 'oauth');
+			assert.equal(current.expires, 1);
 			return { ...current, expires: current.expires + 1 };
 		}),
 	]);
@@ -463,6 +479,12 @@ void test('resume confirmation shows the actual request URL after an OAuth addre
 	});
 	assert.equal(result.content, 'Mirrored');
 	assert.equal(mirroredPath, '/mirror/chat/completions');
+	const pinned = createModelService(oauthCredentials, transport, {
+		additionalProviders: [provider], baseUrls: () => ({ [provider.id]: baseUrl + '/openai' }),
+	});
+	mirroredPath = '';
+	await assert.rejects(pinned.send({ providerId: provider.id, model: 'test-model', messages: [], tools: [], maxRetries: 0 }), /偏离/u);
+	assert.equal(mirroredPath, '');
 });
 
 void test('every repeated send checks the confirmed address and hidden URL changes are blocked', async () => {
@@ -557,13 +579,31 @@ void test('A configured provider connection switches adapter without rewriting i
 	assert.equal(service.providers().find(({ id }) => id === 'test-google')?.models[0]?.api, 'google-generative-ai');
 });
 
-void test('Google SDK uses Node fetch without touching global fetch', async () => {
-	const service = createModelService(credentials, transport, { additionalProviders: [testProvider('google-generative-ai')] });
+void test('Google SDK uses the configured transport without touching global fetch', async () => {
+	const paths: string[] = [];
+	const googleTransport: Transport = {
+		...transport,
+		fetch: (input, init) => {
+			paths.push(new URL(input instanceof Request ? input.url : input).pathname);
+			return nodeFetch(input, init);
+		},
+	};
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = () => Promise.reject(new Error('Global fetch was used'));
 	try {
-		const result = await service.send({ providerId: 'test-google', model: 'test-model', messages: [{ role: 'user', content: 'Hello' }], tools: [] });
-		assert.equal(result.content, 'Hello from Google');
+		for (const protocol of ['google-generative-ai', 'google-vertex']) {
+			const service = createModelService(credentials, googleTransport, {
+				additionalProviders: [testProvider('google-generative-ai')],
+				protocols: () => ({ 'test-google': protocol }),
+				baseUrls: () => ({ 'test-google': `${baseUrl}/v1beta` }),
+			});
+			const result = await service.send({ providerId: 'test-google', model: 'test-model', messages: [{ role: 'user', content: 'Hello' }], tools: [] });
+			assert.equal(result.content, 'Hello from Google');
+		}
+		assert.deepEqual(paths, [
+			'/v1beta/models/test-model:streamGenerateContent',
+			'/v1beta/publishers/google/models/test-model:streamGenerateContent',
+		]);
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
@@ -655,6 +695,7 @@ void test('Bailian Token Plan and pay-as-you-go register with catalog metadata',
 	// 按量付费限定了模型子集，不包含 Token Plan 独有的会员模型
 	assert.equal(payg?.models.length, 13);
 	assert.ok(payg?.models.some((model) => model.id === 'qwen3.8-max'));
+	assert.ok(payg?.models.some((model) => model.id === 'deepseek-v4-flash-0731'));
 	assert.ok(!payg?.models.some((model) => model.id === 'kimi-k2.5'));
 	const qwen4 = payg?.models.find((model) => model.id === 'qwen4-max');
 	assert.equal(qwen4?.contextWindow, 1000000);
@@ -703,6 +744,27 @@ void test('Volcengine providers register with full pi catalog metadata', () => {
 	assert.equal(plan?.maxTokens, 16384);
 	assert.deepEqual(plan?.input, ['text']);
 	assert.equal(plan?.reasoning, false);
+});
+
+void test('built-in models require explicitly linked credentials and restrict HTTP to loopback', async (t) => {
+	const previous = process.env.OPENAI_API_KEY;
+	process.env.OPENAI_API_KEY = 'synthetic-other-project-key';
+	t.after(() => { if (previous === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous; });
+	let address = baseUrl + '/mirror';
+	let linked = false;
+	const service = createModelService({ ...credentials, read: async () => linked ? { type: 'api_key', key: 'linked-fixture' } : undefined },
+		transport, { baseUrls: () => ({ openai: address }), protocols: () => ({ openai: 'openai-completions' }) });
+	const request = { providerId: 'openai', model: 'gpt-4o-mini', messages: [{ role: 'user' as const, content: 'hi' }], tools: [], maxRetries: 0 };
+	mirroredAuthorization = '';
+	await assert.rejects(service.send(request));
+	assert.equal(mirroredAuthorization, '');
+	linked = true;
+	assert.equal((await service.send(request)).content, 'Mirrored');
+	assert.equal(mirroredAuthorization, 'Bearer linked-fixture');
+	address = 'http://an-offsite-gateway.invalid/v1';
+	assert.equal(service.modelConnection('openai', request.model).issue, 'invalid-address');
+	await assert.rejects(async () => service.send(request), /HTTPS/u);
+	await assert.rejects(service.listCustomModels('openai', address), /HTTPS/u);
 });
 
 void test('Recreated custom providers do not inherit old secrets and unlink stops using them', async () => {
@@ -790,7 +852,7 @@ void test('Official model discovery uses the selected endpoint and falls back to
 	assert.deepEqual(urls.filter((url) => !url.includes('models.dev')), [
 		'https://api.openai.com/v1/models',
 		'https://api.anthropic.com/v1/models',
-		'https://pi.dev/api/models/providers/anthropic?pi-version=1.5.2',
+		`https://pi.dev/api/models/providers/anthropic?pi-version=${PI_AI_VERSION}`,
 	]);
 });
 
@@ -842,7 +904,7 @@ void test('Discovery keeps the bundled list offline and stops before Pi when can
 	assert.deepEqual(urls.filter((url) => !url.includes('models.dev')), [
 		'https://api.deepseek.com/models',
 		'https://api.deepseek.com/v1/models',
-		'https://pi.dev/api/models/providers/deepseek?pi-version=1.5.2',
+		`https://pi.dev/api/models/providers/deepseek?pi-version=${PI_AI_VERSION}`,
 	]);
 	const pending = service.listProviderModels('openai', controller.signal);
 	controller.abort();
@@ -1038,9 +1100,10 @@ void test('Providers from the same vendor collapse into one group without URL du
 	const groups = groupProviders(service.providers());
 	const bailian = groups.find((group) => group.label === '阿里云百炼');
 	const openai = groups.find((group) => group.label === 'OpenAI');
-	// Token Plan CN / 按量付费 / Token Plan 国际；团队与个人套餐 URL 完全相同，只保留一套
-	assert.equal(bailian?.providers.length, 4);
-	assert.deepEqual(bailian?.providers.map((provider) => provider.id), ['bailian-token-plan', 'bailian-coding-plan', 'bailian-payg', 'qwen-token-plan']);
+	// 新的 Qwen 中国端点与百炼 Token Plan 使用不同域名，同地区的团队与个人套餐仍共享地址。
+	assert.deepEqual(bailian?.providers.map((provider) => provider.id), [
+		'bailian-token-plan', 'bailian-coding-plan', 'bailian-payg', 'qwen-token-plan', 'qwen-token-plan-cn',
+	]);
 	assert.equal(openai?.providers.length, 2);
 	const ids = groups.flatMap((group) => group.providers.map((provider) => provider.id));
 	assert.ok(!ids.includes('qwen-token-plan-individual'));

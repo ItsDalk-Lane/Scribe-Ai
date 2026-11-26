@@ -8,6 +8,7 @@ import type { App } from 'obsidian';
 import type { CommunicationSettings } from '../types';
 
 const SECRET_PREFIX = 'scribe-ai-';
+const pendingByStorage = new WeakMap<App['secretStorage'], Map<string, Promise<void>>>();
 
 export function credentialIdForProvider(providerId: string): string {
 	if (!/^[a-z0-9][a-z0-9-]*$/.test(providerId)) {
@@ -47,17 +48,20 @@ export function createCredentialStore(
 	app: App,
 	settings: CommunicationSettings,
 ): CredentialStore {
-	const chains = new Map<string, Promise<void>>();
+	const chains = pendingByStorage.get(app.secretStorage) ?? new Map<string, Promise<void>>();
+	pendingByStorage.set(app.secretStorage, chains);
 	// 槽位名称只用于创建，不能用来推断当前服务商有权读取旧密钥。
 	const secretId = (providerId: string) => Object.prototype.hasOwnProperty.call(settings.credentialIds, providerId)
 		? settings.credentialIds[providerId]
 		: undefined;
 	const read = (id: string | undefined) => id ? parseCredential(app.secretStorage.getSecret(id)) : undefined;
 	const checkSignal = (options?: AuthOperationOptions) => options?.signal?.throwIfAborted();
-	const enqueue = <T>(providerId: string, task: () => Promise<T>): Promise<T> => {
-		const previous = chains.get(providerId) ?? Promise.resolve();
+	const enqueue = <T>(id: string, task: () => Promise<T>): Promise<T> => {
+		const previous = chains.get(id) ?? Promise.resolve();
 		const result = previous.catch(() => {}).then(task);
-		chains.set(providerId, result.then(() => undefined, () => undefined));
+		const settled = result.then(() => undefined, () => undefined);
+		chains.set(id, settled);
+		void settled.then(() => { if (chains.get(id) === settled) chains.delete(id); });
 		return result;
 	};
 
@@ -77,9 +81,10 @@ export function createCredentialStore(
 		},
 		modify(providerId, fn, options) {
 			const id = secretId(providerId);
-			return enqueue(providerId, async () => {
+			if (!id) return Promise.reject(new Error('Credential link is missing or changed'));
+			return enqueue(id, async () => {
 				checkSignal(options);
-				if (!id || id !== secretId(providerId)) throw new Error('Credential link is missing or changed');
+				if (id !== secretId(providerId)) throw new Error('Credential link is missing or changed');
 				const current = read(id);
 				const next = await fn(current);
 				checkSignal(options);
@@ -91,10 +96,12 @@ export function createCredentialStore(
 			});
 		},
 		delete(providerId, options) {
-			return enqueue(providerId, async () => {
+			const id = secretId(providerId);
+			if (!id) return Promise.resolve();
+			return enqueue(id, async () => {
 				checkSignal(options);
-				const id = secretId(providerId);
-				if (id) app.secretStorage.setSecret(id, '');
+				if (id !== secretId(providerId)) throw new Error('Credential link is missing or changed');
+				app.secretStorage.setSecret(id, '');
 			});
 		},
 	};

@@ -1,6 +1,7 @@
 import type { Api, Model, Provider } from '@earendil-works/pi-ai';
 import type { ModelConnection, ModelConnectionIssue, ModelOverride } from '../types';
 import { isOpenCodeProvider, openCodeConfiguredAddress, openCodeConnection } from './openCodeModels';
+import { isSecureServiceUrl } from './serviceAddress';
 
 const responsesAddresses = new Map([
 	['groq', 'https://api.groq.com/openai/v1'],
@@ -50,7 +51,7 @@ export function resolveModelConnection(options: {
 	if (!baseUrl && !addressFromAuth) return unresolved('missing-address');
 	if (baseUrl) {
 		const url = URL.parse(baseUrl);
-		if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) return unresolved('invalid-address');
+		if (!url || !isSecureServiceUrl(url) || url.hash) return unresolved('invalid-address');
 		if (manualUrl && isOpenCodeProvider(provider.id) && url.hostname === 'opencode.ai') {
 			const address = openCodeConfiguredAddress(provider.id, api, url);
 			if (!address) return unresolved('incompatible-address');

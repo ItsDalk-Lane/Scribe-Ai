@@ -1,5 +1,7 @@
 import type { Agent } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { nodeRequire } from './nodeRequire';
+import { isLoopbackHost } from './serviceAddress';
 
 export type ProxySource = 'direct' | 'configured' | 'environment' | 'system';
 export interface ProxyAgentSelection {
@@ -11,21 +13,56 @@ export type ProxyAgentResolver = (url: URL) => Agent | ProxyAgentSelection | und
 
 const agents = new Map<string, Agent>();
 let configuredProxy = '';
+let configuredCredentials: (() => string) | undefined;
 let useSystemProxy = true;
 
-export function configureProxy(options: { proxyUrl?: string; systemProxy?: boolean }): void {
+export function configureProxy(options: { proxyUrl?: string; systemProxy?: boolean; credentialedUrl?: () => string }): void {
 	configuredProxy = options.proxyUrl?.trim() ?? '';
+	configuredCredentials = options.credentialedUrl;
 	useSystemProxy = options.systemProxy !== false;
+}
+
+type ProxySettings = { proxyUrl: string; proxyCredentialId?: string };
+type ProxySecrets = { getSecret(id: string): string | null | undefined; setSecret(id: string, value: string): void };
+
+function proxyAddress(url: URL): string {
+	return `${url.protocol}//${url.host}`;
+}
+
+export function storeProxyCredentials(value: string, secrets: ProxySecrets, previous?: ProxySettings): ProxySettings {
+	if (!value.trim()) return { proxyUrl: '' };
+	const proxy = parseProxyUrl(value.trim());
+	if ((proxy.pathname && proxy.pathname !== '/') || proxy.search || proxy.hash) throw new Error('代理地址只能包含协议、主机、端口和认证信息。');
+	const proxyUrl = proxyAddress(proxy);
+	if (!proxy.username && !proxy.password) {
+		return { proxyUrl, ...(previous?.proxyUrl === proxyUrl && previous.proxyCredentialId && { proxyCredentialId: previous.proxyCredentialId }) };
+	}
+	const proxyCredentialId = `scribe-ai-proxy-${randomUUID()}`;
+	secrets.setSecret(proxyCredentialId, proxy.href);
+	if (secrets.getSecret(proxyCredentialId) !== proxy.href) throw new Error('无法保存代理认证信息。');
+	return { proxyUrl, proxyCredentialId };
+}
+
+export function readConfiguredProxy({ proxyUrl, proxyCredentialId }: ProxySettings, secrets?: ProxySecrets): string {
+	if (!proxyCredentialId) return proxyUrl;
+	const value = secrets?.getSecret(proxyCredentialId);
+	const proxy = value && URL.parse(value);
+	if (!proxy || proxyAddress(proxy) !== proxyUrl) throw new Error('当前代理地址没有匹配的认证信息，请在高级设置中重新保存。');
+	return proxy.href;
+}
+
+export function matchesLegacyProxy(value: string, stored: ProxySettings, secrets: ProxySecrets): boolean {
+	if (!stored.proxyCredentialId || !value.includes('@')) return false;
+	try {
+		return parseProxyUrl(value).href === readConfiguredProxy(stored, secrets);
+	} catch {
+		return false;
+	}
 }
 
 function environment(name: string): string | undefined {
 	if (typeof process === 'undefined') return undefined;
 	return process.env[name] ?? process.env[name.toLowerCase()];
-}
-
-function isLocalHostname(hostname: string): boolean {
-	const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
-	return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
 function noProxyMatches(url: URL, noProxy: string | undefined): boolean {
@@ -79,8 +116,8 @@ async function systemProxyUrl(target: URL): Promise<string | undefined> {
 }
 
 async function resolveProxy(target: URL): Promise<{ proxy?: URL; source: ProxySource }> {
-	if (noProxyMatches(target, environment('NO_PROXY')) || isLocalHostname(target.hostname)) return { source: 'direct' };
-	if (configuredProxy) return { proxy: parseProxyUrl(configuredProxy), source: 'configured' };
+	if (noProxyMatches(target, environment('NO_PROXY')) || isLoopbackHost(target.hostname)) return { source: 'direct' };
+	if (configuredProxy) return { proxy: parseProxyUrl(configuredCredentials?.() ?? configuredProxy), source: 'configured' };
 	const environmentProxy = target.protocol === 'https:'
 		? environment('HTTPS_PROXY') ?? environment('HTTP_PROXY') ?? environment('ALL_PROXY')
 		: environment('HTTP_PROXY') ?? environment('ALL_PROXY');

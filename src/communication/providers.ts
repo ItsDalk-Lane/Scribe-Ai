@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { access } from 'node:fs/promises';
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
 	Api,
-	AuthContext,
 	Context,
 	ImageContent,
 	JsonObject,
@@ -40,7 +40,7 @@ import { applyModelVideo, catalogVideoInput, nativeVideoFormat, videoTakesOnlyUr
 import { confirmModelRequest, modelRequestConfirmation } from './modelRequestConfirmation';
 import type { ModelRequestConfirmation } from './modelRequestConfirmation';
 import { modelNodeFetch, nodeFetch } from './nodeFetch';
-import { nodeRequire } from './nodeRequire';
+import { isSecureServiceUrl } from './serviceAddress';
 import { captureReportedUsage, reportedCost } from './reportedUsage';
 import { ContextOverflowError, RetryableModelError } from '../types';
 import { isBuiltInThinkingLevel, isThinkingLevel } from '../orchestration/settings/thinking';
@@ -250,22 +250,6 @@ class PiModelStream implements ModelStream {
 	}
 }
 
-function authContext(): AuthContext {
-	return {
-		env: async (name) => typeof process === 'undefined' ? undefined : process.env[name],
-		fileExists: async (path) => {
-			const { existsSync } = nodeRequire('node:fs') as typeof import('node:fs');
-			const { homedir } = nodeRequire('node:os') as typeof import('node:os');
-			const resolved = path === '~' ? homedir() : path.startsWith('~/') ? `${homedir()}${path.slice(1)}` : path;
-			return existsSync(resolved);
-		},
-	};
-}
-
-function isGoogleModel(model: Model<Api>): boolean {
-	return model.api === 'google-generative-ai' || model.api === 'google-vertex';
-}
-
 /** 服务商自带地址：provider 级字段优先，其次取模型里唯一的那个地址（各模型不一致时返回空） */
 function providerBaseUrl(provider: Provider): string {
 	const urls = new Set(
@@ -319,7 +303,7 @@ const CONNECTION_ERRORS: Record<ModelConnectionIssue, string> = {
 	'missing-protocol': '无法确认此模型的 API 协议，请在模型配置中选择。',
 	'unsupported-protocol': '插件未接通此 API 协议，请重新选择。',
 	'missing-address': '无法确认此协议的 Base URL，请填写对应的请求地址。',
-	'invalid-address': 'Base URL 无效，请填写正确的 HTTP 或 HTTPS 地址。',
+	'invalid-address': '远程模型服务需要 HTTPS 地址；本机回环地址可以使用 HTTP。',
 	'incompatible-address': 'Base URL 与所选 API 协议或 OpenCode 套餐不匹配，请更正地址或清空以自动选择。',
 };
 
@@ -344,7 +328,14 @@ export function createModelService(
 	serviceOptions: ModelServiceOptions = {},
 ): ModelService {
 	registerLazyOAuthFlows();
-	const models: MutableModels = builtinModels({ credentials, authContext: authContext() });
+	const models: MutableModels = builtinModels({ credentials, authContext: {
+		env: async () => undefined,
+		async fileExists(path) {
+			const credential = await credentials.read('google-vertex');
+			if (credential?.type !== 'api_key' || !path || path !== credential.env?.GOOGLE_APPLICATION_CREDENTIALS) return false;
+			return access(path).then(() => true, () => false);
+		},
+	} });
 	for (const provider of serviceOptions.additionalProviders ?? []) models.setProvider(provider);
 	// 目录外第一方服务商：带完整元数据注册成普通 Provider，与内置服务商共用请求/覆盖/聚合逻辑
 	const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -574,11 +565,14 @@ export function createModelService(
 		if (request.signal?.aborted) onAbort();
 		request.signal?.addEventListener('abort', onAbort, { once: true });
 		const cleanup = () => request.signal?.removeEventListener('abort', onAbort);
-		const confirmation = request.beforeSend ? { beforeSend: request.beforeSend, controller } : undefined;
+		const configuredAddress = override?.baseUrl?.trim() || serviceOptions.baseUrls?.()[request.providerId]?.trim() || registered.has(request.providerId);
+		const expectedBase = configuredAddress && connection.baseUrl ? new URL(connection.baseUrl) : undefined;
+		const confirmation = request.beforeSend || expectedBase
+			? { beforeSend: request.beforeSend, expectedBase, controller } : undefined;
 		const confirmedFetch: typeof fetch = async (input, init) => {
 			const url = new URL(input instanceof Request ? input.url : input);
 			// Anthropic 的凭据交换也用同一个 fetch，聊天请求固定走 messages。
-			if (model.api === 'anthropic-messages' && url.pathname.endsWith('/v1/oauth/token')) {
+			if (model.api === 'anthropic-messages' && url.pathname.endsWith('/v1/oauth/token') && isSecureServiceUrl(url)) {
 				return transport.fetch(input, init);
 			}
 			if (transport.fetch === nodeFetch) return modelNodeFetch(input, init);
@@ -587,7 +581,7 @@ export function createModelService(
 			return transport.fetch(input, init);
 		};
 		const reportedUsage = captureReportedUsage(model.api);
-		const fetchModel = confirmation ? confirmedFetch : transport.fetch;
+		const fetchModel = confirmedFetch;
 		const options: SimpleStreamOptions = {
 			signal: controller.signal,
 			maxTokens: override?.maxTokens && request.maxTokens !== undefined
@@ -603,9 +597,7 @@ export function createModelService(
 			timeoutMs: 2_147_483_647,
 			transport: 'sse',
 			onProviderStreamEvent: (event) => reportedUsage.observe(event),
-			...(isGoogleModel(model) ? {} : {
-				fetch: schema && needsBufferedGroqSchema(connection) ? bufferedGroqSchemaFetch(fetchModel) : fetchModel,
-			}),
+			fetch: schema && needsBufferedGroqSchema(connection) ? bufferedGroqSchemaFetch(fetchModel) : fetchModel,
 		};
 		try {
 			const input = video && videoMarker ? {
@@ -684,8 +676,8 @@ export function createModelService(
 		const requestSignal = catalogSignal(signal);
 		const url = new URL(baseUrl.trim());
 		let endpoint = url.href.replace(/\/+$/, '');
-		if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
-			throw new Error('Invalid base URL');
+		if (!isSecureServiceUrl(url) || url.search || url.hash) {
+			throw new Error(CONNECTION_ERRORS['invalid-address']);
 		}
 		const credential = await credentials.read(providerId, { signal: requestSignal });
 		const headers: Record<string, string> = { accept: 'application/json' };

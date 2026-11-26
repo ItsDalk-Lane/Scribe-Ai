@@ -9,6 +9,7 @@ import { createConversationStore } from './conversationStore';
 import { readStoredJson, writeStoredJson } from './jsonFile';
 import { initializeLocalState } from './localState';
 import { openVaultStorage, STORAGE_VERSION } from './vaultStorage';
+import { matchesLegacyProxy, storeProxyCredentials } from '../../communication/proxy';
 
 async function prepareSettings(raw: Partial<ScribeSettings>, vault: Vault): Promise<ScribeSettings> {
 	const settings = normalizeSettings(raw);
@@ -33,9 +34,18 @@ export async function initializePluginStorage(plugin: Plugin) {
 	if (storage.importing && storage.stored && Object.keys(storage.legacy).some((key) => key !== 'storageVersion')) {
 		const oldSettings = await prepareSettings(storage.legacy, app.vault);
 		oldSettings.slashPresets ??= readLegacyPresets(app);
+		if (matchesLegacyProxy(oldSettings.communication.proxyUrl, settings.communication, app.secretStorage)) {
+			oldSettings.communication.proxyUrl = settings.communication.proxyUrl;
+			oldSettings.communication.proxyCredentialId = settings.communication.proxyCredentialId;
+		}
 		if (JSON.stringify(oldSettings) !== JSON.stringify(settings)) {
 			throw new Error('新旧设置有冲突，已保留两份数据。');
 		}
+	}
+
+	if (settings.communication.proxyUrl.includes('@')) {
+		const proxy = storeProxyCredentials(settings.communication.proxyUrl, app.secretStorage);
+		settings.communication = { ...settings.communication, ...proxy };
 	}
 
 	const writeSettings = (next: ScribeSettings) => writeStoredJson(storage.paths.settings, next);
@@ -46,7 +56,7 @@ export async function initializePluginStorage(plugin: Plugin) {
 		}
 	}
 
-	const conversations = createConversationStore(storage.paths.conversations);
+	const conversations = createConversationStore(storage.paths.conversations, storage.recordConversationChange, storage.paths.cache);
 	const legacyIds = new Set<string>();
 	if (storage.needsLegacyMigration) {
 		for (const { id } of await conversations.list()) legacyIds.add(id);
