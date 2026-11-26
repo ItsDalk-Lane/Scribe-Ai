@@ -1,3 +1,4 @@
+import { obsidianSearchToolName } from '../tools/workspaceTools';
 import { isAbsolute, resolve } from 'node:path';
 import type { ToolCall } from '../types';
 
@@ -9,6 +10,7 @@ export function toolKind(name: string): ToolKind {
 		case 'Write': return 'write';
 		case 'Edit': return 'edit';
 		case 'NotebookEdit': return 'notebook';
+		case obsidianSearchToolName:
 		case 'Glob':
 		case 'web_search':
 		case 'Grep': return 'search';
