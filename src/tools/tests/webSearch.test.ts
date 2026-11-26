@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { setTimeout } from 'node:timers/promises';
 import type { App } from 'obsidian';
 import { createContextBuilder } from '../../orchestration/context/contextBuilder';
 import { createRunContext } from '../../orchestration/runContext';
@@ -140,11 +141,11 @@ void test('搜索服务按所选服务商发送参数，处理免费服务、协
 	waitForAbort();
 	const controller = new AbortController();
 	const pending = execute(controller.signal);
-	for (let attempt = 0; calls.length < 5 && attempt < 100; attempt++) {
-		await new Promise((resolve) => setImmediate(resolve));
-	}
+	// 等请求真正发出再取消；慢机器上固定次数的事件循环让出不够用。
+	const deadline = Date.now() + 10_000;
+	while (calls.length < 5 && Date.now() < deadline) await setTimeout(10);
 	controller.abort();
-	assert.equal(calls.length, 5);
+	assert.equal(calls.length, 5, 'the search request was not issued before the deadline');
 	assert.match((await pending).content, /任务已停止/);
 });
 
