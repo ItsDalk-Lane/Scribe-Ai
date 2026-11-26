@@ -3,15 +3,15 @@ import { test } from 'node:test';
 import { TOOL_NOT_APPROVED } from '../../types';
 import type { RunState } from '../../types';
 import { buildSystemPrompt } from '../../orchestration/context/systemPrompt';
-import { DEFAULT_GOAL_ROUNDS, finishGoalRound, goalRoundInstruction, parseChatGoal, restoreChatGoal, setGoalWorkClock, stripGoalReport, validGoalRounds } from '../chatGoal';
+import { finishGoalRound, goalRoundInstruction, parseChatGoal, restoreChatGoal, setGoalWorkClock, stripGoalReport } from '../chatGoal';
 import type { ChatGoal } from '../chatGoal';
 
-const started: ChatGoal = { objective: '检查复习计划', status: 'active', maxRounds: DEFAULT_GOAL_ROUNDS, usedRounds: 1, totalRounds: 2 };
+const started: ChatGoal = { objective: '检查复习计划', status: 'active', usedRounds: 1, totalRounds: 2 };
 
-void test('an interrupted goal restores paused with its objective, limit and progress', () => {
+void test('an interrupted goal restores paused with its objective and progress', () => {
 	assert.deepEqual(restoreChatGoal(started), { ...started, status: 'paused', reason: 'closed' });
-	assert.equal(restoreChatGoal({ ...started, maxRounds: 0 }), undefined);
-	assert.equal(validGoalRounds(1.5), false);
+	assert.deepEqual(restoreChatGoal({ ...started, maxRounds: 5, usedRounds: 99 }),
+		{ ...started, usedRounds: 99, status: 'paused', reason: 'closed' });
 });
 
 void test('goal work time accrues only while active and survives a pause and reopening', () => {
@@ -38,12 +38,16 @@ void test('a goal restores the selected skill source only when it matches its ob
 	assert.equal(parseChatGoal({ ...goal, skillNotePaths: ['../其他位置.md'] }), undefined);
 });
 
-void test('goal continuation stops on the selected cap, interruption or failure', () => {
+void test('goal continuation follows progress beyond the old cap and pauses when progress stops', () => {
 	const run: RunState = { taskId: 'a', turn: 1, messages: [{ role: 'assistant', content: '已经检查了一份笔记。' }],
 		pendingCalls: [], status: 'done' };
-	assert.deepEqual(finishGoalRound(started, run), started);
-	const lastRound = { ...started, usedRounds: started.maxRounds };
-	assert.deepEqual(finishGoalRound(lastRound, run), { ...lastRound, status: 'paused', reason: 'limit' });
+	const oldCap = { ...started, maxRounds: 5, usedRounds: 51, totalRounds: 51, criteria: [started.objective] };
+	const progress = '<!-- scribe-goal-report: {"checks":[],"remaining":["复查日期"]} -->';
+	const working = { ...run, messages: [{ role: 'assistant' as const, content: progress }] };
+	const next = finishGoalRound(oldCap, working);
+	assert.equal(next.status, 'active');
+	assert.equal(finishGoalRound(next, working).reason, 'stalled');
+	assert.equal(finishGoalRound(started, run).reason, 'stalled');
 	assert.equal(finishGoalRound(started, { ...run, status: 'cancelled' }).reason, 'manual');
 	assert.equal(finishGoalRound(started, undefined).reason, 'failed');
 });
@@ -54,8 +58,8 @@ void test('completion requires evidence in the last line of a successful final a
 		pendingCalls: [], status: 'done' };
 	assert.deepEqual(finishGoalRound(started, run), { ...started, status: 'complete', evidence: '[[复习计划.md]] 的三段日期均已核对' });
 	assert.equal(finishGoalRound(started, { ...run, status: 'failed' }).status, 'paused');
-	assert.equal(finishGoalRound(started, { ...run, messages: [{ role: 'tool', content: completion }] }).status, 'active');
-	assert.equal(finishGoalRound(started, { ...run, messages: [{ role: 'assistant', content: `\`\`\`\n${completion}\n\`\`\`` }] }).status, 'active');
+	assert.equal(finishGoalRound(started, { ...run, messages: [{ role: 'tool', content: completion }] }).status, 'paused');
+	assert.equal(finishGoalRound(started, { ...run, messages: [{ role: 'assistant', content: `\`\`\`\n${completion}\n\`\`\`` }] }).status, 'paused');
 	assert.equal(finishGoalRound(started, { ...run, messages: [{ role: 'tool', content: TOOL_NOT_APPROVED }, ...run.messages] }).reason, 'blocked');
 	assert.equal(finishGoalRound(started, { ...run, messages: [{ role: 'assistant', content: '请先选择笔记。\n<!-- scribe-goal-blocked -->' }] }).reason, 'blocked');
 	const closed = { ...started, status: 'paused', reason: 'closed' } as const;
@@ -114,7 +118,7 @@ void test('a structured goal saves the blocker and does not accept an old or inc
 	const run: RunState = { taskId: 'a', turn: 1, status: 'done', pendingCalls: [], messages: [
 		{ role: 'assistant', content: '旧格式\n<!-- scribe-goal-complete: 日期完整 -->' },
 	] };
-	assert.equal(finishGoalRound(goal, run).status, 'active');
+	assert.equal(finishGoalRound(goal, run).status, 'paused');
 	const blocked = '<!-- scribe-goal-report: {"checks":[],"remaining":["补全日期"],"blocked":"缺少原始会议记录"} -->';
 	const paused = finishGoalRound(goal, { ...run, messages: [{ role: 'assistant', content: blocked }] });
 	assert.equal(paused.status, 'paused');
@@ -124,7 +128,7 @@ void test('a structured goal saves the blocker and does not accept an old or inc
 		{ role: 'assistant', content: '<!-- scribe-goal-report: {"checks":[{"criterion":1,"evidence":"找到原始记录"}],"remaining":[]} -->' },
 		{ role: 'assistant', content: '等等，日期需要进一步确认', truncated: true },
 	] });
-	assert.equal(result.status, 'active');
+	assert.equal(result.status, 'paused');
 	assert.deepEqual(result.progress?.remaining, ['补全日期']);
 	assert.equal(parseChatGoal({ ...goal, refs: [{ path: '../外部.md' }] }), undefined);
 });

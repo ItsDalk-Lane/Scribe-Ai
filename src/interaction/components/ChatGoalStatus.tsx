@@ -58,7 +58,7 @@ export default function ChatGoalStatus({ goal, hide = false }: { goal: ReturnTyp
 			</div>
 			<div id={detailsId} hidden={!goal.opened} className="scribe-goal-status-details">
 				<p>{value.objective}</p>
-				<p>{text.current} {value.usedRounds}/{value.maxRounds} · {text.total} {value.totalRounds}</p>
+				<p>{text.current} {value.usedRounds} · {text.total} {value.totalRounds}</p>
 				{value.status === 'paused' && value.reason && <p>{text.reasons[value.reason]}</p>}
 				{value.progress?.blocked && value.status !== 'complete' && <p>{value.progress.blocked}</p>}
 				{value.status === 'active' && !goal.error && <p>{goal.working ? text.working : text.waiting}</p>}

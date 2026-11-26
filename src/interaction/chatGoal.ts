@@ -4,8 +4,6 @@ import { isSkillMentionAt } from '../skills/mentions';
 import { safeResourcePath } from '../skills/library/vaultAdapter';
 import { isCachedImagePath } from '../orchestration/storage/paths';
 
-export const DEFAULT_GOAL_ROUNDS = 5;
-export const MAX_GOAL_ROUNDS = 50;
 export const MAX_GOAL_LENGTH = 8_000;
 export const MAX_GOAL_CRITERIA = 20;
 export const MAX_GOAL_PLAN_LENGTH = 16_000;
@@ -15,7 +13,7 @@ const maxNotePaths = 100;
 const reportStart = '<!-- scribe-goal-report: ';
 const reportEnd = ' -->';
 
-export type GoalPause = 'manual' | 'plan' | 'closed' | 'limit' | 'failed' | 'blocked';
+export type GoalPause = 'manual' | 'plan' | 'closed' | 'stalled' | 'failed' | 'blocked';
 
 export interface GoalCheck {
 	criterion: string;
@@ -32,7 +30,6 @@ export interface GoalProgress {
 export interface ChatGoal {
 	objective: string;
 	status: 'active' | 'paused' | 'complete';
-	maxRounds: number;
 	usedRounds: number;
 	totalRounds: number;
 	workedMs?: number;
@@ -111,10 +108,6 @@ function savedProgress(value: unknown, criteria: string[]): value is GoalProgres
 		&& (value.blocked === undefined || text(value.blocked, maxEvidenceLength));
 }
 
-export function validGoalRounds(value: unknown): value is number {
-	return count(value) && value > 0 && value <= MAX_GOAL_ROUNDS;
-}
-
 function goalSkillMentions(value: unknown, objective: string): value is SkillMention[] {
 	if (!Array.isArray(value) || value.length > objective.length / 2) return false;
 	const starts = new Set<number>();
@@ -130,9 +123,9 @@ function goalSkillMentions(value: unknown, objective: string): value is SkillMen
 
 export function parseChatGoal(value: unknown): ChatGoal | undefined {
 	if (!record(value)) return;
-	const { objective, maxRounds, usedRounds, totalRounds, workedMs, status, reason, evidence, criteria,
+	const { objective, usedRounds, totalRounds, workedMs, status, reason, evidence, criteria,
 		refs, imageSourcePath, chatQuotes, skillMentions, skillScope, skillNotePaths, plan, progress } = value;
-	if (!text(objective, MAX_GOAL_LENGTH) || !validGoalRounds(maxRounds) || !count(totalRounds) || !count(usedRounds)
+	if (!text(objective, MAX_GOAL_LENGTH) || !count(totalRounds) || !count(usedRounds)
 		|| (workedMs !== undefined && !count(workedMs))
 		|| (status !== 'active' && status !== 'paused' && status !== 'complete')
 		|| (criteria !== undefined && !validGoalCriteria(criteria))
@@ -147,9 +140,10 @@ export function parseChatGoal(value: unknown): ChatGoal | undefined {
 		|| (plan !== undefined && !text(plan, MAX_GOAL_PLAN_LENGTH))
 		|| (progress !== undefined && !savedProgress(progress, criteria ?? [objective]))) return;
 	return {
-		objective, maxRounds, usedRounds, totalRounds, status,
+		objective, usedRounds, totalRounds, status,
 		...(workedMs !== undefined && { workedMs }),
-		...(reason === 'manual' || reason === 'plan' || reason === 'closed' || reason === 'limit' || reason === 'failed' || reason === 'blocked' ? { reason } : {}),
+		...(reason === 'limit' ? { reason: 'manual' } :
+			(reason === 'manual' || reason === 'plan' || reason === 'closed' || reason === 'stalled' || reason === 'failed' || reason === 'blocked') && { reason }),
 		...(typeof evidence === 'string' && { evidence: evidence.slice(0, maxEvidenceLength) }),
 		...(criteria && { criteria }), ...(refs && { refs }), ...(chatQuotes && { chatQuotes }),
 		...(imageSourcePath && { imageSourcePath }),
@@ -252,7 +246,7 @@ export function finishGoalRound(goal: ChatGoal, result: RunState | undefined): C
 		return { ...next, status: 'paused', reason: 'blocked', ...(progress && { progress }) };
 	}
 	if (!successful) {
-		return { ...next, status: 'paused', reason: result?.status === 'limit' ? 'limit' : result?.status === 'cancelled' ? 'manual' : 'failed' };
+		return { ...next, status: 'paused', reason: result?.status === 'limit' ? 'stalled' : result?.status === 'cancelled' ? 'manual' : 'failed' };
 	}
 	if (answer && answer.toolCalls?.length) return { ...next, status: 'paused', reason: 'failed' };
 	if (report?.blocked || lastLine === '<!-- scribe-goal-blocked -->') return { ...next, status: 'paused', reason: 'blocked' };
@@ -262,5 +256,10 @@ export function finishGoalRound(goal: ChatGoal, result: RunState | undefined): C
 		const evidence = lastLine?.match(/^<!-- scribe-goal-complete: ([^<>\r\n]{1,600}) -->$/u)?.[1]?.trim();
 		if (evidence && evidence !== '实际的完成依据') return { ...next, status: 'complete', evidence };
 	}
-	return next.usedRounds < next.maxRounds ? next : { ...next, status: 'paused', reason: 'limit' };
+	const checked = new Set(goal.progress?.checks.map(({ criterion }) => criterion));
+	const remaining = new Set(goal.progress?.remaining ?? criteria);
+	const advanced = next.progress?.checks.some(({ criterion }) => !checked.has(criterion))
+		|| (next.progress && (next.progress.remaining.length !== remaining.size || next.progress.remaining.some((item) => !remaining.has(item))))
+		|| successfulNoteReceipts(result.messages).changed.size > 0;
+	return advanced ? next : { ...next, status: 'paused', reason: 'stalled' };
 }

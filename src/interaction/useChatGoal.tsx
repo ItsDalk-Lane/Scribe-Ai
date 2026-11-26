@@ -3,8 +3,8 @@ import type { App } from 'obsidian';
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import type { LocalState } from '../orchestration/storage/localState';
 import type { ConversationStore, RunState } from '../types';
-import { DEFAULT_GOAL_ROUNDS, finishGoalRound, MAX_GOAL_CRITERIA, MAX_GOAL_LENGTH, MAX_GOAL_ROUNDS, parseChatGoal,
-	setGoalWorkClock, validGoalCriteria, validGoalRounds } from './chatGoal';
+import { finishGoalRound, MAX_GOAL_CRITERIA, MAX_GOAL_LENGTH, parseChatGoal,
+	setGoalWorkClock, validGoalCriteria } from './chatGoal';
 import type { ChatGoal, GoalPause, GoalWorkClock } from './chatGoal';
 import { confirmAction } from './ConfirmModal';
 import type { SlashUi } from './slashUi';
@@ -12,43 +12,42 @@ import type { SlashUi } from './slashUi';
 export function goalText() {
 	const chinese = getLanguage().toLowerCase().startsWith('zh');
 	return chinese ? {
-		title: '聊天目标', objective: '目标内容', criteria: '验收条件（每行一项）', limit: '每次最多自动执行的轮数', create: '启动目标',
+		title: '聊天目标', objective: '目标内容', criteria: '验收条件（每行一项）', create: '启动目标',
 		edit: '编辑', resume: '继续', pause: '暂停', clear: '清除', cancel: '取消', save: '保存',
 		replace: '启动新目标会替换当前目标，聊天记录会保留。', confirmClear: '清除这个目标？聊天记录会保留。',
 		invalidObjective: `请输入不超过 ${MAX_GOAL_LENGTH} 个字符的目标。`, invalidContext: '目标包含无效的资料或技能，请重新选择。',
-		invalid: `请输入目标，填写最多 ${MAX_GOAL_CRITERIA} 项验收条件，并将自动执行轮数设为 1 至 ${MAX_GOAL_ROUNDS} 的整数。`,
+		invalid: `请输入目标，填写最多 ${MAX_GOAL_CRITERIA} 项验收条件。`,
 		missing: '请先输入 /goal 和目标内容。', saveFailed: '目标进度保存失败，自动续做已停止。',
 		loadFailed: '无法读取目标记录，请重新打开聊天。', checked: '已核对', remaining: '待处理', working: '正在执行本轮', changed: '目标已更改，请重新打开。', waiting: '等待本聊天空闲后继续',
 		active: '进行中', paused: '已暂停', complete: '已完成', current: '本次', total: '累计轮数',
 		proof: '完成依据', reasons: {
-			manual: '已手动暂停。', plan: '已切换到计划模式。', closed: '聊天已关闭或重开，请手动继续。', limit: '已达到本次上限。', failed: '上一轮未成功结束，请查看聊天记录。',
+			manual: '已手动暂停。', plan: '已切换到计划模式。', closed: '聊天已关闭或重开，请手动继续。', stalled: '上一轮未取得可确认的新进展。请查看聊天记录。', failed: '上一轮未成功结束，请查看聊天记录。',
 			blocked: '需要你处理上一轮的问题。处理后可手动继续。',
 		},
 	} : {
-		title: 'Chat goal', objective: 'Objective', criteria: 'Acceptance criteria (one per line)', limit: 'Automatic rounds per start', create: 'Start goal',
+		title: 'Chat goal', objective: 'Objective', criteria: 'Acceptance criteria (one per line)', create: 'Start goal',
 		edit: 'Edit', resume: 'Resume', pause: 'Pause', clear: 'Clear', cancel: 'Cancel', save: 'Save',
 		replace: 'Starting a new goal replaces the current goal. Chat history will be kept.', confirmClear: 'Clear this goal? Chat history will be kept.',
 		invalidObjective: `Enter an objective of up to ${MAX_GOAL_LENGTH} characters.`, invalidContext: 'Select the goal’s attachments or skills again.',
-		invalid: `Enter a goal, up to ${MAX_GOAL_CRITERIA} acceptance criteria, and a whole number from 1 to ${MAX_GOAL_ROUNDS} for the round limit.`,
+		invalid: `Enter a goal, up to ${MAX_GOAL_CRITERIA} acceptance criteria.`,
 		missing: 'Enter /goal followed by your objective first.', saveFailed: 'The goal could not be saved. Automatic work has stopped.',
 		loadFailed: 'The goal could not be loaded. Reopen the chat.', checked: 'Checked', remaining: 'Remaining', working: 'Working on this round', changed: 'The goal changed. Open the editor again.', waiting: 'Waiting for this chat to become idle',
 		active: 'In progress', paused: 'Paused', complete: 'Complete', current: 'This start', total: 'Total rounds',
 		proof: 'Completion evidence', reasons: {
-			manual: 'Paused manually.', plan: 'Switched to Plan mode.', closed: 'The chat was closed or reopened. Resume to continue.', limit: 'This start reached its limit.', failed: 'The last round ended early. See chat history.',
+			manual: 'Paused manually.', plan: 'Switched to Plan mode.', closed: 'The chat was closed or reopened. Resume to continue.', stalled: 'The last round made no confirmed progress. See chat history.', failed: 'The last round ended early. See chat history.',
 			blocked: 'The last round needs your attention. Resume when ready.',
 		},
 	};
 }
 
 type GoalContext = Pick<ChatGoal, 'refs' | 'imageSourcePath' | 'chatQuotes' | 'skillMentions' | 'skillScope' | 'skillNotePaths'>;
-type GoalDraft = Pick<ChatGoal, 'objective' | 'criteria' | 'maxRounds'>;
+type GoalDraft = Pick<ChatGoal, 'objective' | 'criteria'>;
 
 function editGoal(app: App, draft: GoalDraft, ui?: SlashUi) {
 	const text = goalText();
 	function render(host: HTMLElement, done: (value?: GoalDraft) => void) {
 		let objective: HTMLTextAreaElement | undefined;
 		let criteria: HTMLTextAreaElement | undefined;
-		let limit: HTMLInputElement | undefined;
 		new Setting(host).setName(text.objective).addTextArea((field) => {
 			objective = field.setValue(draft.objective).inputEl;
 			objective.rows = 4;
@@ -60,25 +59,17 @@ function editGoal(app: App, draft: GoalDraft, ui?: SlashUi) {
 			criteria.rows = 3;
 			criteria.setAttribute('aria-label', text.criteria);
 		});
-		new Setting(host).setName(text.limit).addText((field) => {
-			limit = field.setValue(String(draft.maxRounds)).inputEl;
-			limit.type = 'number';
-			limit.min = '1';
-			limit.max = String(MAX_GOAL_ROUNDS);
-			limit.setAttribute('aria-label', text.limit);
-		});
 		const error = host.createDiv({ cls: 'scribe-chat-error', attr: { role: 'alert' } });
 		new Setting(host).addButton((button) => button.setButtonText(text.cancel).onClick(() => done()))
 			.addButton((button) => button.setButtonText(text.save).setCta().onClick(() => {
 				const value = objective?.value.trim();
-				const rounds = limit?.valueAsNumber;
 				const checks = [...new Set(criteria?.value.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean))];
 				const conditions = checks.length ? checks : [value];
-				if (!value || value.length > MAX_GOAL_LENGTH || !validGoalRounds(rounds) || !validGoalCriteria(conditions)) {
+				if (!value || value.length > MAX_GOAL_LENGTH || !validGoalCriteria(conditions)) {
 					error.setText(text.invalid);
 					return;
 				}
-				done({ objective: value, criteria: conditions, maxRounds: rounds });
+				done({ objective: value, criteria: conditions });
 			}));
 		queueMicrotask(() => objective?.focus());
 	}
@@ -220,10 +211,6 @@ export function useChatGoal({ app, store, localState, conversationId, isOpen, ca
 		const value = current.current;
 		if (!isOpen || !canContinue || !value || value !== goal || value.status !== 'active'
 			|| writeFailed.current || running.current) return;
-		if (value.usedRounds >= value.maxRounds) {
-			await pause('limit');
-			return;
-		}
 		running.current = true;
 		workOwner.current = value;
 		setWorking(true);
@@ -248,7 +235,7 @@ export function useChatGoal({ app, store, localState, conversationId, isOpen, ca
 		const text = goalText();
 		const objective = description.trim();
 		if (!objective || objective.length > MAX_GOAL_LENGTH) throw new Error(text.invalidObjective);
-		const next = parseChatGoal({ ...context, objective, criteria: [objective], status: 'active', maxRounds: DEFAULT_GOAL_ROUNDS,
+		const next = parseChatGoal({ ...context, objective, criteria: [objective], status: 'active',
 			usedRounds: 0, totalRounds: 0, workedMs: 0 });
 		if (!next) throw new Error(text.invalidContext);
 		const existing = current.current;

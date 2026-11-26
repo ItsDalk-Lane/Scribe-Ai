@@ -86,7 +86,7 @@ void test('本机状态和旧目标迁移后可重开，验证之前保留旧副
 	const directory = await mkdtemp(join(tmpdir(), 'scribe-state-test-'));
 	t.after(() => rm(directory, { force: true, recursive: true }));
 	const path = join(directory, 'state.json');
-	const goal: ChatGoal = { objective: '保存旧目标', status: 'active', maxRounds: 2, usedRounds: 0, totalRounds: 0 };
+	const goal: ChatGoal = { objective: '保存旧目标', status: 'active', usedRounds: 0, totalRounds: 0 };
 	const entries = new Map<string, unknown>([
 		[executionModeKey(), 'full-access'],
 		[executionModeKey('older'), 'auto-review'],
