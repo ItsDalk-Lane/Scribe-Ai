@@ -2,6 +2,25 @@
 
 Run AI tasks in Obsidian with your configured model.
 
+## Network access, data and permissions
+
+Scribe Ai is a free desktop plugin licensed under AGPL-3.0. Cloud model, web search, and MCP services you choose may require your own account or API key and may charge fees or consume a quota. Their terms and rates apply to your requests, including extra model calls for features such as summaries, automatic approval reviews, and video analysis. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
+
+### Network connections and data sent
+
+- **Models.** The model endpoint you select can receive your task, relevant chat history, note paths and contents, attachments, vault rules, skills, enabled memory, and tool results used in the task. Summaries, goal verification, and delegated tasks can make additional model requests using the relevant context. Automatic tool approval can send your task and the proposed operation for review. For edits to existing notes, the preview sent for review contains the changed lines and their positions. A separately configured video model receives the current question and the selected video or its URL.
+- **Model catalogs.** At startup and when you refresh model data, Scribe contacts Models.dev for public model information and can query Pi's public catalog, model providers, and configured endpoints. Provider catalog requests can use linked credentials. Catalog requests carry no chat or note content.
+- **Web search and media.** Obsidian's note search runs locally. With web search enabled, the chosen service receives the query. Its results can go to your chat model. Opening remote media or attaching a supported remote image can contact its host. The configured model can receive media you attach or obtain through an authorized tool.
+- **MCP and skills.** Enabled MCP servers can connect at startup. Tool arguments, which may include note content or file paths, go to the configured remote server or local program. Results can be saved in the chat and sent to the model. Scribe contacts GitHub when you request the public skill catalog or fetch a skill from a public repository for review and import.
+
+Chat history, usage and diagnostic records, and optional long-term memory are saved locally in the vault's `.scribe-ai` directory. Linked credentials are stored in Obsidian Secret Storage.
+
+### Vault and command access
+
+- **Vault and external files.** Ordinary reads and edits in the current vault can run directly. Use **Add a path outside the vault** to let the current task read a file or folder you select. Reads of unshared external files and changes outside the vault follow the selected approval mode. **Ask for approval** shows the proposed action. **Approve for me** sends eligible actions to the model for review. You can also select shared skill folders outside the vault and choose them as a destination when creating or importing a skill.
+- **Commands.** In **Ask for approval** and **Approve for me**, Bash on macOS can use an offline sandbox with read-only vault access. A command that requests vault writes needs your approval and stays offline in that sandbox. Commands that need to run outside the sandbox, including PowerShell, require your approval in those modes. Starting a local MCP program requires approval for that device and configuration. The approved program runs with your computer account's permissions.
+- **Full access.** If you select and confirm this mode, file tools and commands can use your computer account's permissions, including access to files outside the vault and network access. Changes to long-term memory and writing-rule edits made through file tools still ask for approval.
+
 ## Agent tasks
 
 Open **Scribe Ai** and submit a task. The agent starts in the current vault. Under **Add a path outside the vault**, choose a file or folder in the system picker to grant read access for the current task. Add it again for a new task. In the default modes, paths mentioned in the instructions or saved in chat history still require approval before access.
