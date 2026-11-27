@@ -4,6 +4,7 @@ import { diagnostics } from './diagnostics';
 import { toLogEntry } from './events';
 import type { NodeFetchObserver } from './events';
 import { confirmModelRequest } from './modelRequestConfirmation';
+import type { ModelRequestConfirmation } from './modelRequestConfirmation';
 import { nodeRequire } from './nodeRequire';
 import { bridgeResponse } from './nodeResponse';
 import { getProxyAgentWithStatus } from './proxy';
@@ -197,4 +198,5 @@ const fetchWithOptionalConfirmation = createNodeFetch(getProxyAgentWithStatus, {
 });
 
 export const nodeFetch: typeof fetch = fetchWithOptionalConfirmation;
-export const modelNodeFetch: typeof fetch = (input, init) => fetchWithOptionalConfirmation(input, init, confirmModelRequest);
+export const modelNodeFetch = (input: Parameters<typeof fetch>[0], init: RequestInit | undefined, confirmation: ModelRequestConfirmation) =>
+	fetchWithOptionalConfirmation(input, init, (url) => confirmModelRequest(url, confirmation));

@@ -1,3 +1,4 @@
+import { systemXml } from '../context/promptXml';
 import { Buffer } from 'node:buffer';
 import { approvalDiff } from '../../interaction/approvalDiff';
 import { ToolReviewDeniedError } from '../../types';
@@ -35,7 +36,7 @@ export async function reviewToolApproval(
 	const response = await models.send({
 		...model,
 		reasoning: null,
-		system: reviewInstructions,
+		system: systemXml({ task: reviewInstructions }),
 		messages: [{ role: 'user', content }],
 		tools: [],
 		maxTokens: 1024,

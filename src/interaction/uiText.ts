@@ -246,6 +246,7 @@ export interface UiText {
 	chatStepResult: string;
 	chatModelMissing: string;
 	chatSubmitDisclosure: string;
+	chatGoalReviewDisclosure: string;
 	chatModelChanged: string;
 	chatStop: string;
 	chatResume: string;
@@ -697,6 +698,7 @@ const EN: UiText = {
 	chatStepApproval: 'Waiting for approval',
 	chatStepResult: 'Tool result received',
 	chatModelMissing: 'Select a model in settings to start a task.',
+	chatGoalReviewDisclosure: 'When a criterion needs judgment, the same model reviews its evidence in a separate, metered request.',
 	chatSubmitDisclosure: 'Submitting sends your instructions to {provider}. It may also send chat history and material read by tools.',
 	chatModelChanged: 'The model changed. Check the destination and submit again.',
 	chatStop: 'Stop task',
@@ -1149,6 +1151,7 @@ const ZH_CN: UiText = {
 	chatStepApproval: '等待你确认',
 	chatStepResult: '已收到工具结果',
 	chatModelMissing: '请先在设置里选择模型。',
+	chatGoalReviewDisclosure: '需要判断时，相关证据会发给本次模型另行复核，计入用量。',
 	chatSubmitDisclosure: '提交会向 {provider} 发送当前指令，也可能附带对话历史和工具读取的资料。',
 	chatModelChanged: '模型已更换。请确认发送对象，再提交任务。',
 	chatStop: '停止任务',
@@ -1601,6 +1604,7 @@ const ZH_TW: UiText = {
 	chatStepApproval: '等待你確認',
 	chatStepResult: '已收到工具結果',
 	chatModelMissing: '請先在設定裡選擇模型。',
+	chatGoalReviewDisclosure: '需要判斷時，相關證據會傳給本次模型另行複核，計入用量。',
 	chatSubmitDisclosure: '提交會向 {provider} 傳送目前的指令，也可能附上對話紀錄和工具讀取的資料。',
 	chatModelChanged: '模型已更換。請確認傳送對象，再提交任務。',
 	chatStop: '停止任務',

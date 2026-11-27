@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { statSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { Vault } from 'obsidian';
-import { migrateWritingRules, readWritingRule, saveWritingRule, WritingRuleChangedError } from '../context/writingRules';
+import { createDirectoryRules, migrateWritingRules, readWritingRule, saveWritingRule, WritingRuleChangedError } from '../context/writingRules';
 
 void test('legacy global rules migrate without overwriting existing notes, and old folder rules are only backed up', async (t) => {
 	const root = await mkdtemp(join(tmpdir(), 'scribe-writing-rules-'));
@@ -43,4 +43,38 @@ void test('legacy global rules migrate without overwriting existing notes, and o
 	assert.equal(await readWritingRule(vault), newer);
 	assert.equal(await saveWritingRule(vault, '  ', newer), '');
 	assert.equal(await readWritingRule(vault), '');
+});
+
+void test('目录规则仅加载受信路径的祖先并实时核对改动，跳过私有目录和软链接', async (t) => {
+	const root = await mkdtemp(join(tmpdir(), 'scribe-directory-rules-'));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const file = (path: string) => join(root, path);
+	const vault = {
+		configDir: 'fixture-config',
+		adapter: { getBasePath: () => root },
+		getFileByPath: (path: string) => statSync(file(path), { throwIfNoEntry: false })?.isFile() ? { path } : null,
+		read: ({ path }: { path: string }) => readFile(file(path), 'utf8'),
+	} as unknown as Vault;
+	await mkdir(file('notes/chapter'), { recursive: true });
+	await mkdir(file('.scribe-ai'));
+	await writeFile(file('AGENTS.md'), '全库已有规则。');
+	await writeFile(file('.scribe-ai/AGENTS.md'), '不得读取这些内容。');
+	await writeFile(file('notes/AGENTS.md'), '笔记规则。');
+	await writeFile(file('notes/chapter/AGENTS.md'), '章节规则。');
+	if (process.platform !== 'win32') await symlink(file('notes'), file('alias'), 'dir');
+	let trusted = false;
+	const rules = createDirectoryRules(vault, () => trusted);
+	assert.deepEqual(await rules.forPath('notes/chapter/new.md'), []);
+	trusted = true;
+	assert.deepEqual(await rules.forPath('notes/chapter/new.md'), [
+		{ path: 'notes/AGENTS.md', text: '笔记规则。' },
+		{ path: 'notes/chapter/AGENTS.md', text: '章节规则。' },
+	]);
+	assert.deepEqual(await rules.forPath('notes/chapter', true), await rules.forPath('notes/chapter/new.md'));
+	assert.deepEqual(await rules.forPath('.scribe-ai/new.md'), []);
+	assert.deepEqual(await rules.forPath('alias/chapter/new.md'), []);
+	await writeFile(file('notes/chapter/AGENTS.md'), '新的章节规则。');
+	assert.equal((await rules.forPath('notes/chapter/new.md')).at(-1)?.text, '新的章节规则。');
+	trusted = false;
+	assert.deepEqual(await rules.forPath('notes/chapter/new.md'), []);
 });

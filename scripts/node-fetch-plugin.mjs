@@ -23,7 +23,7 @@ export function createNodeFetchPlugin() {
 					const client = 'const client = new BedrockRuntimeClient(config);';
 					bedrockPatches += source.split(client).length - 1;
 					const middleware = `client.middlewareStack.add((next) => async (args) => {
-						await __scribeConfirmBedrock(args.request);
+						await __scribeConfirmBedrock(args.request, options.signal);
 						return next(args);
 					}, { step: 'finalizeRequest', priority: 'low', name: 'scribeConfirmDestination' });`;
 					return {

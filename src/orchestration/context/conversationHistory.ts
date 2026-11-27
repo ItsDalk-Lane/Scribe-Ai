@@ -1,6 +1,16 @@
+import { insertPromptCheckpoints } from './promptContext';
+import { promptMessage } from './promptXml';
 import { Buffer } from 'node:buffer';
 import { isSkillReadResult } from '../../tools/skillTools';
 import type { ConversationSnapshot, Message, RunContext, SavedRun, ToolCall } from '../../types';
+
+export function historyAfterFreshPlan(snapshot: ConversationSnapshot): ConversationSnapshot {
+	const boundary = snapshot.runs.findLastIndex(({ request }) => Boolean(request.approvedPlanTaskId) && request.approvedPlanMode === 'fresh');
+	if (boundary < 1) return snapshot;
+	const runs = snapshot.runs.slice(boundary);
+	const manualCompaction = runs.some(({ state }) => state.taskId === snapshot.manualCompaction?.throughTaskId) ? snapshot.manualCompaction : undefined;
+	return { ...snapshot, runs, manualCompaction };
+}
 
 function compactionIndex(snapshot: ConversationSnapshot): number {
 	return snapshot.manualCompaction
@@ -12,10 +22,30 @@ export function runsAfterManualCompaction(snapshot: ConversationSnapshot): Saved
 	return snapshot.runs.slice(compactionIndex(snapshot) + 1);
 }
 
-export function historicalMessages(messages: Message[]): Message[] {
-	return messages.filter(({ subagentActivity }) => !subagentActivity)
-		.map((m) => m.role === 'tool' && isSkillReadResult(m.toolName)
-			? { ...m, content: '（历史记录）上次的技能资料已省略，需要时请按本轮权限重新读取。' } : m);
+export function historicalMessages(messages: Message[], preservePositions = false): Message[] {
+	let omittedCalls = new Set<string>();
+	return messages.filter(({ subagentActivity }) => preservePositions || !subagentActivity)
+		.map((m) => {
+			if (m.subagentActivity) return m;
+			// 已签名的助手批次不能只改一个调用。回放时保留普通正文和其他结果的参考记录。
+			if (m.role === 'assistant') {
+				const raw = m.rawAssistant?.content.filter((block) => block.type === 'toolCall') ?? [];
+				const calls = [...m.toolCalls ?? [], ...raw];
+				omittedCalls = new Set();
+				if (calls.some(({ name }) => name === 'MemorySave')) {
+					omittedCalls = new Set(calls.map(({ id }) => id));
+					return m.content ? { role: 'assistant', content: m.content }
+						: promptMessage({ tag: 'reference-material', text: '较早对话中的长期记忆写入已从工具记录省略。' });
+				}
+			}
+			if (m.role === 'tool' && m.toolCallId && omittedCalls.has(m.toolCallId)) {
+				return promptMessage({ tag: 'reference-material', text: !m.toolName || m.toolName.startsWith('Memory') || m.toolName === 'HistorySearch'
+					|| isSkillReadResult(m.toolName) ? '该项历史资料需按当前权限重新查询。'
+					: `较早工具结果（${m.toolName}，${m.isError ? '未成功' : '已完成'}）\n${m.content}` });
+			}
+			return m.role === 'tool' && isSkillReadResult(m.toolName)
+				? { ...m, content: '（历史记录）上次的技能资料已省略，需要时请按本轮权限重新读取。' } : m;
+		});
 }
 
 export function manualSummaryContext(text: string): string {
@@ -48,9 +78,12 @@ export function conversationHistory(snapshot: ConversationSnapshot): Pick<RunCon
 		const line = run.request.instruction.trim().split(/\r?\n/u, 1)[0] ?? '';
 		if (agreementStart.test(line) && Buffer.byteLength(line) <= 768) agreements.push(line);
 		if (index <= cutoff) return [];
-		const messages = historicalMessages(run.state.messages);
+		const messages = [...run.state.messages];
 		if (run.request.goalContext && messages[0]?.role === 'user') {
-			messages[0] = { ...messages[0], content: run.request.instruction };
+			const { taskPrompt } = messages[0];
+			messages[0] = { ...messages[0], content: taskPrompt
+				? messages[0].content.slice(0, taskPrompt.instruction + taskPrompt.references + taskPrompt.quotes)
+				: run.request.instruction };
 		}
 		const receipt = messages.at(-1);
 		if (run.subagentReport && receipt?.role === 'assistant' && receipt.local) {
@@ -64,13 +97,11 @@ export function conversationHistory(snapshot: ConversationSnapshot): Pick<RunCon
 		// 回放旧版保存的部分回复，以及打开侧聊时看到的未完成回复。
 		if (run.partial) messages.push({ role: 'assistant', content: run.partial, incomplete: true });
 		if (inProgress || status === 'interrupted') {
-			messages.push({
-				role: 'system',
-				content: inProgress ? '打开侧聊时，主任务仍在进行。以上只包含当时已知的进度。'
-					: '上次任务已中断。尊重用户这次的新指令，基于已记录的结果继续。',
-			});
+			messages.push(promptMessage({ tag: 'reference-material', text: inProgress ? '打开侧聊时，主任务仍在进行。以上只包含当时已知的进度。'
+					: '上次任务已中断。尊重用户这次的新指令，基于已记录的结果继续。' }));
 		}
-		return messages;
+		return insertPromptCheckpoints(historicalMessages(messages, true), run.promptCheckpoints ?? [], ({ after }) => after > 0)
+			.filter(({ subagentActivity }) => !subagentActivity);
 	});
 	return { history, agreements, manualSummary: cutoff >= 0 ? snapshot.manualCompaction?.text : undefined };
 }

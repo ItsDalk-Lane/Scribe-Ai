@@ -120,6 +120,12 @@ export class ChatTaskBoard {
 			if (owner === 'root') this.latestRoot = run.task.id;
 			this.runs.set(run.task.id, { owner, request, finished: false, readOnly: this.readers.has(owner) });
 		}
+		if (run.type === 'plan-enter') {
+			const existing = this.runs.get(run.taskId);
+			if (!existing || owner !== 'root' || run.taskId !== this.latestRoot || existing.finished || existing.request.intent
+				|| existing.request.approvedPlanTaskId) throw new Error('无法将当前任务切换到计划模式。');
+			existing.request = { ...existing.request, intent: 'plan' };
+		}
 		if (run.type === 'finish') {
 			const existing = this.runs.get(run.taskId);
 			if (existing) existing.finished = true;

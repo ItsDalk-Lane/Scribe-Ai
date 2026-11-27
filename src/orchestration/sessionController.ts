@@ -1,5 +1,13 @@
+import { createRunPromptContext } from './context/promptContext';
+import { createLongTermMemory } from './context/longTermMemory';
+import { createDirectoryRules } from './context/writingRules';
+import type { LocalState } from './storage/localState';
 import { guardModelConnection, queuedModelDestination, sameQueuedDestination } from './settings/modelConnection';
-import { approvedPlanRequest, submittedPlan } from '../interaction/chatPlan';
+import { confirmedGoalReport } from '../interaction/chatGoal';
+import type { ChatGoal } from '../interaction/chatGoal';
+import { reviewGoalCompletion } from './context/goalReview';
+import { matchesApprovedPlan, submittedPlan } from '../interaction/chatPlan';
+import { connectPlanRun } from './context/planRun';
 import { obsidianSearchToolName } from '../tools/workspaceTools';
 import { chatTaskReadTools } from '../tools/chatTaskTools';
 import { isModelAvailable, isProviderEnabled, videoModelFor } from './settings/modelAvailability';
@@ -15,7 +23,7 @@ import { meteredService } from './meteredService';
 import { createVideoAnalysis } from './context/videoAnalysis';
 import { transcodableVideo } from './context/videoEncoding';
 import { videoSourceKind, videoSources } from './context/videoAttachments';
-import { conversationHistory, runsAfterManualCompaction } from './context/conversationHistory';
+import { conversationHistory, historyAfterFreshPlan, runsAfterManualCompaction } from './context/conversationHistory';
 import { createHistorySummarizer } from './context/historySummary';
 import { createRunSummarizer } from './context/runSummary';
 import { buildWritingRulesPrompt } from './context/writingRules';
@@ -40,6 +48,7 @@ const readOnlyTools = new Set([...readOnlySkillTools, ...chatTaskReadTools, 'Rea
 
 interface Steering {
 	accepting: boolean;
+	changed: AbortController;
 	destination?: QueuedModelDestination;
 	pending: Map<string, { message: QueuedMessage; request: TaskRequest; resolve: () => void; reject: (reason: Error) => void }>;
 }
@@ -82,10 +91,10 @@ async function runTask(
 	selection: RunContext['model'],
 	signal: AbortSignal,
 	observer: RunObserver,
-	{ restored, replaceFromTaskId, sideSnapshot, queued, steering, rememberConversation = true, executionMode, models, subagents, child, skills }: {
+	{ restored, replaceFromTaskId, sideSnapshot, queued, steering, rememberConversation = true, executionMode, models, subagents, child, skills, goal, localState }: {
 		restored?: { run: SavedRun; conversation: ConversationSnapshot }; replaceFromTaskId?: string; sideSnapshot?: ConversationSnapshot;
 		queued?: { message: QueuedMessage; address?: string; onStarted: () => void }; steering?: Steering; rememberConversation?: boolean;
-		executionMode?: ExecutionMode; models?: RunModels; subagents?: ReturnType<typeof createSubagentController>; child?: ChildRunOptions; skills?: SkillRegistry;
+		executionMode?: ExecutionMode; models?: RunModels; subagents?: ReturnType<typeof createSubagentController>; child?: ChildRunOptions; skills?: SkillRegistry; goal?: ChatGoal; localState?: LocalState;
 	} = {},
 ): Promise<RunState> {
 	const { providerId, model } = selection;
@@ -139,10 +148,14 @@ async function runTask(
 	const sendingModels = child && models ? {
 		contextLimits: models.contextLimits,
 		send: ((request, receipt) => models.send({ ...request,
-			beforeSend: (address) => child.confirmDestination(request, address),
+			beforeSend: async (address, fingerprint) => {
+				await child.confirmDestination(request, address);
+				await request.beforeSend?.(address, fingerprint);
+			},
 		}, receipt)) as ModelService['send'],
 	} : models;
-	const reviewModels = executionMode === 'auto-review' && sendingModels ? meteredService(sendingModels, 'review', transcript.recordUsage) : undefined;
+	const reviewModels = executionMode === 'auto-review' && sendingModels
+		? meteredService(sendingModels, 'review', transcript.recordUsage, transcript.previewUsage) : undefined;
 	const review = restored && observer.confirmResume
 		? createResumeReview(task.request, observer.confirmResume, signal, checkModel, transcript.record)
 		: undefined;
@@ -158,12 +171,14 @@ async function runTask(
 		if (replaceAt === -1) throw new Error('对话中找不到这条消息。');
 		const saved = restored || replaceAt !== undefined
 			? { ...snapshot, runs: snapshot.runs.slice(0, restored ? -1 : replaceAt) } : snapshot;
-		const { approvedPlanTaskId, revisesPlanTaskId } = task.request;
-		if (approvedPlanTaskId) {
-			const plan = submittedPlan(saved.runs.at(-1));
-			if (child || sideSnapshot || intent || !plan || plan.taskId !== approvedPlanTaskId
-				|| approvedPlanRequest(plan).instruction !== task.request.instruction) throw new Error('待执行计划已变化，请重新核对并确认。');
+		const { approvedPlanTaskId, approvedPlanMode, revisesPlanTaskId } = task.request;
+		if (approvedPlanTaskId && !restored) {
+			const planRun = saved.runs.at(-1);
+			if (child || sideSnapshot || !matchesApprovedPlan(submittedPlan(planRun), task.request, Boolean(planRun?.planDraft))) {
+				throw new Error('待执行计划已变化，请重新核对并确认。');
+			}
 		}
+		const modelHistory = approvedPlanTaskId && approvedPlanMode === 'fresh' ? { id: conversationId, runs: [] } : historyAfterFreshPlan(saved);
 		if (revisesPlanTaskId) {
 			const previous = saved.runs.at(-1);
 			if (child || sideSnapshot || intent !== 'plan' || previous?.request.intent !== 'plan'
@@ -172,6 +187,7 @@ async function runTask(
 		if (!child && !sideSnapshot && rememberConversation) await conversations.setLastOpened(conversationId);
 		const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
 		let ctx: RunContext | undefined;
+		let lastGoalRequest: { address: string; fingerprint: string; messages: RunState['messages'] } | undefined;
 		let directSkills: SkillMention[] = [];
 		try {
 			const { refs } = task.request;
@@ -180,7 +196,8 @@ async function runTask(
 				directSkills = bindSkillMentions(task.request.instruction, task.request.skillMentions ?? [],
 					await skills.list(refs, '', task.request.skillScope));
 			}
-			const writingRules = intent === 'review' ? undefined : await buildWritingRulesPrompt(app.vault);
+			const writingRulesCurrent = intent === 'review' ? undefined : () => buildWritingRulesPrompt(app.vault);
+			const writingRules = await writingRulesCurrent?.();
 			ctx = await createRunContext(task, {
 				cwd, model: selection, signal: runSignal, checkModel, observer: transcript.observed, writingRules,
 				reviewTool: reviewModels ? async (operation) => {
@@ -192,10 +209,21 @@ async function runTask(
 				record: review ? (event) => review.record(event) : transcript.record, resumeReview: review?.review,
 				...(steering ? {
 					takeSteering: () => Array.from(steering.pending.values(), ({ message, request }) => ({ id: message.id, request })),
+					nextSteeringSignal: () => steering.changed.signal,
 					rejectSteering: (ids: string[], reason?: string) => rejectSteering(steering, ids, reason),
 				} : {}),
-				...(intent !== 'review' && conversationHistory(saved)),
+				...(intent !== 'review' && conversationHistory(modelHistory)),
 			}, app.vault.configDir, () => toolsEnabledAtStart && toolsEnabled(), Boolean(sideSnapshot), executionMode);
+			if (task.request.goalRound && goal) {
+				if (goal.status === 'active' && !child && !sideSnapshot && !intent) {
+					const criterionCount = goal.criteria?.length ?? 1;
+					ctx.goalReport = { criterionCount, recorded: () => Boolean(confirmedGoalReport(current?.messages ?? [], criterionCount)) };
+				}
+				ctx.destinationCheck = (request, address, fingerprint) => {
+					lastGoalRequest = fingerprint ? { address, fingerprint, messages: request.messages } : undefined;
+					return Promise.resolve();
+				};
+			}
 			if (queued?.address) {
 				const expected = new URL(queued.address);
 				const prefix = expected.pathname.replace(/\/+$/u, '');
@@ -206,17 +234,35 @@ async function runTask(
 					}
 				};
 			}
+			ctx.writingRulesCurrent = writingRulesCurrent;
+			if (!sideSnapshot && intent !== 'review') {
+				const history = child ? [] : runsAfterManualCompaction(modelHistory);
+				ctx.promptContext = createRunPromptContext(history, restored?.run, (checkpoint) => child
+					? child.append([{ type: 'prompt-context', taskId: task.id, checkpoint }])
+					: conversations.append(conversationId, [{ type: 'prompt-context', taskId: task.id, checkpoint }]));
+				if (localState) {
+					ctx.directoryRules = createDirectoryRules(app.vault, () => localState.directoryRulesTrusted());
+					if (!child) ctx.memory = createLongTermMemory(cwd, localState, conversations, conversationId);
+				}
+			}
+			ctx.previewModelUsage = transcript.previewModelUsage;
 			ctx.recordUnfinishedRequest = (receipt) => transcript.recordUsage({ kind: 'main-attempt', ...receipt });
 			const runPermissions = ctx.permissions;
+			if (intent === 'plan' && !child) ctx.canDescribeTool = () => toolsEnabledAtStart && toolsEnabled();
+			const canDescribe = ctx.canDescribeTool ?? ((tool) => runPermissions.canCallTool(tool));
+			ctx.canDescribeTool = (tool) => canDescribe(tool)
+				&& (tool.name !== structuredOutputToolName || models?.modelCapabilities?.(providerId, model).structuredOutput === true);
 			ctx.permissions = { ...runPermissions, canCallTool: (tool) => runPermissions.canCallTool(tool)
 				&& (tool.name !== structuredOutputToolName || models?.modelCapabilities?.(providerId, model).structuredOutput === true) };
 			if (skills && intent !== 'review') ctx.skillRun = createSkillRun(skills, task.request,
-				models?.contextLimits?.(selection)?.contextWindow, runSignal, task.id, observer.onWork && ((active) => observer.onWork?.(task.id, active)));
+				models?.contextLimits?.(selection)?.contextWindow, runSignal, task.id, observer.onWork && ((active) => observer.onWork?.(task.id, active)), child?.agentId ?? conversationId);
 			if (child) {
 				ctx.subagentId = child.agentId;
+				ctx.isolatedAgent = !child.baseHistory;
 				ctx.history = [...child.baseHistory ?? [], ...ctx.history ?? []];
 				ctx.destinationCheck = child.confirmDestination;
 				if (child.readOnly) {
+					delete ctx.canDescribeTool;
 					const policy = ctx.permissions;
 					ctx.permissions = { ...policy, canWrite: () => false,
 						canRequestPath: (path, operation) => operation === 'read' && policy.canRequestPath?.(path, operation) === true,
@@ -225,25 +271,36 @@ async function runTask(
 			}
 			if (!sideSnapshot && intent !== 'review') {
 				const list = conversations.chatTasks;
-				const actor = { owner: child?.agentId ?? 'root', runId: task.id, planRunId: intent === 'plan' ? task.id : undefined };
+				const actor = () => ({ owner: child?.agentId ?? 'root', runId: task.id, planRunId: task.request.intent === 'plan' ? task.id : undefined });
 				ctx.chatTasks = {
 					list: () => list.list(conversationId),
 					get: (id) => list.get(conversationId, id),
-					create: (input) => list.create(conversationId, actor, input),
+					create: (input) => list.create(conversationId, actor(), input),
 					async update(input) {
-						const changed = await list.update(conversationId, actor, input);
+						const changed = await list.update(conversationId, actor(), input);
 						if (changed.status === 'in_progress') claimedTask = true;
 						return changed;
 					},
 				};
-				const summaryModels = sendingModels ? meteredService(sendingModels, 'summary', transcript.recordUsage) : undefined;
+				if (!child) {
+					connectPlanRun(ctx, conversations, app.vault.configDir, () => toolsEnabledAtStart && toolsEnabled(),
+						() => !restored && !claimedTask && !subagents?.busy(conversationId), () => {
+							if (!steering) return;
+							steering.accepting = false;
+							rejectSteering(steering, steering.pending.keys());
+						}, saved.runs.at(-1));
+				}
+				const summaryModels = sendingModels ? meteredService(sendingModels, 'summary', transcript.recordUsage, transcript.previewUsage) : undefined;
 				const save = (entries: Parameters<ChildRunOptions['append']>[0]) => child
 					? child.append(entries) : conversations.append(conversationId, entries);
 				// 续做再次整理当前任务前，先完成已有的内容和发送地址确认。
 				ctx.runCompaction = createRunSummarizer(ctx, summaryModels, () => !restored || review?.approved === true,
-					(summary) => save([{ type: 'run-summary', taskId: task.id, summary }]),
+					async (summary) => {
+						await save([{ type: 'run-summary', taskId: task.id, summary }]);
+						if (!child) await conversations.saveRunProgress(conversationId, task.id, summary).catch(() => {});
+					},
 					restored?.run.runSummary);
-				ctx.summarizeHistory = createHistorySummarizer(runsAfterManualCompaction(saved), ctx, restored ? undefined : summaryModels,
+				ctx.summarizeHistory = createHistorySummarizer(runsAfterManualCompaction(modelHistory), ctx, restored ? undefined : summaryModels,
 					(summary) => save([{ type: 'history-summary', taskId: task.id, summary }]),
 					restored?.run.historySummary);
 			}
@@ -259,7 +316,7 @@ async function runTask(
 		}
 		started = true;
 		if (approvedPlanTaskId) await conversations.chatTasks.approvePlan(conversationId, approvedPlanTaskId);
-		if (ctx && subagents && !sideSnapshot && !intent) {
+		if (ctx && subagents && !sideSnapshot && intent !== 'review') {
 			if (replaceFromTaskId) await subagents.reload(conversationId);
 			else await subagents.controls.load(conversationId);
 			if (directAgent) {
@@ -267,7 +324,7 @@ async function runTask(
 				checkModel();
 			}
 			await subagents.connect(ctx, () => current, child?.agentId, child?.readOnly, directAgent && { role: directAgent.id, skills: directSkills });
-			if (child?.instructions) ctx.subagentPrompt = [ctx.subagentPrompt, child.instructions].filter(Boolean).join('\n');
+			if (child?.instructions) ctx.subagentInstructions = child.instructions;
 		}
 		const savedVideo = restored?.run.videoAnalysis;
 		if (ctx && savedVideo) {
@@ -278,10 +335,20 @@ async function runTask(
 			ctx.videoAnalysis = createVideoAnalysis(ctx, settings, models, transcript.recordUsage,
 				(content, sources) => conversations.append(task.request.conversationId, [{ type: 'video-analysis', taskId: task.id, content, sources }]),
 				{ previous, alreadySaved: Boolean(restored), save: (item) => conversations.append(task.request.conversationId, [{ type: 'video-item', taskId: task.id, item }]) },
-				restored ? observer.confirmResume : undefined);
+				restored ? observer.confirmResume : undefined, transcript.previewUsage);
 		}
 		const agent = runtime.createAgent(ctx, restored?.run.state);
 		state = await agent.loop.run(ctx, agent.state);
+		if (task.request.goalRound && goal && !runSignal.aborted) {
+			if (steering) steering.accepting = false;
+			try {
+				const verdict = await reviewGoalCompletion(ctx, app, state, goal, lastGoalRequest, models, transcript.recordUsage, transcript.previewUsage);
+				if (verdict) state = { ...state, goalReview: verdict };
+			} catch {
+				state = { ...state, goalReview: 'needs-evidence' };
+			}
+			if (runSignal.aborted) state = { ...state, status: runSignal.reason === pauseRun ? 'interrupted' : 'cancelled', goalReview: undefined };
+		}
 	} catch (error) {
 		if ((restored || replaceFromTaskId !== undefined || queued) && !started) throw error;
 		state = failedRun(task, runSignal, error);
@@ -298,6 +365,12 @@ async function runTask(
 	if (started) {
 		try {
 			if (claimedTask) await conversations.chatTasks.release(task.request.conversationId, task.id);
+			if (!child && !sideSnapshot && task.request.intent === 'plan') {
+				const plan = submittedPlan({ request: task.request, state, model: selection });
+				if (plan && !await conversations.readPlanDraft(task.request.conversationId, task.id)) {
+					await conversations.savePlanDraft(task.request.conversationId, task.id, { markdown: plan.markdown, submitted: true });
+				}
+			}
 			state = await transcript.finish(state);
 		} catch {
 			state = { ...state, status: 'failed', error: '无法保存最后的操作进度，请检查本地对话记录。' };
@@ -319,6 +392,7 @@ export function createSessionController(
 	shellJobs?: ShellJobs,
 	skills?: SkillRegistry,
 	onConversationDeleted?: (id: string) => Promise<void>,
+	localState?: LocalState,
 ): SessionController {
 	const active = new Map<string, { conversationId: string; controller: AbortController; steering: Steering }>();
 	const deleting = new Set<string>();
@@ -354,7 +428,7 @@ export function createSessionController(
 		if (active.has(taskId) || conversationIsBusy(key)) throw new Error('已有任务正在运行。');
 		if (deleting.has(key)) throw new Error('对话正在删除。');
 		const controller = new AbortController();
-		const steering: Steering = { accepting: true, pending: new Map() };
+		const steering: Steering = { accepting: true, pending: new Map(), changed: new AbortController() };
 		active.set(taskId, { conversationId: key, controller, steering });
 		// 这段任务发起的所有模型请求都记入该对话的日志文件。
 		const result = logScope.run(conversationId.toLowerCase(), () => run(controller.signal, steering));
@@ -473,12 +547,12 @@ export function createSessionController(
 				close,
 			};
 		},
-		submit(request, observer = {}, replaceFromTaskId, { model, rememberConversation, executionMode } = {}) {
+		submit(request, observer = {}, replaceFromTaskId, { model, rememberConversation, executionMode, goal } = {}) {
 			const selection = selectedModel(model);
 			const task = mainTask(request, replaceFromTaskId !== undefined);
 			if (replaceFromTaskId && subagents.busy(request.conversationId)) throw new Error('请先停止这段对话的子任务。');
 			return launch(request.conversationId, task.id, (signal, steering) =>
-				runTask(task, app, settings, runtime, conversations, selection, signal, observer, { replaceFromTaskId, steering, rememberConversation, executionMode, models, subagents, skills }));
+				runTask(task, app, settings, runtime, conversations, selection, signal, observer, { replaceFromTaskId, steering, rememberConversation, executionMode, models, subagents, skills, goal, localState }));
 		},
 		submitQueued(message, observer, onStarted, { model, rememberConversation, executionMode, confirmQueuedDestination } = {}) {
 			const selection = selectedModel(model);
@@ -502,7 +576,7 @@ export function createSessionController(
 					address = destination.baseUrl;
 				}
 				return runTask(task, app, settings, runtime, conversations, selection, signal, observer, {
-					queued: { message, address, onStarted }, steering, rememberConversation, executionMode, models, subagents, skills,
+					queued: { message, address, onStarted }, steering, rememberConversation, executionMode, models, subagents, skills, localState,
 				});
 			});
 		},
@@ -529,6 +603,9 @@ export function createSessionController(
 				const request = message.request.skillNotePaths || !skills ? message.request
 					: { ...message.request, skillNotePaths: skills.notePaths(message.request.refs, '') };
 				running.steering.pending.set(message.id, { message, request, resolve, reject });
+				const changed = running.steering.changed;
+				running.steering.changed = new AbortController();
+				changed.abort();
 			});
 		},
 		resume(conversationId, taskId, observer = {}, { model, rememberConversation, executionMode } = {}) {
@@ -542,7 +619,7 @@ export function createSessionController(
 				}
 				const refs = run.request.refs.filter(wasSharedRef);
 				const task = { ...createTask({ ...run.request, refs }), id: taskId };
-				return runTask(task, app, settings, runtime, conversations, restoredModel(run.model), signal, observer, { restored: { run, conversation }, steering, rememberConversation, executionMode, models, subagents, skills });
+				return runTask(task, app, settings, runtime, conversations, restoredModel(run.model), signal, observer, { restored: { run, conversation }, steering, rememberConversation, executionMode, models, subagents, skills, localState });
 			});
 		},
 		async cancel(taskId) {

@@ -3,11 +3,13 @@ import { lstatSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from '
 import { dirname, join, relative, sep } from 'node:path';
 import { scribeCacheScope } from '../../orchestration/storage/paths';
 import { hasFileErrorCode } from './pathUtils';
+import { truncate } from './truncate';
 
 /** DSH's base `maxInlineTokens`: estimated tokens a single model-facing tool result may keep inline. */
 export const MAX_INLINE_TOKENS = 12_500;
 const CHARS_PER_TOKEN = 4;
 const BLOCK_OVERHEAD = 4;
+const MAX_TOOL_SPILL_BYTES = 64 * 1024 * 1024;
 const GAP = '\n…（输出中间已省略）…\n';
 const RETRIEVAL = '用 Read 工具按 offset/limit 读取，或用 Grep 搜索。';
 
@@ -66,7 +68,7 @@ function safeTail(text: string, chars: number): string {
 }
 
 function saveResult(text: string, location: SpillLocation | undefined): string | undefined {
-	if (!location) return;
+	if (!location || Buffer.byteLength(text, 'utf8') > MAX_TOOL_SPILL_BYTES) return;
 	try {
 		const directory = createSpillDirectory(location, TOOL_SPILL_PREFIX);
 		if (!directory) return;
@@ -83,22 +85,29 @@ function saveResult(text: string, location: SpillLocation | undefined): string |
  * text keeps ordered head and tail previews and stores the full result in a
  * private file whose path the model can read.
  */
-export function boundToolResult(text: string, toolName: string, location?: SpillLocation): string {
-	if (toolName.toLowerCase() === 'read' || estimateResultTokens(text) <= MAX_INLINE_TOKENS) return text;
+export function boundToolResult(text: string, toolName: string, location?: SpillLocation, maxChars = Infinity): string {
+	if (toolName.toLowerCase() === 'read') return truncate(text, maxChars);
+	if (text.length <= maxChars && estimateResultTokens(text) <= MAX_INLINE_TOKENS) return text;
 	const path = saveResult(text, location);
-	if (path === undefined) return text;
+	if (path === undefined) {
+		if (!Number.isFinite(maxChars)) return text;
+		const notice = '\n（完整输出未能保存。请缩小查询范围后重试。）';
+		const limit = Math.min(maxChars, (MAX_INLINE_TOKENS - BLOCK_OVERHEAD) * CHARS_PER_TOKEN);
+		if (limit <= notice.length + 48) return safeHead(notice, limit);
+		return truncate(text, limit - notice.length - 48) + notice;
+	}
 	const totalBytes = Buffer.byteLength(text, 'utf8');
 	const worstNotice = `\n\n（已省略 ${totalBytes} 字节。完整结果：${path}。${RETRIEVAL}）`;
 	const reserved = estimateResultTokens(worstNotice) + estimateResultTokens(GAP);
-	let contentChars = Math.max(0, Math.floor((MAX_INLINE_TOKENS - reserved) * CHARS_PER_TOKEN));
+	let contentChars = Math.max(0, Math.min(maxChars - worstNotice.length - GAP.length, (MAX_INLINE_TOKENS - reserved) * CHARS_PER_TOKEN));
 	for (let attempt = 0; attempt < 6; attempt++) {
 		const head = safeHead(text, Math.ceil(contentChars / 2));
 		const tail = safeTail(text, contentChars - head.length);
 		const omitted = totalBytes - Buffer.byteLength(head, 'utf8') - Buffer.byteLength(tail, 'utf8');
 		const notice = `\n\n（已省略 ${omitted} 字节。完整结果：${path}。${RETRIEVAL}）`;
 		const result = `${head}${GAP}${tail}${notice}`;
-		if (estimateResultTokens(result) <= MAX_INLINE_TOKENS || contentChars === 0) return result;
+		if (result.length <= maxChars && estimateResultTokens(result) <= MAX_INLINE_TOKENS) return result;
 		contentChars = Math.floor(contentChars * 0.9);
 	}
-	return `\n\n（已省略 ${totalBytes} 字节。完整结果：${path}。${RETRIEVAL}）`;
+	return safeHead(worstNotice, maxChars);
 }

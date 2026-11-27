@@ -34,7 +34,7 @@ void test('working intent follows the active call in the newest assistant reply'
 	const messages: Message[] = [
 		{ role: 'assistant', content: '', toolCalls: [
 			{ id: '1', name: 'Read', input: { i: ' 正在读取设置。 ' } },
-			{ id: '2', name: 'Read', input: { i: '正在核对模型角色...' } },
+			{ id: '2', name: 'Read', input: { intent: '正在核对模型角色...' } },
 			{ id: '3', name: 'Read', input: { i: 'Reading model roles' } },
 		] },
 		{ role: 'tool', content: 'Settings', toolCallId: '1' },

@@ -96,6 +96,59 @@ void test('video receipt requires an explicit video count for Chat Completions a
 	assert.equal(responses.read().videoInput, 500);
 });
 
+void test('only a closing usage receipt confirms previously reported output counters', () => {
+	const chat = captureReportedUsage('openai-completions');
+	chat.observe({ choices: [], usage: { completion_tokens: 0, total_tokens: 10 } });
+	chat.observe({ choices: [{ finish_reason: 'stop' }], usage: { prompt_tokens: 10 } });
+	assert.equal(chat.status(), 'provisional');
+	chat.observe({ choices: [], usage: { completion_tokens: 0, total_tokens: 10 } });
+	assert.equal(chat.status(), 'final');
+	chat.reset();
+	assert.deepEqual(chat.read(), {});
+	assert.equal(chat.status(), 'provisional');
+
+	for (const [api, start, finish] of [
+		['anthropic-messages', { type: 'message_start', message: { usage: { output_tokens: 0 } } },
+			{ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 9 } }],
+		['openai-responses', { type: 'response.in_progress', response: { usage: { output_tokens: 0 } } },
+			{ type: 'response.completed', response: { usage: { output_tokens: 9 } } }],
+		['google-generative-ai', { usageMetadata: { candidatesTokenCount: 0 } },
+			{ candidates: [{ finishReason: 'STOP' }], usageMetadata: { candidatesTokenCount: 9 } }],
+		['bedrock-converse-stream', { messageStart: { role: 'assistant' } },
+			{ metadata: { usage: { outputTokens: 9 } } }],
+		['pi-messages', { type: 'text_delta' }, { type: 'done', usage: { output: 9 } }],
+	] as const) {
+		const usage = captureReportedUsage(api);
+		usage.observe(start);
+		assert.equal(usage.status(), 'provisional', api);
+		usage.observe(finish);
+		assert.equal(usage.status(), 'final', api);
+		assert.equal(usage.read().output, 9, api);
+	}
+});
+
+void test('a frame with content and cumulative usage covers its own content', () => {
+	const chat = captureReportedUsage('openai-completions');
+	const frame = (content: string, output?: number, finish_reason?: string) => ({
+		choices: [{ delta: { content }, finish_reason }],
+		...(output !== undefined && { usage: { prompt_tokens: 10, completion_tokens: output, total_tokens: 10 + output } }),
+	});
+	chat.observe(frame('abcdefgh', 4));
+	assert.equal(chat.estimate(), undefined);
+	chat.observe(frame('ab'));
+	chat.observe(frame('c'));
+	assert.deepEqual(chat.estimate(), { output: 5, total: 15 });
+	chat.observe(frame('d', 4));
+	assert.deepEqual(chat.estimate(), { output: 6, total: 16 });
+	chat.observe(frame('another long delta', 12));
+	assert.deepEqual(chat.read(), { prompt: 10, output: 12, total: 22 });
+	assert.equal(chat.estimate(), undefined);
+	chat.observe(frame('one last delta'));
+	chat.observe(frame('', 12, 'stop'));
+	assert.equal(chat.estimate(), undefined);
+	assert.equal(chat.status(), 'final');
+});
+
 void test('alternate API evidence matches the provider, model, URL and protocol independently', () => {
 	assert.equal(documentedRouteDetails('meta', 'muse-spark-1.3', 'openai-completions', 'https://api.meta.ai/v1')?.structuredOutput, true);
 	assert.equal(supportsResponseSchema('openai-responses', 'https://api.meta.ai/v1', 'muse-spark-1.3'), false);

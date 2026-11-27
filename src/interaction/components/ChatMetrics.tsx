@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import type { RunState, SavedRun } from '../../types';
-import type { ConversationMetrics, ContextUsage, UsageTotals } from '../chatMetrics';
+import type { ConversationMetrics, ContextUsage, UsageMetric, UsageTotals } from '../chatMetrics';
 import { abbreviatedNumber, conversationMetrics } from '../chatMetrics';
 import { uiText } from '../uiText';
 import MetricPopover, { ContextRing, MetricRows } from './MetricPopover';
@@ -19,37 +19,32 @@ function tokens(value: number, compact = false) {
 	return uiText().chatTimelineUsage.replace('{n}', compact ? abbreviatedNumber(value) : value.toLocaleString());
 }
 
-function optionalTokens(value: number | undefined, compact = false) {
-	return value === undefined ? undefined : tokens(value, compact);
-}
-
 function cachePercent(hit: number, turn: boolean) {
 	return hit.toLocaleString(undefined, { style: 'percent', maximumFractionDigits: turn ? 1 : 0 });
 }
 
-function usageRows(usage: UsageTotals, turn: boolean) {
-	const text = uiText();
-	return [
-		[text.chatUsageRequests, usage.count.toLocaleString()],
-		[text.chatCacheHit, usage.hit === undefined ? undefined : cachePercent(usage.hit, turn)],
-		[text.chatUncachedInput, optionalTokens(usage.input)],
-		[text.chatCacheRead, optionalTokens(usage.cacheRead)],
-		[text.chatCacheWrite, optionalTokens(usage.cacheWrite)],
-		[text.chatOutputTokens, optionalTokens(usage.output)],
-	] as const;
-}
-
-export function UsagePopover({ usage, model, busy, turn = false, title }: {
-	usage: UsageTotals; model?: SavedRun['model']; busy?: boolean; turn?: boolean; title?: string;
+export function UsagePopover({ usage, model, turn = false, title }: {
+	usage: UsageTotals; model?: SavedRun['model']; turn?: boolean; title?: string;
 }) {
 	const text = uiText();
 	const heading = title ?? (turn ? text.chatRunUsage : text.chatSessionUsage);
-	const hit = usage.hit === undefined ? undefined : cachePercent(usage.hit, turn);
-	const label = [optionalTokens(usage.total, true) ?? heading,
+	const figure = (field: Exclude<UsageMetric, 'cost'>, compact = false) => {
+		const value = usage[field] ?? usage.partial?.[field]?.value;
+		if (value === undefined) return;
+		return field === 'hit' ? cachePercent(value, turn) : tokens(value, compact);
+	};
+	const rows = [
+		[text.chatCacheHit, figure('hit')], [text.chatPromptTokens, figure('prompt')],
+		[text.chatUncachedInput, figure('input')], [text.chatCacheRead, figure('cacheRead')],
+		[text.chatCacheWrite, figure('cacheWrite')], [text.chatOutputTokens, figure('output')],
+	] as const;
+	const hit = figure('hit', true);
+	const label = [figure('total', true) ?? heading,
 		!turn && hit ? `${text.chatCacheHit} ${hit}` : undefined].filter(Boolean).join(' · ');
-	return <MetricPopover icon="database" label={label} heading={heading} value={optionalTokens(usage.total)} wrapValues hover={!turn}>
-		<MetricRows rows={[[text.chatProviderModel, model && `${model.providerId} / ${model.model}`], ...usageRows(usage, turn)]} />
-		{busy && <p>{text.chatMetricsRunning}</p>}
+	const total = figure('total');
+	return <MetricPopover icon="database" label={label} heading={heading} value={total} wrapValues hover={!turn}>
+		<MetricRows rows={[[text.chatProviderModel, model && `${model.providerId} / ${model.model}`],
+			[text.chatUsageRequests, usage.count.toLocaleString()], ...rows]} />
 	</MetricPopover>;
 }
 

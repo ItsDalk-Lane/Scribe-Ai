@@ -1,6 +1,9 @@
 import type { App } from 'obsidian';
 import { chatTaskTools } from './chatTaskTools';
 import { createToolExecutor } from './executor';
+import { goalTools } from './goalTool';
+import { memoryTools } from './memoryTools';
+import { planTools } from './planTools';
 import { readTools } from './readTools';
 import { skillTools } from './skillTools';
 import { searchTools } from './searchTools';
@@ -35,9 +38,12 @@ export function createToolLayer(history?: ShellJobHistory, mcp?: McpManager, cac
 		() => workspaceTools(app),
 		() => taskTools(shellJobs),
 		chatTaskTools,
+		planTools,
+		goalTools,
 		subagentTools,
 		structuredOutputTool,
 		skillTools,
+		memoryTools,
 		external.web,
 		external.shell,
 		external.mcp,

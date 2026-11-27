@@ -2,7 +2,7 @@ import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chmod, mkdtemp, open, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import type { PreparedTool, ToolContext } from '../../types';
 import { authorizedLineRange, isWithinPath, recheckToolPath, resolveToolPath } from './pathUtils';
 import type { ResolvedToolPath } from './pathUtils';
@@ -102,13 +102,13 @@ export async function prepareFileChange(
 	checkTextSize(after);
 	if (before === after) throw new Error('文件内容没有变化。');
 	const mode = ctx.permissions.executionMode;
-	const writingRule = path.vaultPath?.toLowerCase() === WRITING_RULE_FILENAME.toLowerCase();
+	const writingRule = path.vaultPath && posix.basename(path.vaultPath).toLowerCase() === WRITING_RULE_FILENAME.toLowerCase();
 	const direct = !writingRule && !path.requiresApproval && (mode === 'full-access'
 		|| Boolean(mode && path.vaultPath && isWithinPath(ctx.cwd, path.requestedPath)));
 	return {
 		...(direct ? { independent: true } : {
 			approval: { title: before === undefined ? '创建文件' : '修改文件', target: path.displayPath, before, after,
-				...(writingRule && { humanRequired: true, reason: '此文件会影响本笔记库之后的所有聊天。' }) },
+				...(writingRule && { humanRequired: true, reason: '可信的写作规则会影响此目录后续的聊天任务。' }) },
 		}),
 		async run() {
 			const current = await recheckToolPath(ctx, path, 'write', options);

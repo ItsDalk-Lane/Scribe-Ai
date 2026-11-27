@@ -12,6 +12,7 @@ import { confirmAction } from './ConfirmModal';
 import { logScope } from '../communication/diagnostics';
 import { approvedPlanRequest, submittedPlan } from './chatPlan';
 import { goalRoundInstruction, validGoalRef } from './chatGoal';
+import type { ChatGoal } from './chatGoal';
 import BackgroundShellJobs from './components/BackgroundShellJobs';
 import ChatGoalStatus from './components/ChatGoalStatus';
 import ChatPlanCard from './components/ChatPlanCard';
@@ -30,7 +31,7 @@ import TaskInput from './components/TaskInput';
 import { prepareSkillMentions, sliceSkillMentions } from './components/skillMentionText';
 import type { SkillDraft } from './components/skillMentionText';
 import { openSideChat, SideChatHandoffError } from './SideChatView';
-import { emptyExecution, restoreExecution, updateExecution } from './context';
+import { emptyExecution, restoreExecution, updateExecution, withSummaryUsage } from './context';
 import type { DisplayedRun } from './context';
 import { thinkingLabel, uiText } from './uiText';
 import { useChatModel } from './useChatModel';
@@ -48,7 +49,7 @@ import { useChatGoal } from './useChatGoal';
 import type { ChatTabActivity } from './ChatTabs';
 import type ScribeAiPlugin from '../main';
 import { MissingConversationError } from '../types';
-import type { AutoReviewDenial, ConversationSnapshot, ConversationSummary, ExecutionMode, NoteRef, QueuedMessage, RunObserver, SessionRunOptions,
+import type { AutoReviewDenial, AuxiliaryUsage, ConversationSnapshot, ConversationSummary, ExecutionMode, NoteRef, QueuedMessage, RunObserver, SessionRunOptions,
 	RunEvent, RunState, SavedRun, SkillMention, SubagentSnapshot, TaskRequest, TaskTarget } from '../types';
 
 interface ActiveSubmission {
@@ -56,7 +57,7 @@ interface ActiveSubmission {
 	taskId?: string;
 	queuedId?: string;
 	stopped?: boolean;
-	goal?: true;
+	goal?: ChatGoal;
 	settled: Promise<void>;
 }
 
@@ -127,6 +128,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 	const [refs, setRefs] = useState(() => vaultRefs(conversation.runs.at(-1)?.request.refs ?? []));
 	const [quotes, setQuotes] = useState<string[]>([]);
 	const [history, setHistory] = useState<DisplayedRun[]>(conversation.runs);
+	const [summaryPreview, setSummaryPreview] = useState<{ taskId: string; usage: AuxiliaryUsage }>();
 	const [instruction, setInstruction] = useState(initialDraft?.instruction ?? '');
 	const [skillMentions, setSkillMentions] = useState<SkillMention[]>(initialDraft?.skillMentions ?? []);
 	const [skillScope, setSkillScope] = useState(initialDraft?.skillScope);
@@ -161,15 +163,27 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 	const resumable = canResumeRun(lastRun) ? lastRun : undefined;
 	const liveTaskId = execution.state?.taskId;
 	const editIndex = editing ? history.findIndex(({ state }) => state.taskId === editing.taskId) : -1;
-	const metricHistory = useMemo(() => editIndex < 0 ? history : history.slice(0, editIndex), [history, editIndex]);
 	const subscribeAgents = useCallback((changed: () => void) =>
 		subagents?.subscribe(conversationId, changed) ?? (() => {}), [conversationId, subagents]);
 	const getAgents = useCallback(() => subagents?.snapshot(conversationId) ?? noSubagents, [conversationId, subagents]);
 	const agentSnapshot = useSyncExternalStore(subscribeAgents, getAgents);
+	const withPreviews = useCallback((state: RunState) => {
+		const report = withSummaryUsage(state, agentSnapshot.reportUsage?.[state.taskId]);
+		return summaryPreview?.taskId === state.taskId ? withSummaryUsage(report, summaryPreview.usage) : report;
+	}, [agentSnapshot.reportUsage, summaryPreview]);
+	const historyWithUsage = useMemo(() => !summaryPreview && !agentSnapshot.reportUsage ? history : history.map((run) => {
+		const state = withPreviews(run.state);
+		return state === run.state ? run : { ...run, state };
+	}), [history, withPreviews, summaryPreview, agentSnapshot.reportUsage]);
+	const metricHistory = useMemo(() => editIndex < 0 ? historyWithUsage : historyWithUsage.slice(0, editIndex), [historyWithUsage, editIndex]);
+	const shownExecution = useMemo(() => {
+		const state = execution.state && withPreviews(execution.state);
+		return state === execution.state ? execution : { ...execution, state };
+	}, [execution, withPreviews]);
 	const hasActiveAgents = agentSnapshot.agents.some(subagentIsActive);
 	const agentRuns = useMemo(() => agentSnapshot.agents.flatMap(({ runs }) => runs), [agentSnapshot.agents]);
 	const subagentNames = useMemo(() => new Map(agentSnapshot.agents.map(({ id, name }) => [id, name])), [agentSnapshot.agents]);
-	const metrics = useChatMetrics(metricHistory, execution.state, agentRuns);
+	const metrics = useChatMetrics(metricHistory, shownExecution.state, agentRuns);
 	const childPrompt = agentSnapshot.requests.reduce<SubagentSnapshot['requests'][number] | undefined>((first, item) =>
 		!first || item.createdAt < first.createdAt ? item : first, undefined);
 	const displayedPrompt = childPrompt && (!parentPrompt || childPrompt.createdAt < parentPrompt.createdAt) ? {
@@ -177,10 +191,13 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		source: { id: childPrompt.agentId, name: agentSnapshot.agents.find(({ id }) => id === childPrompt.agentId)?.name ?? childPrompt.agentId },
 		respond: (accepted: boolean) => subagents?.respond(conversationId, childPrompt.id, accepted),
 	} : parentPrompt;
-	const visibleHistory = useMemo(() => {
-		const visible = editIndex < 0 ? history : liveTaskId ? history.slice(0, editIndex) : history.slice(0, editIndex + 1);
+	const selectVisibleHistory = useCallback((runs: DisplayedRun[]) => {
+		const visible = editIndex < 0 ? runs : liveTaskId ? runs.slice(0, editIndex) : runs.slice(0, editIndex + 1);
 		return visible.filter((run) => run.state.taskId !== liveTaskId);
-	}, [history, liveTaskId, editIndex]);
+	}, [liveTaskId, editIndex]);
+	const visibleHistory = useMemo(() => selectVisibleHistory(history), [selectVisibleHistory, history]);
+	const shownHistory = useMemo(() => historyWithUsage === history ? visibleHistory : selectVisibleHistory(historyWithUsage),
+		[historyWithUsage, history, visibleHistory, selectVisibleHistory]);
 	const receivedSubmissions = useMemo(() => new Set([
 		...visibleHistory.map(({ state }) => state.messages), ...agentRuns.map(({ state }) => state.messages), execution.state?.messages ?? [],
 	].flatMap((messages) => messages.flatMap(({ subagentActivity }) => subagentActivity?.kind === 'result' ? [subagentActivity.id] : []))),
@@ -199,7 +216,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 			&& !refs.some(({ path, kind }) => kind !== 'folder' && isImageFile(path))
 			&& !queue.rows.length && !hasActiveAgents && !chatModel.saving && !chatModel.selecting && Boolean(chatModel.choice) && !composerMode,
 		start: (value) => perform(undefined, undefined, undefined, {
-			goal: true, request: { conversationId, instruction: value.objective, refs: value.refs ?? [], chatQuotes: value.chatQuotes,
+			goal: value, request: { conversationId, instruction: value.objective, refs: value.refs ?? [], chatQuotes: value.chatQuotes,
 				imageSourcePath: value.imageSourcePath,
 				skillMentions: value.skillMentions, skillScope: value.skillScope, skillNotePaths: value.skillNotePaths,
 				goalRound: true, goalContext: goalRoundInstruction(value) },
@@ -209,7 +226,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 	});
 	const tabTitle = (history[0]?.request.instruction ?? liveRequest?.instruction ?? goal.value?.objective)?.replace(/\s+/gu, ' ').trim().slice(0, 120);
 	const plan = useMemo(() => submittedPlan(lastRun), [lastRun]);
-	const eligiblePlan = planned && selected && open && !busy && !loading && !managingHistory && !editing && !instruction.trim()
+	const eligiblePlan = composerMode !== 'goal' && selected && open && !busy && !loading && !managingHistory && !editing && !instruction.trim()
 		&& !queue.rows.length && !hasActiveAgents && !chatModel.saving && !chatModel.selecting && Boolean(chatModel.choice) && goal.ready ? plan : undefined;
 	const planToConfirm = useRef(eligiblePlan);
 	useLayoutEffect(() => {
@@ -240,8 +257,13 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 			if (!history.some((run) => !run.subagentReport && reported.has(run.state.taskId))) return;
 			setHistory((current) => current.map((run) => {
 				const saved = reported.get(run.state.taskId);
-				return saved && !run.subagentReport ? { ...run, subagentReport: saved.subagentReport,
-					state: { ...run.state, auxiliaryUsage: saved.state.auxiliaryUsage } } : run;
+				if (!saved || run.subagentReport) return run;
+				let state: RunState = { ...run.state, auxiliaryUsage: saved.state.auxiliaryUsage };
+				// 加载子助手报告期间，手动摘要可能已有另一笔回执写入。
+				for (const receipt of run.state.auxiliaryUsage ?? []) {
+					if (receipt.id) state = withSummaryUsage(state, receipt);
+				}
+				return { ...run, subagentReport: saved.subagentReport, state };
 			}));
 		}).catch(() => { if (!closed) setError(text.chatHistoryError); });
 		return () => { closed = true; };
@@ -542,7 +564,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 	const openAgent = useCallback<InspectSubagent>((id) => plugin.openSubagent(conversationId, id), [plugin, conversationId]);
 
 	async function perform(draft?: ComposerDraft, resume?: DisplayedRun, queued?: QueuedMessage,
-		command?: { request: TaskRequest; goal?: true }, confirmQueue = false): Promise<RunState | undefined> {
+		command?: { request: TaskRequest; goal?: ChatGoal }, confirmQueue = false): Promise<RunState | undefined> {
 		if (active.current || auxiliary.current || navigating.current || chatModel.isSaving()) return;
 		if (planned && ((resume && !resume.request.intent) || (queued && !queued.request.intent) || command?.goal)) return;
 		const choice = chatModel.choice;
@@ -601,7 +623,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 					replaceFrom ? edited?.revisesPlanTaskId : planDraftRun.current));
 			if (!request) return;
 			if (draft) request.skillNotePaths ??= services.orchestration.skills.notePaths(draft.refs);
-			const options: SessionRunOptions = { model: choice, rememberConversation: false, executionMode: submission.executionMode };
+			const options: SessionRunOptions = { model: choice, rememberConversation: false, executionMode: submission.executionMode, goal: command?.goal };
 			if (queued && confirmQueue) options.confirmQueuedDestination = (previous, current, signal) => new Promise((resolve) => {
 				signal.throwIfAborted();
 				let accepted = false;
@@ -642,6 +664,11 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 			if (active.current !== submission) return;
 			if (current.status === 'fulfilled' && current.value.runs.some(({ state }) => state.taskId === run.taskId)) {
 				const runs = current.value.runs;
+				const latestRun = runs.at(-1);
+				if (latestRun?.state.taskId === run.taskId && latestRun.request.intent === 'plan') {
+					planDraftRun.current = run.taskId;
+					setComposerMode('plan');
+				}
 				const latest = displayed;
 				setHistory((previous) => {
 					const byId = new Map(previous.map((saved) => [saved.state.taskId, saved]));
@@ -651,6 +678,12 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				setExecution(emptyExecution);
 				setLiveRequest(undefined);
 				setLiveModel(undefined);
+			} else if (request.approvedPlanTaskId && result.status === 'failed' && current.status === 'fulfilled') {
+				setHistory(current.value.runs);
+				setExecution(emptyExecution);
+				setLiveRequest(undefined);
+				setLiveModel(undefined);
+				setError(result.error ?? text.chatFailed);
 			}
 			if (index.status === 'rejected' || current.status === 'rejected') setError(text.chatHistoryError);
 			return result;
@@ -798,12 +831,12 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		return undefined;
 	}
 
-	function confirmPlan() {
+	function confirmPlan(mode: NonNullable<TaskRequest['approvedPlanMode']>) {
 		if (!plan || !mounted.current || !visible.current || planToConfirm.current !== plan
 			|| active.current || auxiliary.current || navigating.current) return;
 		planToConfirm.current = undefined;
 		setComposerMode(undefined);
-		void perform(undefined, undefined, undefined, { request: approvedPlanRequest(plan) });
+		void perform(undefined, undefined, undefined, { request: approvedPlanRequest(plan, mode) });
 	}
 
 	function slashDraft(command: SlashCommand, inputText = instruction): ComposerDraft {
@@ -827,7 +860,10 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		} finally {
 			if (auxiliary.current === controller) {
 				auxiliary.current = null;
-				if (mounted.current) setBusy(false);
+				if (mounted.current) {
+					setSummaryPreview(undefined);
+					setBusy(false);
+				}
 			}
 		}
 	}
@@ -920,8 +956,13 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 			case 'skills': return controls.openSkills();
 			case 'mcp':
 			case 'agents': {
-				const choice = await (name === 'mcp' ? chooseSlashMcp : chooseSlashAgent)(plugin, controls.ui);
+				const choice = await (name === 'mcp' ? chooseSlashMcp(plugin, controls.ui, runAuxiliary) : chooseSlashAgent(plugin, controls.ui));
 				if (!choice || !mounted.current || !visible.current) return false;
+				if ('prompt' in choice) {
+					setInstruction((current) => !current.trim() || parseSlashCommand(current)?.name === 'mcp'
+						? choice.prompt : `${current}\n\n${choice.prompt}`);
+					return false;
+				}
 				setTarget(choice);
 				return true;
 			}
@@ -1004,9 +1045,14 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 					const snapshot = await store.load(conversationId);
 					const output = await manualConversationSummary(snapshot, services.communication.models, choice, name, signal, async (taskId, usage) => {
 						await store.append(conversationId, [{ type: 'auxiliary-usage', taskId, usage }]);
-						if (mounted.current) setHistory((runs) => runs.map((run) => run.state.taskId === taskId
-							? { ...run, state: { ...run.state, auxiliaryUsage: [...(run.state.auxiliaryUsage ?? []), usage] } } : run));
-					}, checkModel);
+						if (!mounted.current) return;
+						setHistory((runs) => runs.map((run) => run.state.taskId === taskId
+							? { ...run, state: withSummaryUsage(run.state, usage) } : run));
+						setExecution((live) => live.state?.taskId === taskId ? { ...live, state: withSummaryUsage(live.state, usage) } : live);
+						setSummaryPreview((current) => current?.usage.id === usage.id ? undefined : current);
+					}, checkModel, (taskId, usage) => {
+						if (mounted.current && !signal.aborted) setSummaryPreview({ taskId, usage });
+					});
 					signal.throwIfAborted();
 					const boundary = snapshot.runs.filter(({ request }) => !request.selection).at(-1);
 					if (name === 'compact' && boundary) await store.saveManualCompaction(conversationId, {
@@ -1075,8 +1121,8 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				</svg>
 				{text.chatEmptyHeading}
 			</h1> : <ExecutionView key={conversationId} app={services.app} localState={services.localState} skills={services.orchestration.skills}
-				execution={execution} liveRequest={liveRequest} liveModel={liveModel}
-				history={visibleHistory} reports={agentSnapshot.reports} loading={loading} conversationId={conversationId} editingId={editing?.taskId}
+				execution={shownExecution} liveRequest={liveRequest} liveModel={liveModel}
+				history={shownHistory} reports={agentSnapshot.reports} loading={loading} conversationId={conversationId} editingId={editing?.taskId}
 				automaticReview={active.current?.executionMode === 'auto-review'}
 					submissions={agentSnapshot.submissions} inspectSubagent={openAgent} subagentNames={subagentNames}
 				renderActivity={(taskId) => renderSubagentsActivity({ taskId, agents: agentSnapshot.agents, onSelect: openAgent, received: receivedSubmissions })}
@@ -1091,14 +1137,19 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 					executionMode={active.current?.executionMode ?? mode} onSelect={openAgent} />}
 				{!landing && !loading && <>
 					<ActivityMetric metrics={metrics} busy={busy || hasActiveAgents} />
-					{metrics.usage && <UsagePopover usage={metrics.usage} busy={busy || hasActiveAgents} />}
+					{metrics.usage && <UsagePopover usage={metrics.usage} />}
 				</>}
 			</div>
-			{planned && plan && <ChatPlanCard app={services.app} plan={plan} disabled={!eligiblePlan}
+			{composerMode !== 'goal' && plan && <ChatPlanCard key={plan.taskId} app={services.app} plan={plan} disabled={!eligiblePlan}
 				onRevise={() => {
 					planDraftRun.current = plan.taskId;
+					setComposerMode('plan');
 					setInstruction(tr('请调整上面的计划：', 'Revise the plan above: '));
 					input.current?.focus();
+				}}
+				onSave={async (markdown, revision) => {
+					const draft = await services.orchestration.conversations.savePlanDraft(conversationId, plan.taskId, { markdown, submitted: true }, revision);
+					setHistory((runs) => runs.map((run) => run.state.taskId === plan.taskId ? { ...run, planDraft: draft } : run));
 				}}
 				onExecute={confirmPlan} />}
 			<QueuedMessages app={services.app} skills={services.orchestration.skills} rows={queue.rows} canSteer={canSteer} inputRef={input}
@@ -1164,7 +1215,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				onResume={!busy && !loading && !editing && !quotes.length && resumable && !resumable.request.goalRound
 					&& (composerMode === undefined || planned && resumable.request.intent === 'plan')
 					? () => void perform(undefined, resumable) : undefined}
-				onStop={stop}
+				onStop={() => { if (active.current?.goal) void goal.pause('manual'); else stop(); }}
 			/>
 			{landing && conversations.some(({ archived }) => !archived) && <section className="scribe-chat-recents" aria-label={text.chatRecentConversations}>
 				<h2>{text.chatRecentConversations}</h2>

@@ -1,8 +1,12 @@
+import { diagnostics } from '../communication/diagnostics';
+import { reportGoalToolName } from '../interaction/chatGoal';
+import { contextUsage } from '../orchestration/context/promptContext';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ContextBudgetError, inputBytes } from '../orchestration/context/contextBuilder';
 import { SkillAccessChangedError, SkillSteeringError } from '../skills/mentions';
 import { ContextOverflowError, RetryableModelError } from '../types';
-import type { ContextBuilder, ModelCoordinator, ModelRequest, ModelService, ModelUsageReceipt } from '../types';
+import type { ContextBuilder, ModelCoordinator, ModelRequest, ModelService } from '../types';
+import { modelUsageAttempts } from './modelUsageAttempts';
 import { splitResponseIntent, thinkingHeadingIntent } from './responseIntent';
 import { assistantMessageId } from './runState';
 
@@ -47,34 +51,35 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 				let firstDelta: number | undefined;
 				let firstDeltaMs: number | undefined;
 				let reviewMs = 0;
-				const destinations = new Set<string>();
-				let receipt: ModelUsageReceipt = {};
+				const usage = modelUsageAttempts(ctx.recordUnfinishedRequest);
 				const stream = service.stream({
 					...input,
 					...(attempts === 0 ? {} : { maxRetries: 0 }),
-					beforeSend: async (address: string) => {
+					beforeSend: async (address: string, destinationFingerprint?: string) => {
 						const waitingAt = performance.now();
 						const mayWaitForUser = Boolean(review || ctx.destinationCheck);
 						if (mayWaitForUser) work(false);
 						try {
 							ctx.checkModel?.();
 							await review?.beforeSend(address);
-							await ctx.destinationCheck?.(input, address);
-							await input.beforeSend?.(address);
+							await ctx.destinationCheck?.(input, address, destinationFingerprint);
+							await input.beforeSend?.(address, destinationFingerprint);
+							if (ctx.promptContext && !input.video && !input.images && !input.responseSchema) {
+								ctx.promptContext.modelInput.last = { request: input, address, fingerprint: destinationFingerprint };
+							} else if (ctx.promptContext) delete ctx.promptContext.modelInput.last;
 							ctx.checkModel?.();
-							// A same-origin redirect can introduce a second address without a new model attempt.
-							if (destinations.has(address)) {
-								await ctx.recordUnfinishedRequest?.({});
-								destinations.clear();
-							}
-							destinations.add(address);
+							ctx.signal.throwIfAborted();
+							await usage.transmitted(address, ctx.signal);
 							transmitted = true;
 						} finally {
 							reviewMs += performance.now() - waitingAt;
 							if (mayWaitForUser && !ctx.signal.aborted) work(true);
 						}
 					},
-				}, (usage) => { receipt = usage; });
+				}, (receipt) => {
+					usage.update(receipt);
+					ctx.previewModelUsage?.(receipt);
+				});
 				let modelIntent: string | undefined;
 				const publishIntent = (intent: string | undefined) => {
 					if (!intent || intent === modelIntent) return;
@@ -155,6 +160,8 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 						}
 					}
 					const ended = performance.now();
+					if (usage.started) diagnostics.record({ requestId: messageId, at: Date.now(), phase: 'done',
+						contextUsage: contextUsage(input, result.reportedUsage) });
 					const response = { ...result, content: parsed?.content ?? result.content, metrics: {
 						endedAt: Date.now(),
 						modelMs: ended - started - reviewMs,
@@ -172,8 +179,8 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 					return { ...response, raw: { ...response.raw, content } };
 				} catch (error) {
 					stream.cancel(error);
-					if (destinations.size || visibleText || visibleThinking || error instanceof RetryableModelError || error instanceof ContextOverflowError) {
-						await ctx.recordUnfinishedRequest?.(receipt);
+					if (usage.started || visibleText || visibleThinking || error instanceof RetryableModelError || error instanceof ContextOverflowError) {
+						await usage.save();
 					}
 					throw error;
 				}
@@ -188,7 +195,10 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 					ctx.signal.throwIfAborted();
 					ctx.readDelivery.accept(request.messages);
 					await ctx.skillRun?.accept(request.messages);
-					return { ...response, id: messageId };
+					const requiredToolIntents = new Set(request.tools.filter(({ inputSchema }) =>
+						Array.isArray(inputSchema.required) && inputSchema.required.includes('intent')).map(({ name }) => name));
+					return { ...response, id: messageId, requiredToolIntents,
+						goalReportRequired: request.tools.some(({ name }) => name === reportGoalToolName) ? true : undefined };
 				} catch (error) {
 					ctx.signal.throwIfAborted();
 					if (error instanceof SkillAccessChangedError && !visibleText && !visibleThinking && accessRetries++ < 3) {
@@ -199,8 +209,9 @@ export function createModelCoordinator(service: Pick<ModelService, 'stream' | 'c
 					if (error instanceof ContextOverflowError && !visibleText && !shortened) {
 						ctx.checkModel?.();
 						const size = inputBytes(request);
+						const fixed = inputBytes({ ...request, messages: [] });
 						ctx.skillRun?.rememberTransmission();
-						budget = Math.floor(size / 2);
+						budget = fixed + Math.floor((size - fixed) / 2);
 						shortened = true;
 						const smaller = await build(false);
 						if (inputBytes(smaller) >= size) throw error;

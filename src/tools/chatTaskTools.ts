@@ -1,5 +1,5 @@
 import type { ChatTask, ChatTaskUpdate } from '../orchestration/storage/chatTasks';
-import type { ToolContext, ToolDefinition, ToolModule, ToolSpec } from '../types';
+import type { ToolContext, ToolDefinition, ToolModule } from '../types';
 import { fileToolInput, requiredText } from './support/fileAccess';
 
 export const chatTaskReadTools = new Set(['TaskList', 'TaskGet']);
@@ -20,12 +20,6 @@ const updateFields = { taskId, ...details, status: { type: 'string', enum: statu
 
 function schema(properties: Record<string, unknown>, required: string[]) {
 	return { type: 'object', properties, required, additionalProperties: false };
-}
-
-export function chatTaskRequestTool(tool: ToolSpec, planning: boolean) {
-	return planning && tool.name === 'TaskUpdate' ? { ...tool, description: '调整待确认的计划条目和依赖。移除草案中的条目用 deleted。',
-		inputSchema: schema({ ...updateFields, status: { type: 'string', enum: planStatuses } }, ['taskId']),
-	} : tool;
 }
 
 function access(ctx: ToolContext) {

@@ -1,6 +1,8 @@
+import { approvedPlanContent } from '../../interaction/chatPlan';
 import { bindSkillMentions, isSkillMentionAt, SkillAccessChangedError, SkillSteeringError } from '../../skills/mentions';
 import { createHash, randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import { isAbsolute, win32 } from 'node:path';
 import { listSkillFiles, skillDirectory } from '../../skills/discovery';
 import type { DiscoveredSkill } from '../../skills/discovery';
 import { parseSkillReadReceipt, skillReadDigest as fingerprint } from '../../skills/readReceipt';
@@ -12,12 +14,24 @@ import { isSkillListing } from '../../tools/skillTools';
 const installer = 'scribe:skill-installer';
 const pageSize = 20_000;
 const scanNotice = '技能扫描有异常，当前清单可能不完整。仍可使用已列出的技能。';
+const sessionReference = /^s_[\w-]{12}$/u;
 
-export function renderSkillCatalog(items: DiscoveredSkill[], settings: SkillSettings, window?: number) {
+function modelSource({ sourceLabel }: DiscoveredSkill) {
+	if (!isAbsolute(sourceLabel) && !win32.isAbsolute(sourceLabel)) return sourceLabel;
+	return '共享目录 ' + (win32.basename(sourceLabel.split(' · ', 1)[0]!) || '根目录');
+}
+
+export function renderSkillCatalog(items: DiscoveredSkill[], settings: SkillSettings, window?: number, available = items) {
 	const tokenLimit = Math.min(settings.catalogBudgetMaxTokens, window ? Math.max(1, Math.floor(window * settings.catalogBudgetPercent / 100)) : Infinity);
 	const charLimit = window ? Infinity : 8_000;
-	const rows = items.filter((s) => s.enabled && s.implicit).map((s) => ({ skill: s, description: Array.from(s.description) }));
-	const render = (row: typeof rows[number], length: number) => JSON.stringify([row.skill.name, row.skill.id, row.description.slice(0, length).join('')]);
+	const names = new Map<string, number>();
+	for (const { name, enabled } of available) if (enabled) names.set(name, (names.get(name) ?? 0) + 1);
+	const rows = items.filter((s) => s.enabled && s.implicit).map((skill) => ({
+		name: skill.name,
+		selector: (names.get(skill.name) ?? 0) > 1 || sessionReference.test(skill.name) ? { name: skill.name, source: modelSource(skill) } : skill.name,
+		description: Array.from(skill.description),
+	}));
+	const render = (row: typeof rows[number], length: number) => JSON.stringify([row.selector, row.description.slice(0, length).join('')]);
 	const lineCost = (line: string) => ({
 		tokens: Math.ceil((Buffer.byteLength(line) + 1) / 4),
 		chars: window ? 0 : Array.from(line).length + 1,
@@ -45,7 +59,7 @@ export function renderSkillCatalog(items: DiscoveredSkill[], settings: SkillSett
 	const kept: string[] = [], omitted: string[] = [];
 	for (const row of rows) {
 		const line = render(row, low), cost = lineCost(line);
-		if (tokens + cost.tokens > tokenLimit || chars + cost.chars > charLimit) omitted.push(row.skill.name);
+		if (tokens + cost.tokens > tokenLimit || chars + cost.chars > charLimit) omitted.push(row.name);
 		else { kept.push(line); tokens += cost.tokens; chars += cost.chars; }
 	}
 	return { listed: kept.length, list: kept.join('\n'), omitted, shortened: rows.some((row) => row.description.length > low) };
@@ -53,11 +67,11 @@ export function renderSkillCatalog(items: DiscoveredSkill[], settings: SkillSett
 
 function listItems(items: DiscoveredSkill[], offset: number, reference: (skill: DiscoveredSkill) => string, incomplete: boolean) {
 	return JSON.stringify({ total: items.length, ...(incomplete && { incomplete, notice: scanNotice }),
-		items: items.slice(offset, offset + 50).map((skill) => ({ name: skill.name, description: skill.description, id: reference(skill) })) });
+		items: items.slice(offset, offset + 50).map((skill) => ({ name: skill.name, source: modelSource(skill), description: skill.description, id: reference(skill) })) });
 }
 
 export function createSkillRun(registry: SkillRegistry, request: TaskRequest, window: number | undefined, signal: AbortSignal,
-	taskId: string = randomUUID(), work?: (active: boolean) => void) {
+	taskId: string = randomUUID(), work?: (active: boolean) => void, sessionId = taskId) {
 	const delivered = new Set<string>();
 	const committed = new Map<string, SkillMention[]>();
 	let bindings = new Map<string, SkillMention[]>();
@@ -73,8 +87,9 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 	let creatorId: string | undefined;
 	let pending = new Map<string, string>();
 	const catalog = () => registry.inspect([], '', scope);
-	const reference = ({ id, name }: DiscoveredSkill) => 's_' + createHash('sha256')
-		.update(JSON.stringify([taskId, id, name])).digest('base64url').slice(0, 12);
+	const scopedReference = ({ id, name }: DiscoveredSkill, scope: string) => 's_' + createHash('sha256')
+		.update(JSON.stringify([scope, id, name])).digest('base64url').slice(0, 12);
+	const reference = (skill: DiscoveredSkill) => scopedReference(skill, sessionId);
 	const matchers = new Map<string, ReturnType<typeof compilePathGlob>>();
 	function canAutoUse(skill: DiscoveredSkill, paths = notePaths): boolean {
 		return skill.implicit && (!skill.paths?.length || (paths.length > 0 && skill.paths.some((pattern) => {
@@ -89,18 +104,18 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 	const usable = (skill: DiscoveredSkill) => skill.enabled && (canAutoUse(skill) || (skill.manual && explicit.get(skill.id) === skill.name));
 	function byReference(items: DiscoveredSkill[], id: string | undefined) {
 		// 恢复旧任务仍认原来的完整标识。短标识碰撞时拒绝读取。
-		const matches = id ? items.filter((skill) => skill.id === id || reference(skill) === id) : [];
+		const matches = id ? items.filter((skill) => skill.id === id || reference(skill) === id || scopedReference(skill, taskId) === id) : [];
 		return matches.length === 1 ? matches[0] : undefined;
 	}
-	async function accessible(id: string) {
+	async function accessible(id: string, source?: string) {
 		const { items } = await catalog();
-		const exact = byReference(items, id);
+		const exact = source === undefined ? byReference(items, id) : undefined;
 		if (exact && usable(exact)) return exact;
-		// 模型有时会拿清单里的名称当标识；名称在可用技能中唯一时也接受。
-		if (!exact && !/^s_[\w-]{12}$/u.test(id)) {
-			const named = items.filter((skill) => skill.name === id && usable(skill));
+		if (!exact && (source !== undefined || !sessionReference.test(id))) {
+			const named = items.filter((skill) => skill.name === id && usable(skill) && (source === undefined || modelSource(skill) === source));
 			if (named.length === 1) return named[0]!;
-			if (named.length > 1) throw new Error('有多个同名技能，请改用 list_skills 返回的技能标识。');
+			if (named.length > 1) throw new Error(source === undefined ? '有多个同名技能，请使用清单中的来源，或改用 list_skills 返回的标识。'
+				: '该来源仍有多个同名技能，请改用 list_skills 返回的标识。');
 		}
 		throw new Error('技能已停用、不在本轮范围内或需要用户点名。');
 	}
@@ -125,7 +140,7 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 			}
 		},
 		async project(messages: Message[], autoAllowed: boolean) {
-			const inputs = [{ id: '', text: request.instruction, mentions: request.skillMentions ?? [], scope: primaryScope, paths: primaryNotePaths },
+			const inputs = [{ id: '', text: approvedPlanContent(request)?.instruction ?? request.instruction, mentions: request.skillMentions ?? [], scope: primaryScope, paths: primaryNotePaths },
 				...messages.flatMap((m) => m.id?.startsWith('steer:') && m.role === 'user' && (m.skillInputLength !== undefined || m.skillScope || m.skillNotePaths)
 					? [{ id: m.id, text: m.content.slice(0, m.skillInputLength ?? 0), mentions: m.skillMentions ?? [], scope: m.skillScope ?? [], paths: m.skillNotePaths ?? [] }] : [])];
 			scope = [...new Set(inputs.flatMap((input) => input.scope))];
@@ -139,6 +154,7 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 			const scoped = new Map([[scopeKey(scope), items]]);
 			bindings = new Map();
 			const requiredBy = new Map<string, string>();
+			const selectedAt = new Map(inherited.map(({ id }) => [id, '']));
 			for (const input of inputs) {
 				if (!input.text.includes('$')) continue;
 				const previous = committed.get(input.id);
@@ -161,6 +177,7 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 							throw new Error(`技能「${skill.name}」仅限用户点选，本次分派没有这项选择。`);
 						}
 						chosen.set(skill.id, skill);
+						if (!selectedAt.has(skill.id)) selectedAt.set(skill.id, input.id);
 						if (!previous && !requiredBy.has(skill.id)) requiredBy.set(skill.id, input.id);
 					}
 				} catch (error) {
@@ -170,9 +187,7 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 			}
 			creatorId = items.find((s) => registry.isCreator(s))?.id;
 			const automatic = autoAllowed ? items.filter((skill) => skill.enabled && canAutoUse(skill)) : [];
-			const state = renderSkillCatalog(automatic.map((skill) => ({ ...skill, id: reference(skill) })), registry.options(), window);
-			registry.reportBudget({ listed: state.listed, omitted: state.omitted, shortened: state.shortened });
-			const notes: string[] = [];
+			const notes = new Map<string, string>();
 			const contents = new Map<string, { id: string; file: string; hash: string }>();
 			const track = (id: string, file: string, value: string) => {
 				contents.set(id + '\0' + file, { id, file, hash: fingerprint(value) });
@@ -190,13 +205,17 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 					continue;
 				}
 				track(s.id, 'SKILL.md', content);
-				notes.push(`技能 ${s.name}（标识 ${reference(s)}）\n${content}`);
+				const source = selectedAt.get(s.id) ?? '';
+				const previous = notes.get(source);
+				notes.set(source, [previous, `技能 ${s.name}（标识 ${reference(s)}）\n${content}`].filter(Boolean).join('\n\n'));
 				if (s.managed) pending.set('manual:' + s.id, s.managed);
 			}
 			explicit = new Map([...chosen].map(([id, skill]) => [id, skill.name]));
 			const outgoing: Message[] = [];
 			const autoIds = new Set(automatic.map((skill) => skill.id));
 			const authorized = items.filter((item) => chosen.has(item.id) || autoIds.has(item.id));
+			const state = renderSkillCatalog(automatic, registry.options(), window, authorized);
+			registry.reportBudget({ listed: state.listed, omitted: state.omitted, shortened: state.shortened });
 			const listingCalls = new Map(messages.flatMap((m) => m.role === 'assistant' ? m.toolCalls ?? [] : [])
 				.filter((call) => isSkillListing(call.name)).map((call) => [call.id, call]));
 			const fileLists = new Map<string, string>();
@@ -222,22 +241,21 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 					continue;
 				}
 				let content: string;
+				let deliveredInstruction = false;
 				const s = authorized.find((skill) => skill.id === receipt.id);
 				try {
 					if (!s) throw new Error('技能已停用或授权已撤回。');
 					const raw = await registry.read(s, receipt.file);
 					if (fingerprint(raw) !== receipt.digest) throw new Error('文件内容已变化，请重新读取。');
 					track(s.id, receipt.file, raw);
+					deliveredInstruction = receipt.file === 'SKILL.md';
 					const end = receipt.offset + pageSize;
 					content = `${s.name}（标识 ${reference(s)}） · ${receipt.file}\n${raw.slice(receipt.offset, end)}`
 						+ (end < raw.length ? `\n下一页 offset=${end}，digest=${receipt.digest}` : '');
 					if (s.managed && receipt.offset === 0 && receipt.file === 'SKILL.md' && !explicit.has(s.id)) pending.set('auto:' + m.toolCallId, s.managed);
 				} catch (error) { content = error instanceof Error ? error.message : '技能文件无法读取。'; }
-				outgoing.push({ ...m, content });
+				outgoing.push(deliveredInstruction ? { ...m, content: '', promptSections: [{ tag: 'skill-instructions', text: content }] } : { ...m, content });
 			}
-			const help = autoAllowed ? ['可用技能清单，依次为名称、技能标识和用途。按任务需要使用 read_skill 读取完整说明；传给 read_skill 的是技能标识（第二项，不是名称）。配套材料使用同一技能的标识。清单只适用于本轮。', state.list,
-				issues.length ? scanNotice : '',
-				state.omitted.length ? '部分技能受清单容量限制，需要时可用 list_skills 查看。' : ''].filter(Boolean).join('\n') : '';
 			const projectedScope = scope;
 			const projectedPaths = notePaths;
 			const beforeSend = authorized.length ? async () => {
@@ -249,7 +267,7 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 				const fresh = new Map((await registry.list([], '', projectedScope)).map((s) => [s.id, s]));
 				for (const old of authorized) {
 					const now = fresh.get(old.id);
-					if (!now?.enabled || now.name !== old.name || now.description !== old.description
+					if (!now?.enabled || now.name !== old.name || now.sourceLabel !== old.sourceLabel || now.description !== old.description
 						|| (chosen.has(old.id) && !now.manual) || (autoIds.has(old.id) && !canAutoUse(now, projectedPaths))) {
 						throw new SkillAccessChangedError('发送前技能权限或目录已变化。');
 					}
@@ -267,7 +285,7 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 				}
 				if (initialGrants !== grants()) throw new SkillAccessChangedError('核对期间技能权限已变化。');
 			} : undefined;
-			return { messages: outgoing, guidance: help, instructions: notes.join('\n\n'), beforeSend };
+			return { messages: outgoing, guidance: state.list, instructionsByMessage: notes, beforeSend };
 		},
 		delegation() {
 			return { inheritedSkills: delegated.inheritedSkills.map((skill) => ({ ...skill })),
@@ -295,8 +313,8 @@ export function createSkillRun(registry: SkillRegistry, request: TaskRequest, wi
 			return listItems(items.filter(usable), offset, reference, issues.length > 0);
 		},
 		async files(id: string) { return files(await accessible(id)); },
-		async read(id: string, file: string, offset: number, digest?: string) {
-			const skill = await accessible(id);
+		async read(id: string, file: string, offset: number, digest?: string, sourceLabel?: string) {
+			const skill = await accessible(id, sourceLabel);
 			const { source, text } = await registry.readForCall(skill, file);
 			const hash = fingerprint(text);
 			if (offset > text.length || (offset > 0 && digest !== hash)) throw new Error('技能文件已变化或页码无效，请从头读取。');

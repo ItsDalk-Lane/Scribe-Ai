@@ -59,7 +59,6 @@ function openDirectory(data: string, selected: string): void {
 
 /** 高级设置中的「数据目录」：位置、保留期与缓存清理 */
 export function renderDataDirectorySettings(panel: HTMLElement, plugin: ScribeAiPlugin): void {
-	panel = panel.createDiv({ cls: 'scribe-settings-group' });
 	const text = uiText();
 	const settings = plugin.services.settings;
 	const { paths, logs } = plugin.services;

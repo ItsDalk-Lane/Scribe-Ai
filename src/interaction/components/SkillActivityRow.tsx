@@ -62,7 +62,7 @@ export function SkillActivityRow({
 	const content = state === 'error' || state === 'skipped' ? resultText || undefined : body?.content;
 	const contentLabel = resource ? text.chatSkillResource : text.chatSkillContent;
 	const pending = state === 'success' && receipt && !body;
-	const instruction = toolTextField(call.input, 'i');
+	const instruction = toolTextField(call.input, 'intent') ?? toolTextField(call.input, 'i');
 	return (
 		<ActivityDisclosure className="scribe-tool-card scribe-skill-activity" state={state} icon="book-open"
 			label={label} expanded={expanded} onToggle={onToggle}

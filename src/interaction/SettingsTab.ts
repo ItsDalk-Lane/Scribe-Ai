@@ -7,6 +7,7 @@ import { renderMcpSettings } from './McpSettings';
 import { renderServiceSettings } from './ServiceSettings';
 import { renderSubagentSettings } from './SubagentSettings';
 import { CustomInstructionsEditor, renderWritingRulesSettings } from './WritingRulesSettings';
+import { renderContextPreferences } from './ContextPreferences';
 import { subagentSettingsText } from './subagentSettingsText';
 import { uiText } from './uiText';
 import { tr } from './skills/dialog';
@@ -192,7 +193,11 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 				.addButton((button) => button.setButtonText(tr('保存代理', 'Save proxy')).onClick(() => saveProxy()))
 				.addButton((button) => button.setButtonText(tr('解除代理认证关联', 'Unlink proxy credentials')).onClick(() => saveProxy(true)));
 
-			renderDataDirectorySettings(panel, this.plugin);
+			const data = panel.createDiv({ cls: 'scribe-settings-group' });
+			renderDataDirectorySettings(data, this.plugin);
+			new Setting(data)
+				.setName(tr('当前插件版本', 'Current plugin version'))
+				.controlEl.createSpan({ text: this.plugin.manifest.version });
 		};
 
 		const updateSkillWarning = (count: number) => {
@@ -212,7 +217,10 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 			this.activeSection = section;
 			if (!rendered.has(section)) {
 				if (section === 'general') renderGeneral();
-				else if (section === 'personalization') renderWritingRulesSettings(panels.personalization, text, editInstructions);
+				else if (section === 'personalization') {
+					renderWritingRulesSettings(panels.personalization, text, editInstructions);
+					renderContextPreferences(panels.personalization, this.plugin);
+				}
 				else if (section === 'models') renderModels();
 				else if (section === 'services') this.servicesDispose = renderServiceSettings(panels.services, this.plugin);
 				else if (section === 'skills') this.skillPage = renderSkillSettings(this.plugin, panels.skills, updateSkillWarning);

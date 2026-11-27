@@ -60,14 +60,23 @@ export interface ReportedUsage {
 
 export interface ModelUsageReceipt {
 	reportedUsage?: ReportedUsage;
+	estimatedUsage?: Pick<ReportedUsage, 'prompt' | 'output' | 'total'>;
 	cost?: number;
+	/** 最新累计用量是否已由服务端的收尾回执确认。 */
+	usageStatus?: 'provisional' | 'final';
 }
 
 export interface AuxiliaryUsage extends ModelUsageReceipt {
-	kind: 'review' | 'summary' | 'video' | 'main-attempt';
+	kind: 'review' | 'goal-review' | 'summary' | 'video' | 'main-attempt';
+	/** 实时预览与保存回执共用同一次实际请求的标识。 */
+	id?: string;
 }
 
 export interface Message {
+	/** 只由发送层生成，原始消息记录不使用此字段。 */
+	promptSections?: import('./orchestration/context/promptXml').PromptSection[];
+	/** 原始内容各段的长度，用于在发送时区分指令、所选资料与聊天引文。 */
+	taskPrompt?: { instruction: number; references: number; quotes: number; assignment?: true; approvedPlan?: [number, number] };
 	imageRefs?: ImageReference[];
 	skillInputLength?: number;
 	skillMentions?: SkillMention[];
@@ -102,12 +111,16 @@ export interface Message {
 	usage?: Usage;
 	/** 仅保留服务商确实报告的用量。空对象表示未报告。 */
 	reportedUsage?: ReportedUsage;
+	estimatedUsage?: ModelUsageReceipt['estimatedUsage'];
+	usageStatus?: ModelUsageReceipt['usageStatus'];
 	toolDurationMs?: number;
 	shellStatus?: ShellStatus;
 	approvalReview?: ToolReviewStatus;
 	noteChange?: NoteChange;
 	/** assistant 消息中由模型发起的工具调用 */
 	toolCalls?: ToolCall[];
+	/** 本次请求向模型提供了结构化目标报告工具。 */
+	goalReportRequired?: true;
 	/** 保留同一模型继续当前任务时所需的原始内容和签名 */
 	rawAssistant?: AssistantRecord;
 }
@@ -157,6 +170,8 @@ export interface TaskRequest {
 	target?: TaskTarget;
 	intent?: 'plan' | 'review';
 	approvedPlanTaskId?: string;
+	approvedPlanMode?: 'continue' | 'fresh';
+	approvedPlanRevision?: string;
 	revisesPlanTaskId?: string;
 	reviewMaterial?: string;
 	goalRound?: true;
@@ -281,7 +296,10 @@ export interface RunChatTasks {
 }
 
 export interface ToolContext {
+	memory?: RunContext['memory'];
+	goalReport?: RunContext['goalReport'];
 	chatTasks?: RunChatTasks;
+	plan?: import('./tools/planTools').RunPlanTools;
 	mcpRun?: McpRun;
 	skillRun?: SkillRun;
 	subagents?: SubagentToolAccess;
@@ -301,6 +319,7 @@ export interface ToolContext {
 export interface ToolApproval {
 	title: string;
 	target: string;
+	intent?: string;
 	before?: string;
 	after?: string;
 	kind?: 'shell' | 'vault-shell' | 'access' | 'mcp' | 'web-search' | 'web-image';
@@ -323,7 +342,7 @@ export interface PreparedTool {
 }
 
 export interface ToolDefinition extends ToolSpec {
-	mcp?: { kind: 'tool' | 'resource' | 'search'; binding: string; label: string };
+	mcp?: { kind: 'tool' | 'resource' | 'search' | 'invoke'; binding: string; label: string };
 	isReadOnly: boolean;
 	maxResultSizeChars?: number;
 	isAvailable?(): boolean;
@@ -333,7 +352,9 @@ export interface ToolDefinition extends ToolSpec {
 /* ───────────── 模型 ───────────── */
 
 export interface ModelRequest {
-	beforeSend?: (address: string) => Promise<void>;
+	beforeSend?: (address: string, destinationFingerprint?: string) => Promise<void>;
+	/** 地址及授权检查通过，即将向模型发出网络请求。 */
+	onTransmission?: (address: string) => Promise<void>;
 	providerId: string;
 	model: string;
 	system?: string;
@@ -377,6 +398,8 @@ export interface ModelResponse {
 	stopReason: StopReason;
 	usage?: Usage;
 	reportedUsage?: ReportedUsage;
+	estimatedUsage?: ModelUsageReceipt['estimatedUsage'];
+	usageStatus?: ModelUsageReceipt['usageStatus'];
 	metrics?: ModelMetrics;
 	/** pi-ai 已归一化的完整响应，供需要思考、用量与服务商元数据的调用方使用 */
 	raw: AssistantRecord;
@@ -407,6 +430,8 @@ export interface ContextCompaction {
 }
 
 export interface RunState {
+	/** 本轮结束时的语义验收结论，由目标状态保存。 */
+	goalReview?: 'passed' | 'needs-evidence';
 	taskId: string;
 	turn: number;
 	messages: Message[];
@@ -422,6 +447,7 @@ export interface RunState {
 
 export type RunEvent =
 	| { type: 'state'; state: RunState }
+	| { type: 'auxiliary-usage'; auxiliaryUsage: AuxiliaryUsage[] }
 	| { type: 'turn-start'; turn: number }
 	| { type: 'context-compaction'; compaction: ContextCompaction }
 	| { type: 'model-retry'; messageId: string; waiting: boolean; reason?: 'context' }
@@ -434,7 +460,7 @@ export type RunEvent =
 	| { type: 'tool-end'; call: ToolCall; result: ToolResult; skipped?: boolean };
 
 export type RunCheckpoint = Exclude<RunEvent, {
-	type: 'text-delta' | 'thinking-delta' | 'thinking-end' | 'model-retry' | 'model-intent' | 'tool-output';
+	type: 'text-delta' | 'thinking-delta' | 'thinking-end' | 'model-retry' | 'model-intent' | 'tool-output' | 'auxiliary-usage';
 }>;
 
 export interface SavedRetry {
@@ -598,6 +624,7 @@ export interface ModelService {
 	listProviderModels(providerId: string, signal?: AbortSignal, sharedPublicCatalog?: Promise<unknown>, sharedPiCatalog?: () => Promise<unknown>): Promise<ModelCatalogResult>;
 	/** 自建/本地服务商：直接向它的 /models 查询模型清单 */
 	listCustomModels(providerId: string, baseUrl: string, signal?: AbortSignal): Promise<Omit<ModelCatalogResult, 'source'> & { baseUrl: string }>;
+	/** 用量回调更新当前尝试的累计快照，同一次请求的多次回调只保留最新值。 */
 	send(request: ModelRequest, onUsage?: (usage: ModelUsageReceipt) => void): Promise<ModelResponse>;
 	stream(request: ModelRequest, onUsage?: (receipt: ModelUsageReceipt) => void): ModelStream;
 }
@@ -614,6 +641,7 @@ export interface CommunicationLogEntry {
 	status?: number;
 	error?: string;
 	proxy?: 'direct' | 'configured' | 'environment' | 'system';
+	contextUsage?: { system: number; tools: number; project: number; session: number; dialog: number; cacheRead?: number; cacheWrite?: number };
 }
 
 export interface Transport {
@@ -643,6 +671,7 @@ export interface ToolRegistry {
 }
 
 export interface ToolExecutor {
+	prepareParallelReads?(calls: ToolCall[], ctx: ToolContext): Promise<Array<() => Promise<ToolResult>> | undefined>;
 	execute(call: ToolCall, ctx: ToolContext): Promise<ToolResult>;
 }
 
@@ -665,7 +694,10 @@ export interface ToolLayer {
 export class MissingConversationError extends Error {}
 
 export interface ConversationStore {
+	saveRunProgress(id: string, taskId: string, summary: RunSummary): Promise<void>;
 	chatTasks: ChatTaskStore;
+	readPlanDraft(id: string, taskId: string): Promise<import('./interaction/chatPlan').PlanDraft | undefined>;
+	savePlanDraft(id: string, taskId: string, draft: import('./interaction/chatPlan').PlanDraft, expectedRevision?: string): Promise<import('./interaction/chatPlan').PlanDraft>;
 	shellJobHistory: ShellJobHistory;
 	list(): Promise<ConversationSummary[]>;
 	load(id: string): Promise<ConversationSnapshot>;
@@ -704,9 +736,11 @@ export type MainConversationEntry =
 	| { type: 'start'; task: Task; model: RunContext['model']; consumedQueueIds?: string[] }
 	| { type: 'messages'; taskId: string; messages: Message[]; step?: RunStep; consumedQueueIds?: string[] }
 	| { type: 'step'; taskId: string; step: RunStep }
+	| { type: 'plan-enter'; taskId: string }
 	| { type: 'retry'; taskId: string; retry: SavedRetry }
 	| { type: 'history-summary'; taskId: string; summary: HistorySummary }
 	| { type: 'run-summary'; taskId: string; summary: RunSummary }
+	| { type: 'prompt-context'; taskId: string; checkpoint: import('./orchestration/context/promptContext').PromptCheckpoint }
 	| { type: 'video-item'; taskId: string; item: SavedVideoItem }
 	| { type: 'video-analysis'; taskId: string; content: string; sources?: VideoSourceKind[] }
 	| { type: 'context-compaction'; taskId: string; compaction: ContextCompaction }
@@ -730,6 +764,8 @@ export interface SavedVideoItem {
 
 export interface SavedRun {
 	request: TaskRequest;
+	planDraft?: import('./interaction/chatPlan').PlanDraft;
+	planArchived?: true;
 	model: RunContext['model'];
 	state: RunState;
 	step?: RunStep;
@@ -739,6 +775,7 @@ export interface SavedRun {
 	retries?: SavedRetry[];
 	historySummary?: HistorySummary;
 	runSummary?: RunSummary;
+	promptCheckpoints?: import('./orchestration/context/promptContext').PromptCheckpoint[];
 	videoItems?: SavedVideoItem[];
 	videoAnalysis?: string;
 	videoAnalysisSources?: VideoSourceKind[];
@@ -784,7 +821,7 @@ export interface SubagentNote {
 }
 
 export type SubagentRecord =
-	| { kind: 'create'; agent: SubagentIdentity; history?: Message[]; instructions?: string; readOnly?: boolean; allowProvider?: boolean; modelOrigin?: string; reportDestination?: QueuedModelDestination }
+	| { kind: 'create'; agent: SubagentIdentity; history?: Message[]; instructions?: string; readOnly?: boolean; planning?: true; allowProvider?: boolean; modelOrigin?: string; reportDestination?: QueuedModelDestination }
 	| { kind: 'run'; entry: Exclude<MainConversationEntry, { type: 'queue-add' | 'queue-edit' | 'queue-delete' }> }
 	| { kind: 'visibility'; closed: boolean }
 	| { kind: 'note'; note: SubagentNote }
@@ -816,6 +853,7 @@ export interface SubagentReport {
 
 export interface SubagentSnapshot {
 	reports?: Readonly<Record<string, SubagentReport>>;
+	reportUsage?: Readonly<Record<string, AuxiliaryUsage>>;
 	submissions?: Readonly<Record<string, SubagentNote>>;
 	agents: SubagentView[];
 	requests: SubagentRequest[];
@@ -859,6 +897,7 @@ export interface ConversationSummary {
 }
 
 export interface SessionRunOptions {
+	goal?: ChatGoal;
 	model?: RunContext['model'];
 	rememberConversation?: boolean;
 	executionMode?: ExecutionMode;
@@ -925,14 +964,19 @@ export interface PermissionPolicy {
 
 export interface RunContext {
 	chatTasks?: RunChatTasks;
+	goalReport?: { criterionCount: number; recorded(): boolean };
+	plan?: import('./tools/planTools').RunPlanTools;
 	mcpRun?: McpRun;
 	videoAnalysis?: { sources: readonly VideoSourceKind[]; read(): Promise<string> };
 	manualSummary?: string;
 	skillRun?: SkillRun;
 	subagents?: SubagentToolAccess;
 	subagentId?: string;
+	subagentCatalog?: string;
 	subagentPrompt?: string;
-	destinationCheck?: (request: ModelRequest, address: string) => Promise<void>;
+	subagentInstructions?: string;
+	isolatedAgent?: boolean;
+	destinationCheck?: (request: ModelRequest, address: string, destinationFingerprint?: string) => Promise<void>;
 	inbox?: () => readonly SubagentNote[];
 	acceptInbox?: (ids: string[]) => Promise<void>;
 	collaboration?: {
@@ -948,6 +992,7 @@ export interface RunContext {
 	reviewTool?: (approval: ToolApproval) => Promise<boolean>;
 	resumeReview?: ResumeReview;
 	takeSteering?: () => readonly QueuedMessage[];
+	nextSteeringSignal?: () => AbortSignal;
 	rejectSteering?: (ids: string[], reason?: string) => void;
 	signal: AbortSignal;
 	observer: RunObserver;
@@ -964,7 +1009,15 @@ export interface RunContext {
 		summarize(messages: Message[], throughMessage: number, room: number, maxBytes: number): Promise<ContextCompaction['summary']>;
 	};
 	writingRules?: string;
+	writingRulesCurrent?: () => Promise<string | undefined>;
+	canDescribeTool?: PermissionPolicy['canCallTool'];
+	memory?: import('./orchestration/context/longTermMemory').MemoryRun;
+	directoryRules?: import('./orchestration/context/writingRules').DirectoryRules;
+	promptContext?: import('./orchestration/context/promptContext').RunPromptContext;
+	promptMessageCount?: number;
+	promptResuming?: boolean;
 	record?: (event: RunCheckpoint) => Promise<void>;
+	previewModelUsage?: (receipt: ModelUsageReceipt) => void;
 	recordUnfinishedRequest?: (receipt: ModelUsageReceipt) => Promise<void>;
 }
 
@@ -987,7 +1040,7 @@ export interface OrchestrationLayer {
 /* ───────────── 第三层：核心循环层接口 ───────────── */
 
 export interface ModelCoordinator {
-	nextTurn(state: RunState, ctx: RunContext): Promise<ModelResponse>;
+	nextTurn(state: RunState, ctx: RunContext): Promise<ModelResponse & { requiredToolIntents?: ReadonlySet<string>; goalReportRequired?: true }>;
 }
 
 export interface ToolCoordinator {

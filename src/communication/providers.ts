@@ -37,11 +37,12 @@ import { resolveModelConnection } from './modelConnection';
 import { applyResponseSchema, supportsResponseSchema } from './modelFeatures';
 import { bufferedGroqSchemaFetch, needsBufferedGroqSchema } from './groqSchema';
 import { applyModelVideo, catalogVideoInput, nativeVideoFormat, videoTakesOnlyUrls } from './modelVideo';
-import { confirmModelRequest, modelRequestConfirmation } from './modelRequestConfirmation';
+import { bindBedrockConfirmation, confirmModelRequest } from './modelRequestConfirmation';
 import type { ModelRequestConfirmation } from './modelRequestConfirmation';
 import { modelNodeFetch, nodeFetch } from './nodeFetch';
 import { isSecureServiceUrl } from './serviceAddress';
 import { captureReportedUsage, reportedCost } from './reportedUsage';
+import { estimatePromptTokens } from './inputUsage';
 import { ContextOverflowError, RetryableModelError } from '../types';
 import { isBuiltInThinkingLevel, isThinkingLevel } from '../orchestration/settings/thinking';
 import type {
@@ -62,11 +63,14 @@ import type {
 	Transport,
 } from '../types';
 
+import { promptText } from '../orchestration/context/promptXml';
+
 function toPiMessage(message: Message, images?: ImageContent[]): PiMessage {
 	const timestamp = Date.now();
-	if (message.role === 'system') return { role: 'system', content: message.content, timestamp };
+	const text = promptText(message);
+	if (message.role === 'system') return { role: 'system', content: text, timestamp };
 	if (message.role === 'user') return { role: 'user', content: images?.length
-		? [...(message.content ? [{ type: 'text' as const, text: message.content }] : []), ...images] : message.content, timestamp };
+		? [...(text ? [{ type: 'text' as const, text: text }] : []), ...images] : text, timestamp };
 	if (message.role === 'tool') {
 		if (!message.toolCallId) throw new Error('Tool messages require toolCallId');
 		return {
@@ -74,13 +78,14 @@ function toPiMessage(message: Message, images?: ImageContent[]): PiMessage {
 			toolCallId: message.toolCallId,
 			toolName: message.toolName ?? message.toolCallId,
 			content: [{ type: 'text', text: message.imageRefs?.length && !images?.length
-				? message.content + '\n（此模型请求未携带这项工具返回的图片。）' : message.content }, ...(images ?? [])],
+				? text + '\n（此模型请求未携带这项工具返回的图片。）' : text }, ...(images ?? [])],
 			isError: message.isError ?? false,
 			timestamp,
 		};
 	}
 	const raw = message.rawAssistant;
 	if (raw) return { ...raw, content: raw.content.map((block) => {
+		if (block.type === 'text' && !block.textSignature) return { ...block, text: promptText({ role: 'assistant', content: block.text }) };
 		if (block.type !== 'thinking' || block.durationMs === undefined) return block;
 		const content = { ...block };
 		delete content.durationMs;
@@ -89,7 +94,7 @@ function toPiMessage(message: Message, images?: ImageContent[]): PiMessage {
 	return {
 		role: 'assistant',
 		content: [
-			...(message.content ? [{ type: 'text' as const, text: message.content }] : []),
+			...(text ? [{ type: 'text' as const, text: text }] : []),
 			...(message.toolCalls ?? []).map((call) => ({
 				type: 'toolCall' as const,
 				id: call.id,
@@ -208,7 +213,7 @@ class PiModelStream implements ModelStream {
 		private source: AssistantMessageEventStream | Promise<AssistantMessageEventStream>,
 		private controller: AbortController,
 		private cleanup: () => void,
-		private readUsage: () => ReportedUsage,
+		private usage: ReturnType<typeof captureReportedUsage>,
 		private confirmation: ModelRequestConfirmation | undefined,
 		private structuredOutput: boolean,
 		private onUsage?: Parameters<ModelService['send']>[1],
@@ -229,9 +234,14 @@ class PiModelStream implements ModelStream {
 		try {
 			const response = await (await this.source).result();
 			if (this.confirmation?.failure) throw this.confirmation.failure;
-			const reportedUsage = this.readUsage();
-			this.onUsage?.({ reportedUsage, cost: reportedCost(response.usage) });
+			const reportedUsage = this.usage.read();
+			const estimatedUsage = this.usage.estimate();
+			const usageStatus = Object.keys(reportedUsage).length || estimatedUsage ? this.usage.status()
+				: response.stopReason === 'error' || response.stopReason === 'aborted' ? 'provisional' : 'final';
+			this.onUsage?.({ reportedUsage, ...(estimatedUsage && { estimatedUsage }), cost: reportedCost(response.usage), usageStatus });
 			const result = toResponse(response, reportedUsage);
+			if (estimatedUsage) result.estimatedUsage = estimatedUsage;
+			if (usageStatus === 'provisional') result.usageStatus = usageStatus;
 			if (!this.structuredOutput) return result;
 			if (result.stopReason === 'end' && !result.toolCalls.length) {
 				try { JSON.parse(result.content); } catch { throw new Error('模型未返回有效的结构化 JSON。'); }
@@ -567,20 +577,29 @@ export function createModelService(
 		const cleanup = () => request.signal?.removeEventListener('abort', onAbort);
 		const configuredAddress = override?.baseUrl?.trim() || serviceOptions.baseUrls?.()[request.providerId]?.trim() || registered.has(request.providerId);
 		const expectedBase = configuredAddress && connection.baseUrl ? new URL(connection.baseUrl) : undefined;
-		const confirmation = request.beforeSend || expectedBase
-			? { beforeSend: request.beforeSend, expectedBase, controller } : undefined;
+		const reportedUsage = captureReportedUsage(model.api);
+		let promptEstimate: number | undefined;
+		const publishUsage = () => {
+			const estimatedUsage = reportedUsage.estimate();
+			onUsage?.({ reportedUsage: reportedUsage.read(), ...(estimatedUsage && { estimatedUsage }), usageStatus: reportedUsage.status() });
+		};
+		const confirmation = { beforeSend: request.beforeSend, expectedBase, controller, onSend: async (address: string) => {
+			await request.onTransmission?.(address);
+			controller.signal.throwIfAborted();
+			reportedUsage.reset(promptEstimate);
+			if (promptEstimate !== undefined) publishUsage();
+		} };
 		const confirmedFetch: typeof fetch = async (input, init) => {
 			const url = new URL(input instanceof Request ? input.url : input);
 			// Anthropic 的凭据交换也用同一个 fetch，聊天请求固定走 messages。
 			if (model.api === 'anthropic-messages' && url.pathname.endsWith('/v1/oauth/token') && isSecureServiceUrl(url)) {
 				return transport.fetch(input, init);
 			}
-			if (transport.fetch === nodeFetch) return modelNodeFetch(input, init);
-			await confirmModelRequest(url);
+			if (transport.fetch === nodeFetch) return modelNodeFetch(input, init, confirmation);
+			await confirmModelRequest(url, confirmation);
 			controller.signal.throwIfAborted();
 			return transport.fetch(input, init);
 		};
-		const reportedUsage = captureReportedUsage(model.api);
 		const fetchModel = confirmedFetch;
 		const options: SimpleStreamOptions = {
 			signal: controller.signal,
@@ -589,14 +608,20 @@ export function createModelService(
 				: request.maxTokens,
 			temperature: request.temperature,
 			reasoning,
-			onPayload,
+			onPayload: onUsage ? async (payload, activeModel) => {
+				const outgoing = await onPayload?.(payload, activeModel);
+				promptEstimate = estimatePromptTokens(activeModel.api, outgoing ?? payload);
+				return outgoing;
+			} : onPayload,
 			sessionId: request.sessionId,
 			maxRetries: request.maxRetries ?? 2,
 			maxRetryDelayMs: 60_000,
 			// shortcut: SDK total timeout is capped at 24.8 days; remove when SDK supports disabling it.
 			timeoutMs: 2_147_483_647,
 			transport: 'sse',
-			onProviderStreamEvent: (event) => reportedUsage.observe(event),
+			onProviderStreamEvent: (event) => {
+				if (reportedUsage.observe(event)) publishUsage();
+			},
 			fetch: schema && needsBufferedGroqSchema(connection) ? bufferedGroqSchemaFetch(fetchModel) : fetchModel,
 		};
 		try {
@@ -608,12 +633,11 @@ export function createModelService(
 			const start = (images?: Map<number, ImageContent[]>) => {
 				controller.signal.throwIfAborted();
 				const context = toContext(input, features.tools, images);
-				return confirmation
-					? modelRequestConfirmation.run(confirmation, () => models.streamSimple(model, context, options))
-					: models.streamSimple(model, context, options);
+				if (model.api === 'bedrock-converse-stream') bindBedrockConfirmation(confirmation);
+				return models.streamSimple(model, context, options);
 			};
 			const source = vision && request.images ? request.images.load(controller.signal).then(start) : start();
-			return new PiModelStream(source, controller, cleanup, reportedUsage.read, confirmation, Boolean(schema), onUsage);
+			return new PiModelStream(source, controller, cleanup, reportedUsage, confirmation, Boolean(schema), onUsage);
 		} catch (error) {
 			cleanup();
 			throw error;

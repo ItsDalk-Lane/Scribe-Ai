@@ -1,3 +1,4 @@
+import { runProgressFilename } from '../storage/paths';
 import assert from 'node:assert/strict';
 import { appendFile, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -13,7 +14,8 @@ import { guardModelConnection, queuedModelDestination } from '../settings/modelC
 import { manualConversationSummary } from '../context/manualConversationSummary';
 import { createSubagentController } from '../subagents/controller';
 import { normalizeSettings } from '../settings/defaults';
-import { runUsage } from '../../interaction/chatMetrics';
+import { conversationMetrics, runUsage } from '../../interaction/chatMetrics';
+import { restoreExecution, withSummaryUsage } from '../../interaction/context';
 
 async function fixture(context: TestContext) {
 	const directory = await mkdtemp(join(tmpdir(), 'scribe-conversation-'));
@@ -159,28 +161,110 @@ void test('an automatic report is saved once after its receipt and all its child
 	assert.deepEqual((await reopened.load(branch.id)).runs[0]?.subagentReport, sendReport.report);
 });
 
-void test('后台汇总、进展小结和分批整理共享同一用量记录，重开与复用不额外计数', { timeout: 5000 }, async (t) => {
-	const { store, directory } = await fixture(t);
-	const id = 'summary-chat';
+function pendingReport(id: string) {
 	const parent = start(id, 'main', '主题'.repeat(230));
 	const model = parent.model;
 	const origin = 'https://example.test';
 	const modelConnection: ModelService['modelConnection'] = () => ({ baseUrl: origin, api: 'openai-completions', source: 'configured' });
 	const reportDestination = queuedModelDestination(model, modelConnection);
-	await store.append(id, [parent,
+	const entries: ConversationEntry[] = [parent,
 		subagent('worker', { kind: 'create', modelOrigin: origin, reportDestination, agent: { id: 'worker', rootTaskId: 'main', name: '资料', role: 'worker', model } }),
 		subagent('worker', { kind: 'run', entry: start(id, 'child', '查资料') }),
 		subagent('worker', { kind: 'run', entry: messages('child', { role: 'assistant', content: '已核对' }) }),
 		subagent('worker', { kind: 'run', entry: { type: 'finish', taskId: 'child', status: 'done', turn: 1 } }),
 		messages('main', { role: 'assistant', content: '收件回执', local: true, deliveryAgents: ['worker'] }),
 		{ type: 'finish', taskId: 'main', status: 'done', turn: 1 },
-	]);
+	];
+	return { model, origin, modelConnection, reportDestination, entries };
+}
+
+for (const replace of [false, true]) {
+	void test(replace ? '编辑移除主任务时取消它正在等待的汇总，不向新任务添加回执'
+		: '关闭插件后后台汇总只保存已发出的一次用量，迟到回执不会覆盖估算', { timeout: 5000 }, async (t) => {
+		const { store, directory } = await fixture(t);
+		const id = 'stopped-report';
+		const { model, origin, modelConnection, entries } = pendingReport(id);
+		await store.append(id, entries);
+		const settings = normalizeSettings({ ...model, providerModels: { [model.providerId]: [model.model] } });
+		let started = () => {};
+		const pending = new Promise<void>((resolve) => { started = resolve; });
+		let sends = 0;
+		let reportSignal: AbortSignal | undefined;
+		const service: Pick<ModelService, 'send' | 'modelOrigin' | 'modelConnection'> = {
+			modelOrigin: () => origin, modelConnection,
+			async send(request, onUsage) {
+				reportSignal = request.signal;
+				await request.beforeSend?.(origin + '/chat');
+				await request.onTransmission?.(origin + '/chat');
+				sends++;
+				onUsage?.({ estimatedUsage: { prompt: 17 }, usageStatus: 'provisional' });
+				started();
+				await new Promise<void>((resolve) => request.signal!.addEventListener('abort', () => resolve(), { once: true }));
+				onUsage?.({ reportedUsage: { prompt: 99 }, usageStatus: 'final' });
+				throw request.signal!.reason;
+			},
+		};
+		const controller = createSubagentController(settings, store, () => assert.fail('子任务已完成'), (value) => value, service);
+		t.after(() => controller.dispose());
+		await controller.controls.load(id);
+		await pending;
+		const preview = controller.controls.snapshot(id).reportUsage?.main;
+		assert.ok(preview?.id);
+		assert.equal(preview.estimatedUsage?.prompt, 17);
+		const before = (await store.load(id)).runs[0]!.state;
+		const visible = withSummaryUsage(before, preview);
+		assert.equal(runUsage(visible)?.count, 1);
+		assert.equal(conversationMetrics([visible]).usage?.partial?.prompt?.value, 17);
+		await controller.reload(id);
+		assert.equal(sends, 1);
+		assert.deepEqual(controller.controls.snapshot(id).reportUsage?.main, preview);
+		if (replace) {
+			await store.replaceFrom(id, 'main', [start(id, 'replacement', '新任务')]);
+			await controller.reload(id);
+			assert.equal(reportSignal?.aborted, true);
+			assert.equal(sends, 1);
+			assert.equal(controller.controls.snapshot(id).reportUsage?.main, undefined);
+			assert.equal((await store.load(id)).runs[0]!.state.auxiliaryUsage, undefined);
+			return;
+		}
+		const stored = new Promise<void>((resolve) => {
+			const unsubscribe = controller.controls.subscribe(id, () => { unsubscribe(); resolve(); });
+		});
+		controller.dispose();
+		await stored;
+		const state = (await createConversationStore(directory).load(id)).runs[0]!.state;
+		assert.deepEqual(state.auxiliaryUsage, [preview]);
+		assert.equal(runUsage(state)?.count, 1);
+		assert.equal(withSummaryUsage(state, preview), state);
+		const reopened = createSubagentController({ ...settings, disabledProviderIds: [model.providerId] }, store,
+			() => assert.fail('不应重启子任务'), (value) => value, service);
+		t.after(() => reopened.dispose());
+		const ready = new Promise<void>((resolve) => {
+			const unsubscribe = reopened.controls.subscribe(id, () => {
+				if (reopened.controls.snapshot(id).reports?.main) { unsubscribe(); resolve(); }
+			});
+		});
+		await reopened.controls.load(id);
+		await ready;
+		assert.equal(sends, 1);
+		assert.equal(reopened.controls.snapshot(id).reportUsage?.main, undefined);
+		assert.deepEqual((await store.load(id)).runs[0]!.state.auxiliaryUsage, [preview]);
+	});
+}
+
+void test('后台汇总、进展小结和分批整理共享同一用量记录，重开与复用不额外计数', { timeout: 5000 }, async (t) => {
+	const { store, directory } = await fixture(t);
+	const id = 'summary-chat';
+	const { model, origin, modelConnection, reportDestination, entries } = pendingReport(id);
+	await store.append(id, entries);
 	const sent: string[] = [];
 	const service: Pick<ModelService, 'send' | 'modelOrigin' | 'modelConnection' | 'contextLimits'> = {
 		modelConnection, modelOrigin: () => origin,
 		contextLimits: () => ({ contextWindow: 4096, maxTokens: 512 }),
-		async send(request) {
+		async send(request, onUsage) {
 			await request.beforeSend?.(origin + '/chat');
+			await request.onTransmission?.(origin + '/chat');
+			onUsage?.({ estimatedUsage: { prompt: 21 }, usageStatus: 'provisional' });
 			sent.push(request.messages[0]!.content);
 			return { content: '正式的汇总结论', toolCalls: [], stopReason: 'end', reportedUsage: { total: 10 },
 				raw: { role: 'assistant', provider: 'test', api: 'openai-completions', model: 'test', content: [], timestamp: 1, stopReason: 'stop',
@@ -213,15 +297,19 @@ void test('后台汇总、进展小结和分批整理共享同一用量记录，
 		});
 		await restored.controls.load(copy);
 		await ready;
+		assert.equal(restored.controls.snapshot(copy).reportUsage?.main, undefined);
 		restored.dispose();
 		assert.match((await store.load(copy)).runs[0]?.subagentReport?.content ?? '', /本地完成的原稿/u);
 		assert.equal(sent.length, 0);
 	}
 	const controller = createSubagentController(settings, store, () => assert.fail('不应重启已完成的子任务'), (value) => value, service);
 	t.after(() => controller.dispose());
+	let preview: AuxiliaryUsage | undefined;
 	const ready = new Promise<void>((resolve) => {
 		const unsubscribe = controller.controls.subscribe(id, () => {
-			if (controller.controls.snapshot(id).reports?.main) { unsubscribe(); resolve(); }
+			const snapshot = controller.controls.snapshot(id);
+			if (snapshot.reportUsage?.main?.estimatedUsage?.prompt === 21) preview = snapshot.reportUsage.main;
+			if (snapshot.reports?.main) { unsubscribe(); resolve(); }
 		});
 	});
 	await controller.controls.load(id);
@@ -229,10 +317,48 @@ void test('后台汇总、进展小结和分批整理共享同一用量记录，
 	const record = (taskId: string, usage: AuxiliaryUsage) => store.append(id, [{ type: 'auxiliary-usage', taskId, usage }]);
 	const snapshot = await store.load(id);
 	assert.equal(sent.length, 1);
-	const smallModel = { ...service, contextLimits: () => ({ contextWindow: 2300, maxTokens: 250 }) };
+	assert.ok(preview?.id);
+	const settled = controller.controls.snapshot(id).reportUsage?.main;
+	assert.equal(settled?.id, preview.id);
+	assert.equal(settled.reportedUsage?.total, 10);
+	assert.deepEqual(snapshot.runs[0]?.state.auxiliaryUsage, [settled]);
+	const smallModel: Pick<ModelService, 'send' | 'contextLimits'> = {
+		contextLimits: () => ({ contextWindow: 2300, maxTokens: 250 }),
+		send: (request, onUsage) => service.send(request, () => {
+			onUsage?.({ reportedUsage: { total: 3 }, usageStatus: 'provisional' });
+			onUsage?.({ reportedUsage: { total: 6 }, usageStatus: 'provisional' });
+		}),
+	};
+	const ids = new Set<string>();
+	const base = snapshot.runs[0];
+	const displayed = restoreExecution(base);
 	for (const mode of ['recap', 'compact'] as const) {
 		const before = sent.length;
-		await manualConversationSummary(snapshot, smallModel, model, mode, new AbortController().signal, record, checkModel);
+		let preview: AuxiliaryUsage | undefined;
+		await manualConversationSummary(snapshot, smallModel, model, mode, new AbortController().signal, async (taskId, usage) => {
+			assert.ok(usage.id && !ids.has(usage.id));
+			ids.add(usage.id);
+			assert.ok(preview);
+			assert.equal(usage.id, preview.id);
+			assert.equal(preview.reportedUsage?.total, 6);
+			const settled = withSummaryUsage(base.state, usage);
+			assert.equal(withSummaryUsage(settled, preview), settled);
+			assert.equal(runUsage(settled)?.total, 20);
+			await record(taskId, usage);
+			preview = undefined;
+		}, checkModel, (taskId, usage) => {
+			assert.equal(taskId, base.state.taskId);
+			if (preview) assert.equal(usage.id, preview.id);
+			preview = usage;
+			const state = withSummaryUsage(base.state, usage);
+			const turn = restoreExecution({ ...base, state, displayed });
+			assert.ok(turn.state);
+			const sum = runUsage(turn.state);
+			assert.equal(sum?.count, 2);
+			assert.equal(sum.partial?.total?.value, 10 + usage.reportedUsage!.total!);
+			assert.deepEqual(conversationMetrics([state]).usage, sum);
+		});
+		assert.equal(preview, undefined);
 		assert.ok(sent.length - before > 1);
 		assert.match(sent.slice(before).join(''), /正式的汇总结论/u);
 		assert.doesNotMatch(sent.slice(before).join(''), /收件回执/u);
@@ -241,6 +367,7 @@ void test('后台汇总、进展小结和分批整理共享同一用量记录，
 	assert.equal(runUsage(reopened.state)?.byKind.summary?.count, sent.length);
 	assert.equal(runUsage(reopened.state)?.total, 10 * sent.length);
 	await controller.reload(id);
+	assert.equal(controller.controls.snapshot(id).reportUsage?.main, undefined);
 	assert.equal(sent.length, reopened.state.auxiliaryUsage?.length);
 	settings.providerModels[model.providerId] = ['another'];
 	await assert.rejects(manualConversationSummary(snapshot, smallModel, model, 'compact', new AbortController().signal, record, checkModel), /连接设置已变更/u);
@@ -646,4 +773,26 @@ void test('forking, editing history and deleting preserve isolation of pending m
 	await Promise.all([deletion, lateEnqueue]);
 	assert.deepEqual(await store.getQueued('parent'), []);
 	assert.equal((await store.load(branch.id)).runs.length, 1);
+});
+
+
+void test('private progress tracks the durable handoff across reopen, fork, and deletion', async (t) => {
+	const { directory, store } = await fixture(t);
+	const summary = { throughMessage: 2, text: '已核验原文，下一步复核两处引用。' };
+	await store.append('progress-chat', [start('progress-chat', 'progress-run', '校对'),
+		{ type: 'messages', taskId: 'progress-run', messages: [
+			{ role: 'user', content: '校对' }, { role: 'assistant', content: '已看原文' },
+		] },
+		{ type: 'run-summary', taskId: 'progress-run', summary },
+	]);
+	await store.saveRunProgress('progress-chat', 'progress-run', summary);
+	const reopened = createConversationStore(directory);
+	assert.deepEqual((await reopened.load('progress-chat')).runs[0]?.runSummary, summary);
+	const branch = await reopened.fork('progress-chat', 'progress-run');
+	const file = runProgressFilename('progress-chat', 'progress-run');
+	const forked = runProgressFilename(branch.id, 'progress-run');
+	assert.equal(await readFile(join(directory, file), 'utf8'), await readFile(join(directory, forked), 'utf8'));
+	await reopened.delete('progress-chat');
+	const files = await readdir(directory);
+	assert.ok(!files.includes(file) && files.includes(forked));
 });

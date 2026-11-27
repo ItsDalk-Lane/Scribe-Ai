@@ -6,29 +6,36 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
+import timers from 'node:timers';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { App } from 'obsidian';
-import { finishGoalRound, goalRoundInstruction, restoreChatGoal } from '../../interaction/chatGoal';
+import { confirmModelRequest } from '../../communication/modelRequestConfirmation';
+import { createModelService } from '../../communication/providers';
+import { finishGoalRound, goalRoundInstruction, reportGoalToolName, restoreChatGoal } from '../../interaction/chatGoal';
 import type { ChatGoal } from '../../interaction/chatGoal';
 import { approvedPlanRequest, submittedPlan } from '../../interaction/chatPlan';
 import { conversationMetrics, runUsage } from '../../interaction/chatMetrics';
-import { restoreExecution } from '../../interaction/context';
+import { emptyExecution, restoreExecution, updateExecution } from '../../interaction/context';
 import { createAgentLoop } from '../../runtime/agentLoop';
 import { bindAgent } from '../../runtime/createAgent';
 import { createModelCoordinator } from '../../runtime/modelCoordinator';
 import { createRunState } from '../../runtime/runState';
 import { createToolCoordinator } from '../../runtime/toolCoordinator';
+import { fixtureToolIntents } from '../../runtime/tests/agentFixture';
 import { createToolRegistry } from '../../tools';
 import { createToolExecutor } from '../../tools/executor';
 import { chatTaskTools } from '../../tools/chatTaskTools';
+import { goalTools } from '../../tools/goalTool';
+import { planTools } from '../../tools/planTools';
 import { shellTools } from '../../tools/external/shellTool';
 import { readTools } from '../../tools/readTools';
 import { searchTools } from '../../tools/searchTools';
 import { readOnlySkillTools, skillTools } from '../../tools/skillTools';
 import { writeTools } from '../../tools/writeTools';
-import { MissingConversationError } from '../../types';
+import { MissingConversationError, RetryableModelError } from '../../types';
 import type { Message, ModelRequest, ModelService, ModelStream, ReportedUsage, RunState, RuntimeLayer, ScribeSettings, Task, TaskRequest, ToolCall } from '../../types';
 import { createContextBuilder } from '../context/contextBuilder';
+import { promptText } from '../context/promptXml';
 import { createSkillRegistry } from '../context/skills';
 import { createSessionController } from '../sessionController';
 import { normalizeSettings } from '../settings/defaults';
@@ -40,7 +47,21 @@ const firstModel = { providerId: 'test-provider', model: 'first-model' };
 const secondModel = { providerId: 'another-provider', model: 'second-model' };
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 
+function requestText(request?: ModelRequest): string {
+	return request?.messages.map(promptText).join('\n') ?? '';
+}
+
+function dialogMessages(request?: ModelRequest): Message[] {
+	return (request?.messages ?? []).filter((message) => message.role !== 'user' || Boolean(message.content) || !message.promptSections?.length);
+}
+
+function activeMode(request: ModelRequest): string {
+	return request.messages.flatMap(({ promptSections }) => promptSections ?? []).reverse().find(({ tag, text }) =>
+		tag === 'system-reminder' && /^(?:本次为只读|当前权限模式为)/u.test(text))?.text ?? '';
+}
+
 function reply(content: string, toolCalls: ToolCall[] = [], billing?: { reportedUsage: ReportedUsage; total?: number }): ModelStream {
+	toolCalls = fixtureToolIntents(toolCalls);
 	const raw: AssistantMessage = {
 		role: 'assistant',
 		content: [
@@ -104,14 +125,15 @@ async function fixture(t: TestContext) {
 		ruleLookups,
 		ruleReads,
 		setActiveNote: (path: string) => { activeNote = path; },
-		connect: (stream: (request: ModelRequest) => ModelStream, model: Partial<ScribeSettings> = firstModel,
-			thinkingOptions?: ModelService['thinkingOptions'], modelService?: Pick<ModelService, 'send' | 'contextLimits' | 'modelCapabilities' | 'modelOrigin'> & Partial<Pick<ModelService, 'modelConnection'>>, withSkills = false) => {
+		connect: (stream: ModelService['stream'], model: Partial<ScribeSettings> = firstModel,
+			thinkingOptions?: ModelService['thinkingOptions'], modelService?: Pick<ModelService, 'send' | 'contextLimits' | 'modelCapabilities' | 'modelOrigin'> & Partial<Pick<ModelService, 'modelConnection'>>, withSkills = false, withPlanTools = false, withGoalTools = false) => {
 			const settings = normalizeSettings(model);
 			const skills = withSkills ? createSkillRegistry(app, settings, async () => {}, {
 				draft: async () => false, install: async () => false,
 			}) : undefined;
 			// 工具列表不随本机是否装有 PowerShell 变化，否则按上下文余量触发的压缩在各平台结果不同。
-			const registry = createToolRegistry([readTools, searchTools, writeTools, () => shellTools().filter(({ name }) => name === 'Bash'), chatTaskTools, ...(skills ? [skillTools] : [])]);
+			const registry = createToolRegistry([readTools, searchTools, writeTools, () => shellTools().filter(({ name }) => name === 'Bash'), chatTaskTools,
+				...(skills ? [skillTools] : []), ...(withPlanTools ? [planTools] : []), ...(withGoalTools ? [goalTools] : [])]);
 			const models = createModelCoordinator({ stream, contextLimits: modelService?.contextLimits }, createContextBuilder(registry));
 			const tools = createToolCoordinator(app, createToolExecutor(registry));
 			const runtime: RuntimeLayer = {
@@ -158,7 +180,7 @@ void test('video service converts an attachment, requires a media receipt, and r
 		mainRequests.push(request);
 		assert.equal(request.model, firstModel.model);
 		assert.equal(request.video, undefined);
-		assert.match(request.messages[0]?.content ?? '', /\[00:00\] A red screen/u);
+		assert.match(requestText(request), /\[00:00\] A red screen/u);
 		return reply('主模型完成。');
 	};
 	const submits = connect(answer, settings, undefined, service);
@@ -206,7 +228,7 @@ void test('a link-only video model handles HTTPS embeds while local attachments 
 	const sessions = connect((request) => {
 		assert.equal(request.model, firstModel.model);
 		assert.equal(request.video?.hasFiles, true);
-		assert.match(request.messages[0]?.content ?? '', /\[00:01\] Link scene/u);
+		assert.match(requestText(request), /\[00:01\] Link scene/u);
 		return reply('处理完成。');
 	}, {
 		...firstModel, videoLinkModel: remoteModel,
@@ -251,10 +273,11 @@ void test('video processing checkpoints each confirmed item and ignores quoted e
 	let pauseAtReceipt: (() => void) | undefined;
 	function reopen() {
 		return connect((request) => {
-			const analysis = request.messages.find((message) => message.role === 'user' && message.content.includes('视频模型的带时间戳解析'));
+			const analysis = request.messages.flatMap(({ promptSections }) => promptSections ?? [])
+				.find(({ tag, text }) => tag === 'reference-material' && text.includes('视频模型的带时间戳解析'));
 			assert.ok(analysis);
-			assert.match(analysis.content, /第一项/u);
-			assert.match(analysis.content, /第二项/u);
+			assert.match(analysis.text, /第一项/u);
+			assert.match(analysis.text, /第二项/u);
 			return reply('已完成');
 		}, settings, undefined, {
 			modelOrigin: () => 'https://video.example',
@@ -484,7 +507,7 @@ void test('plan and review do not regain write permissions and review sends only
 		({ id: `plan-read-${index}`, name: 'Read', input: { file_path } }));
 	const sessions = connect((request) => {
 		requests.push(request);
-		if (!request.messages.some(({ toolCallId }) => toolCallId === deniedWrite.id) && request.system?.includes('本次为只读计划模式')) {
+		if (!request.messages.some(({ toolCallId }) => toolCallId === deniedWrite.id) && activeMode(request).includes('本次为只读计划模式')) {
 			return reply('', [deniedWrite, ...planReads]);
 		}
 		return reply('说完了。');
@@ -498,21 +521,23 @@ void test('plan and review do not regain write permissions and review sends only
 	assert.equal(plan.messages.find(({ toolCallId }) => toolCallId === planReads[0]?.id)?.isError, true);
 	assert.match(plan.messages.find(({ toolCallId }) => toolCallId === planReads[1]?.id)?.content ?? '', /vault detail/);
 	await assert.rejects(access(join(cwd, 'forbidden.md')), { code: 'ENOENT' });
-	assert.deepEqual(requests.find(({ system }) => system?.includes('本次为只读计划模式'))?.tools.map(({ name }) => name).sort(),
-		['Glob', 'Grep', 'Read', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate']);
+	const planRequest = requests.find((request) => activeMode(request).includes('本次为只读计划模式'));
+	assert.deepEqual(planRequest?.tools, requests[0]?.tools);
+	assert.ok(planRequest?.tools.some(({ name }) => name === 'Write'));
 	const reviewMaterial = 'selected snapshot';
 	await sessions.submit({ conversationId, intent: 'review', instruction: '检查事实', refs: [], reviewMaterial }, {}, undefined,
 		{ executionMode: 'full-access' }).result;
 	const review = requests.at(-1)!;
-	assert.match(review.system ?? '', /本次为只读笔记检查/);
-	assert.doesNotMatch(review.system ?? '', /vault style/);
+	assert.match(activeMode(review), /本次为只读笔记检查/);
+	assert.equal(review.system, planRequest?.system);
+	assert.doesNotMatch(requestText(review), /vault style|unrelated prior history/);
 	assert.deepEqual(review.tools, []);
 	assert.equal(review.messages.length, 2);
 	assert.equal(review.messages[0]?.content, '检查事实');
-	assert.match(review.messages[1]?.content ?? '', /selected snapshot/);
+	assert.match(requestText(review), /selected snapshot/);
 	assert.equal((await createConversationStore(directory).load(conversationId)).runs.at(-1)?.request.reviewMaterial, reviewMaterial);
 	await sessions.submit({ conversationId, instruction: '下一个普通问题', refs: [] }).result;
-	assert.ok(requests.at(-1)?.messages.every(({ content }) => !content.includes(reviewMaterial)));
+	assert.doesNotMatch(requestText(requests.at(-1)), /selected snapshot/);
 });
 
 void test('a planned checklist stays locked until confirmed, releases stopped work and survives reopening', async (t) => {
@@ -566,40 +591,91 @@ void test('a planned checklist stays locked until confirmed, releases stopped wo
 	reopened.dispose();
 });
 
-void test('a confirmed plan keeps its attachments and a saved goal resumes with checked evidence', async (t) => {
+const goalEndpoint = 'https://model.example/v1/chat/completions';
+
+function confirmGoalEndpoint(request: ModelRequest, address = goalEndpoint + '?route=original-private-query') {
+	return confirmModelRequest(new URL(address), { beforeSend: request.beforeSend, controller: new AbortController() });
+}
+
+function atGoalEndpoint(request: ModelRequest, stream: ModelStream): ModelStream {
+	return { ...stream, async *[Symbol.asyncIterator]() {
+		await confirmGoalEndpoint(request);
+		yield* stream;
+	} };
+}
+
+void test('a confirmed plan keeps its attachments and a structured goal report survives reopening with checked evidence', async (t) => {
 	const { cwd, connect, directory } = await fixture(t);
 	const source = '会议.md';
 	const index = '索引.md';
 	const body = '# 整理会议纪要\n\n## 执行范围\n- 核对会议日期并生成索引。\n\n## 验收条件\n- 核对 [[会议.md]] 的会议日期\n- 生成 [[索引.md]]';
-	await writeFile(join(cwd, source), '# 会议\n\n日期是 11 月 23 日。');
+	await writeFile(join(cwd, source), '# 会议\n\n日期是 11 月 23 日。\n\n附录：无关会议段落不应外发。\n');
 	const write = { id: 'index-write', name: 'Write', input: { file_path: index, content: '# 会议索引\n\n[[会议.md]]' } };
 	const read = { id: 'source-read', name: 'Read', input: { file_path: source } };
-	const sessions = connect((request) => {
-		if (request.system?.includes('本次为只读计划模式')) {
-			assert.ok(!request.tools.some(({ name }) => name === 'Write'));
+	const reportDate = { id: 'report-date', name: reportGoalToolName, input: { intent: '报告日期核对结果',
+		checks: [{ criterion: 1, evidence: '日期是 11 月 23 日', notePaths: [source] }], remaining: ['生成 [[索引.md]]'] } };
+	const reportIndex = { id: 'report-index', name: reportGoalToolName, input: { intent: '报告索引核对结果',
+		checks: [{ criterion: 2, evidence: '索引包含会议纪要链接', notePaths: [index] }], remaining: [] } };
+	const outOfScopeReport = { ...reportDate, id: 'out-of-scope-report' };
+	const invalidReport = { ...reportDate, id: 'invalid-report', input: { ...reportDate.input, checks: [{ criterion: 3, evidence: '错误编号' }] } };
+	const duplicateReport = { ...reportDate, id: 'duplicate-report', input: { ...reportDate.input, remaining: [], blocked: '不应覆盖已登记报告' } };
+	let outputLegacyReport = false;
+	const stream = (request: ModelRequest) => {
+		const mode = activeMode(request);
+		const reportTool = request.tools.find(({ name }) => name === reportGoalToolName);
+		if (mode.includes('本次为只读计划模式')) {
+			assert.ok(request.tools.some(({ name }) => name === 'Write'));
+			assert.equal(reportTool, undefined);
 			return reply(`<!-- scribe-plan -->\n${body}\n<!-- /scribe-plan -->`);
 		}
-		const userIndex = request.messages.findLastIndex(({ role }) => role === 'user');
-		const currentUser = request.messages[userIndex]?.content ?? '';
+		const userIndex = request.messages.findLastIndex(({ role, content }) => role === 'user' && Boolean(content));
+		const user = request.messages[userIndex];
+		const currentUser = user ? promptText(user) : '';
 		const currentResults = request.messages.slice(userIndex);
-		if (!request.system?.includes('聊天目标的自动执行轮次')) {
+		if (!mode.includes('聊天目标的自动执行轮次')) {
+			assert.equal(reportTool, undefined);
 			assert.ok(currentUser.includes(body));
 			assert.ok(currentUser.includes('原始引文'));
+			const outOfScope = currentResults.find(({ toolCallId }) => toolCallId === outOfScopeReport.id);
+			if (!outOfScope) return reply('', [outOfScopeReport]);
+			assert.equal(outOfScope.isError, true);
 			return request.messages.some(({ toolCallId }) => toolCallId === write.id) ? reply('索引已生成。') : reply('', [write]);
 		}
+		assert.ok(reportTool);
+		assert.deepEqual(reportTool.inputSchema.required, ['checks', 'remaining', 'intent']);
 		assert.ok(currentUser.includes(body));
 		assert.ok(currentUser.includes('原始引文'));
 		if (!currentUser.includes('上轮已核对')) {
-			const readCurrent = currentResults.some(({ toolCallId }) => toolCallId === read.id);
-			return readCurrent ? reply('日期已核对。\n<!-- scribe-goal-report: {"checks":[{"criterion":1,"evidence":"日期是 11 月 23 日","notePaths":["会议.md"]}],"remaining":["生成 [[索引.md]]"]} -->')
-				: reply('', [read]);
+			if (!currentResults.some(({ toolCallId }) => toolCallId === read.id)) return reply('', [read]);
+			if (outputLegacyReport) return reply('日期已核对。\n<!-- scribe-goal-report: ' + JSON.stringify(reportDate.input) + ' -->');
+			const recorded = currentResults.find(({ toolCallId }) => toolCallId === reportDate.id);
+			if (!recorded) return reply('', [invalidReport, reportDate, duplicateReport]);
+			assert.equal(currentResults.find(({ toolCallId }) => toolCallId === invalidReport.id)?.isError, true);
+			assert.equal(currentResults.find(({ toolCallId }) => toolCallId === duplicateReport.id)?.isError, true);
+			assert.equal(recorded.isError, false);
+			return reply('日期已核对。');
 		}
 		assert.ok(currentUser.includes('日期是 11 月 23 日'));
 		const readIndex = { id: 'index-read', name: 'Read', input: { file_path: index } };
-		const readCurrent = currentResults.some(({ toolCallId }) => toolCallId === readIndex.id);
-		return readCurrent ? reply('索引已核对。\n<!-- scribe-goal-report: {"checks":[{"criterion":2,"evidence":"索引包含会议纪要链接","notePaths":["索引.md"]}],"remaining":[]} -->')
-			: reply('', [readIndex]);
-	});
+		if (!currentResults.some(({ toolCallId }) => toolCallId === readIndex.id)) return reply('', [readIndex]);
+		return currentResults.some(({ toolCallId, isError }) => toolCallId === reportIndex.id && !isError)
+			? reply('索引已核对。') : reply('', [reportIndex]);
+	};
+	let reviews = 0;
+	const sessions = connect((request) => atGoalEndpoint(request, stream(request)), firstModel, undefined, {
+		async send(request) {
+			await confirmGoalEndpoint(request);
+			assert.deepEqual(request.tools, []);
+			assert.deepEqual([request.providerId, request.model], [firstModel.providerId, firstModel.model]);
+			const material = request.messages[0]!.content;
+			assert.match(material, /日期是 11 月 23 日/u);
+			assert.match(material, /会议索引/u);
+			assert.equal((JSON.parse(material) as {notes: Record<string, {whole: boolean}[]>}).notes[source]?.[0]?.whole, false);
+			assert.doesNotMatch(material, /原始引文|scribe-goal-report|fixture-vault-config|上轮已核对|无关会议段落不应外发/u);
+			reviews++;
+			return reply('["日期是 11 月 23 日","[[会议.md]]"]').result();
+		},
+	}, false, false, true);
 	t.after(() => sessions.dispose());
 	const conversationId = await sessions.createConversation();
 	const store = createConversationStore(directory);
@@ -624,8 +700,12 @@ void test('a confirmed plan keeps its attachments and a saved goal resumes with 
 		criteria: plan.criteria, plan: plan.markdown, refs: plan.request.refs, chatQuotes: plan.request.chatQuotes };
 	await store.saveGoal(conversationId, goal);
 	const runGoal = (value: ChatGoal) => sessions.submit({ conversationId, instruction: value.objective, refs: value.refs ?? [],
-		chatQuotes: value.chatQuotes, goalRound: true, goalContext: goalRoundInstruction(value) }, {}, undefined, { executionMode: 'ask' }).result;
-	const checkpoint = finishGoalRound({ ...goal, usedRounds: 1, totalRounds: 1 }, await runGoal(goal));
+		chatQuotes: value.chatQuotes, goalRound: true, goalContext: goalRoundInstruction(value) }, {}, undefined, { executionMode: 'ask', goal: value }).result;
+	const firstRound = await runGoal(goal);
+	const checkpoint = finishGoalRound({ ...goal, usedRounds: 1, totalRounds: 1 }, firstRound);
+	const savedRound = (await createConversationStore(directory).load(conversationId)).runs.at(-1)!.state;
+	assert.equal(savedRound.messages.at(-1)?.content, '日期已核对。');
+	assert.ok(savedRound.messages.some(({ toolCallId, isError }) => toolCallId === reportDate.id && isError === false));
 	assert.equal(checkpoint.status, 'active');
 	assert.equal(checkpoint.progress?.checks.length, 1);
 	assert.deepEqual(checkpoint.progress?.remaining, ['生成 [[索引.md]]']);
@@ -635,9 +715,179 @@ void test('a confirmed plan keeps its attachments and a saved goal resumes with 
 	assert.equal(restored.status, 'paused');
 	assert.deepEqual(restored.progress, checkpoint.progress);
 	const resumed = { ...restored, status: 'active' as const, usedRounds: 1, totalRounds: 2 };
-	const completed = finishGoalRound(resumed, await runGoal(resumed));
+	const result = await runGoal(resumed);
+	const completed = finishGoalRound(resumed, result, result.goalReview);
+	assert.equal(reviews, 1);
+	assert.deepEqual((await store.load(conversationId)).runs.at(-1)?.state.auxiliaryUsage?.map(({kind}) => kind), ['goal-review']);
 	assert.equal(completed.status, 'complete');
 	assert.equal(completed.progress?.checks.length, 2);
+
+	outputLegacyReport = true;
+	const unconfirmed = await runGoal(goal);
+	assert.equal(unconfirmed.messages.at(-1)?.goalReportRequired, true);
+	assert.deepEqual(finishGoalRound(goal, unconfirmed).progress?.checks, []);
+	const reopened = (await createConversationStore(directory).load(conversationId)).runs.at(-1)!.state;
+	assert.deepEqual(finishGoalRound(goal, reopened).progress?.checks, []);
+});
+
+for (const scenario of ['approved', 'unsupported', 'rejected', 'failed', 'stopped', 'redirected', 'query-changed', 'changed'] as const) {
+	void test(`semantic goal review keeps the original recipient, evidence scope and usage when ${scenario}`, async (t) => {
+		const { cwd, connect, directory } = await fixture(t);
+		const path = '报告.md';
+		const criterion = '说明报告为何适合初学者。';
+		const goal: ChatGoal = { objective: criterion, criteria: [criterion], refs: [{ path, lines: [2, 2] }],
+			status: 'active', usedRounds: 1, totalRounds: 1 };
+		const writeSource = (body: string) => writeFile(join(cwd, path), '隐藏行 A\n' + body + '\n隐藏行 B\n');
+		await writeSource('先举例再介绍术语。');
+		const report = '主助手的自述。\n<!-- scribe-goal-report: ' + JSON.stringify({
+			checks: [{criterion: 1, evidence: '主助手声称验收通过', notePaths: [path]}], remaining: [],
+		}) + ' -->';
+		let sent = 0;
+		let reviewing!: () => void;
+		const started = new Promise<void>((resolve) => { reviewing = resolve; });
+		let finish!: () => void;
+		const release = new Promise<void>((resolve) => { finish = resolve; });
+		const sessions = connect((request) => atGoalEndpoint(request, request.messages.at(-1)?.toolCallId === 'read-goal-proof'
+			? reply(report) : reply('', [{ id: 'read-goal-proof', name: 'Read', input: { file_path: path } }])), firstModel, undefined, {
+			async send(request, receipt) {
+				await confirmGoalEndpoint(request, scenario === 'redirected' ? goalEndpoint + '/unexpected'
+					: scenario === 'query-changed' ? goalEndpoint + '?route=another-private-query' : undefined);
+				sent++;
+				const payload = request.messages[0]!.content;
+				assert.deepEqual(request.tools, []);
+				assert.equal(request.messages.length, 1);
+				assert.match(payload, /先举例再介绍术语。/u);
+				assert.doesNotMatch(payload, /隐藏行|主助手|资料之外的引文|private-query/u);
+				assert.equal(request.maxRetries, 0);
+				receipt?.({ reportedUsage: {input: 5} });
+				if (scenario === 'failed') throw new Error('服务暂不可用');
+				if (scenario === 'stopped') { reviewing(); await release; }
+				if (scenario === 'changed') await writeSource('材料已经变化');
+				return reply(scenario === 'unsupported' ? '["并不存在的引语"]' : scenario === 'rejected' ? '[null]' : '["先举例再介绍术语。"]').result();
+			},
+		});
+		t.after(() => sessions.dispose());
+		const id = await sessions.createConversation();
+		const request = { conversationId: id, instruction: criterion, refs: goal.refs!, chatQuotes: ['资料之外的引文'] };
+		await sessions.submit(request, {}, undefined, { goal }).result;
+		assert.equal(sent, 0, '普通聊天不能启动独立验收');
+		// 私有历史会与后续目标共享同一模型，但不会进入辅助请求。
+		const run = sessions.submit({ ...request, goalRound: true, goalContext: goalRoundInstruction(goal) }, {}, undefined, { goal });
+		if (scenario === 'stopped') {
+			await Promise.race([started, run.result.then(() => assert.fail('未启动目标验收'))]);
+			await sessions.cancel(run.taskId);
+		}
+		const result = await run.result;
+		if (scenario === 'stopped') {
+			const beforeReply = (await createConversationStore(directory).load(id)).runs.at(-1)?.state.auxiliaryUsage;
+			assert.deepEqual(beforeReply, [{kind: 'goal-review', reportedUsage: {input: 5}}]);
+			finish();
+		}
+		assert.equal(sent, scenario === 'redirected' || scenario === 'query-changed' ? 0 : 1);
+		const next = finishGoalRound(goal, result, result.goalReview);
+		assert.equal(next.status, scenario === 'approved' ? 'complete' : 'paused');
+		if (scenario !== 'approved' && scenario !== 'stopped') assert.equal(next.reason, 'verification');
+		const usage = (await createConversationStore(directory).load(id)).runs.at(-1)?.state.auxiliaryUsage;
+		assert.equal(usage?.length ?? 0, sent);
+		if (sent) { assert.equal(usage?.[0]?.kind, 'goal-review'); assert.equal(usage?.[0]?.reportedUsage?.input, 5); }
+	});
+}
+
+void test('goal review verifies each cited note and the actual exit status of a named foreground command', async (t) => {
+	const {cwd, connect} = await fixture(t);
+	const paths = ['甲.md', '乙.md'];
+	await Promise.all(paths.map((path, i) => writeFile(join(cwd, path), ['甲的原文', '乙的原文'][i]! + '\n')));
+	const command = 'test -f 甲.md';
+	const criteria = ['两篇笔记都应说明结论。', '运行「test -f 甲.md」应成功。'];
+	const goal: ChatGoal = {objective: '复核产物', criteria, status: 'active', usedRounds: 1, totalRounds: 1};
+	const calls = [...paths.map((path, i) => ({id: 'proof' + i, name: 'Read', input: {file_path: path}})),
+		{id: 'check-note', name: 'Bash', input: {command}}];
+	const report = '全部完成。\n<!-- scribe-goal-report: ' + JSON.stringify({checks: [
+		{criterion: 1, evidence: '两个结论已经核对', notePaths: paths}, {criterion: 2, evidence: '运行测试通过'},
+	], remaining: []}) + ' -->';
+	let enough = false;
+	let reviewed = 0;
+	const sessions = connect((request) => atGoalEndpoint(request,
+		request.messages.at(-1)?.toolCallId === 'check-note' ? reply(report) : reply('', calls)), firstModel, undefined, {
+		async send(request) {
+			await confirmGoalEndpoint(request);
+			const evidence = JSON.parse(request.messages[0]!.content) as {commands: unknown; answer?: string; notes: Record<string,{whole: boolean}[]>};
+			assert.deepEqual(evidence.commands, [{command, status: 'success'}]);
+			assert.equal(evidence.answer, undefined);
+			assert.ok(evidence.notes['甲.md']?.[0]?.whole && evidence.notes['乙.md']?.[0]?.whole);
+			reviewed++;
+			return reply(JSON.stringify([[enough ? '甲的原文' : '乙的原文', '乙的原文'], 'success'])).result();
+		},
+	});
+	t.after(() => sessions.dispose());
+	const id = await sessions.createConversation();
+	const run = () => sessions.submit({conversationId: id, instruction: goal.objective, refs: [], goalRound: true, goalContext: goalRoundInstruction(goal)},
+		{approve: async () => true}, undefined, {goal, executionMode: 'full-access'}).result;
+	const first = await run();
+	assert.equal(first.goalReview, 'needs-evidence');
+	enough = true;
+	const second = await run();
+	assert.equal(second.goalReview, 'passed');
+	assert.equal(reviewed, 2);
+});
+
+void test('mechanical goal completion checks the current note locally before accepting the earlier receipt', async (t) => {
+	const { cwd, connect } = await fixture(t);
+	const path = '校验.md';
+	const criterion = '[[校验.md]] 的标题应为「交付」';
+	const goal: ChatGoal = {objective: criterion, criteria: [criterion], status: 'active', usedRounds: 1, totalRounds: 1};
+	const report = '已检查。\n<!-- scribe-goal-report: ' + JSON.stringify({
+		checks: [{criterion: 1, evidence: '标题为交付', notePaths: [path]}], remaining: [],
+	}) + ' -->';
+	let change = true;
+	let calls = 0;
+	const sessions = connect((request) => {
+		const read = request.messages.at(-1)?.toolCallId === 'heading';
+		const stream = atGoalEndpoint(request, read ? reply(report) : reply('', [{id: 'heading', name: 'Read', input: {file_path: path}}]));
+		return { ...stream, async *[Symbol.asyncIterator]() {
+			if (change && read) await writeFile(join(cwd, path), '# 已由用户更改\n');
+			yield* stream;
+		} };
+	}, firstModel, undefined, { send: () => { calls++; throw new Error('unexpected remote check'); } });
+	t.after(() => sessions.dispose());
+	const id = await sessions.createConversation();
+	for (change of [true, false]) {
+		await writeFile(join(cwd, path), '# 交付\n');
+		const result = await sessions.submit({conversationId: id, instruction: criterion, refs: [], goalRound: true, goalContext: goalRoundInstruction(goal)},
+			{}, undefined, {goal}).result;
+		assert.equal(finishGoalRound(goal, result, result.goalReview).status, change ? 'paused' : 'complete');
+	}
+	assert.equal(calls, 0);
+});
+
+void test('a whole-note semantic criterion keeps both paragraphs or pauses if the complete evidence is too long', async (t) => {
+	const {cwd, connect} = await fixture(t);
+	const path = '稿件.md';
+	const criterion = '确认全文的日期口径一致。';
+	const goal: ChatGoal = {objective: criterion, status: 'active', criteria: [criterion], usedRounds: 1, totalRounds: 1};
+	const report = '已检查。\n<!-- scribe-goal-report: ' + JSON.stringify({checks: [
+		{criterion: 1, evidence: '「日期为三日」', notePaths: [path]},
+	], remaining: []}) + ' -->';
+	let reviews = 0;
+	const sessions = connect((request) => atGoalEndpoint(request, dialogMessages(request).at(-1)?.toolCallId === 'read-all'
+		? reply(report) : reply('', [{id: 'read-all', name: 'Read', input: {file_path: path}}])), firstModel, undefined, {
+		async send(request) {
+			await confirmGoalEndpoint(request);
+			reviews++;
+			assert.match(request.messages[0]!.content, /日期为三日/u);
+			assert.match(request.messages[0]!.content, /文末写作二日/u);
+			return reply('[null]').result();
+		},
+	});
+	t.after(() => sessions.dispose());
+	const id = await sessions.createConversation();
+	for (const filler of ['', '大量其余内容'.repeat(1200)]) {
+		await writeFile(join(cwd, path), '日期为三日。\n\n' + filler + '文末写作二日。');
+		const result = await sessions.submit({conversationId: id, instruction: criterion, refs: [], goalRound: true, goalContext: goalRoundInstruction(goal)},
+			{}, undefined, {goal}).result;
+		assert.equal(result.goalReview, 'needs-evidence');
+	}
+	assert.equal(reviews, 1);
 });
 
 void test('goal work stops while a tool waits for the user and resumes for actual work', async (t) => {
@@ -694,21 +944,22 @@ void test('each question reads only the vault root writing rules with or without
 
 	setActiveNote('会议/项目/纪要.md');
 	const meeting = await ask({ refs: [{ path: '会议/项目/纪要.md' }] });
-	assert.match(meeting.system ?? '', /全库用短段落/u);
-	assert.doesNotMatch(meeting.system ?? '', /会议用项目符号|列出负责人/u);
-	assert.doesNotMatch(JSON.stringify(meeting.messages), /全库用短段落/u);
+	assert.match(requestText(meeting), /<project-rules>[\s\S]*全库用短段落/u);
+	assert.doesNotMatch(requestText(meeting), /会议用项目符号|列出负责人/u);
+	assert.doesNotMatch(meeting.system ?? '', /全库用短段落/u);
 
 	const noAttachment = await ask();
-	assert.match(noAttachment.system ?? '', /全库用短段落/u);
-	assert.doesNotMatch(noAttachment.system ?? '', /会议用项目符号|列出负责人/u);
+	assert.match(requestText(noAttachment), /<project-rules>[\s\S]*全库用短段落/u);
+	assert.doesNotMatch(requestText(noAttachment), /会议用项目符号|列出负责人/u);
 
 	await writeFile(join(cwd, 'AGENTS.md'), '全库改用表格。');
 	const edited = await ask({ refs: [{ path: '会议', kind: 'folder' }] });
-	assert.match(edited.system ?? '', /全库改用表格/u);
-	assert.doesNotMatch(edited.system ?? '', /全库用短段落|会议用项目符号/u);
+	assert.match(requestText(edited), /<project-rules>[\s\S]*全库改用表格/u);
+	assert.doesNotMatch(requestText(edited), /会议用项目符号/u);
+	assert.equal(edited.system, meeting.system);
 
 	await writeFile(join(cwd, 'AGENTS.md'), '');
-	assert.doesNotMatch((await ask()).system ?? '', /全库改用表格|会议用项目符号|列出负责人/u);
+	assert.doesNotMatch(requestText(await ask()), /全库改用表格|会议用项目符号|列出负责人/u);
 	assert.deepEqual([...new Set(ruleLookups)], ['AGENTS.md']);
 });
 
@@ -755,7 +1006,7 @@ void test('a long chat keeps its confirmed decision and counts the summary and a
 	const deniedUsage = { reportedUsage: { prompt: 65, input: 60, cacheRead: 5, output: 7 } };
 	const summaryUsage = { reportedUsage: { prompt: 80, input: 60, cacheRead: 10, cacheWrite: 10, output: 12 }, total: 0.03125 };
 	const service: Pick<ModelService, 'send' | 'contextLimits'> = {
-		contextLimits: () => ({ contextWindow: 12_000, maxTokens: 1_024 }),
+		contextLimits: () => ({ contextWindow: 18_000, maxTokens: 1_024 }),
 		async send(request) {
 			if (request.system?.includes('你是独立审批员')) {
 				reviewed.push(request);
@@ -780,7 +1031,7 @@ void test('a long chat keeps its confirmed decision and counts the summary and a
 	};
 	const stream = (request: ModelRequest) => {
 		captured.push(request);
-		const latest = request.messages.at(-1);
+		const latest = dialogMessages(request).at(-1);
 		if (latest?.role === 'tool' && latest.toolCallId === read.id) {
 			assert.match(latest.content, /银杏-27[\s\S]*RAW-NOTE-42/u);
 			return reply('已核对纪要。');
@@ -792,10 +1043,10 @@ void test('a long chat keeps its confirmed decision and counts the summary and a
 			assert.equal(latest.isError, recalls !== 1);
 			if (recalls === 1) assert.match(latest.content, /通过审核的示例材料/u);
 			else assert.doesNotMatch(latest.content, /拒绝后不得读取的示例材料/u);
-			const summary = request.messages.find(({ role, content }) => role === 'user' && content.startsWith('较早对话摘要（仅供参考）'));
-			const batch = /决定：([^。]+)。/u.exec(summary?.content ?? '')?.[1];
-			const source = /出处：(\[\[[^\]]+\]\])/u.exec(summary?.content ?? '')?.[1];
-			const pending = /待办：([^。]+)。/u.exec(summary?.content ?? '')?.[1];
+			const summary = request.messages.map(promptText).find((text) => text.includes('较早对话摘要（仅供参考）')) ?? '';
+			const batch = /决定：([^。]+)。/u.exec(summary)?.[1];
+			const source = /出处：(\[\[[^\]]+\]\])/u.exec(summary)?.[1];
+			const pending = /待办：([^。]+)。/u.exec(summary)?.[1];
 			return reply(batch && source && pending ? `交付批次是${batch}，见 ${source}。还需${pending}。` : '找不到旧决定。', [], afterReview);
 		}
 		return reply('简短回答。');
@@ -836,9 +1087,9 @@ void test('a long chat keeps its confirmed decision and counts the summary and a
 	const usage = runUsage(recalled);
 	assert.ok(usage);
 	assert.deepEqual(usage.byKind, {
-		main: { count: 2, input: 300, cacheRead: 70, cacheWrite: 15, output: 50, total: 435, hit: 70 / 385, cost: 0.375 },
-		review: { count: 1, input: 70, cacheRead: 25, cacheWrite: 5, output: 5, total: 105, hit: 0.25, cost: 0.0625 },
-		summary: { count: 1, input: 60, cacheRead: 10, cacheWrite: 10, output: 12, total: 92, hit: 0.125, cost: 0.03125 },
+		main: { count: 2, prompt: 385, input: 300, cacheRead: 70, cacheWrite: 15, output: 50, total: 435, hit: 70 / 385, cost: 0.375 },
+		review: { count: 1, prompt: 100, input: 70, cacheRead: 25, cacheWrite: 5, output: 5, total: 105, hit: 0.25, cost: 0.0625 },
+		summary: { count: 1, prompt: 80, input: 60, cacheRead: 10, cacheWrite: 10, output: 12, total: 92, hit: 0.125, cost: 0.03125 },
 	});
 	assert.deepEqual({ count: usage.count, input: usage.input, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite,
 		output: usage.output, total: usage.total, hit: usage.hit, cost: usage.cost },
@@ -870,14 +1121,263 @@ void test('a long chat keeps its confirmed decision and counts the summary and a
 	assert.equal(repeatedUsage.byKind.summary, undefined);
 	assert.equal(repeatedUsage.cacheWrite, undefined);
 	assert.equal(repeatedUsage.cost, undefined);
+	assert.deepEqual(repeatedUsage.partial?.cost, { value: 0.375, reported: 2 });
+	assert.deepEqual(repeatedUsage.partial?.cacheWrite, { value: 15, reported: 2 });
 	const combined = conversationMetrics([savedRecall, repeated]).usage;
 	assert.equal(combined?.count, 7);
 	assert.equal(combined.total, 1139);
 	assert.equal(combined.cost, undefined);
+	assert.deepEqual(combined.partial?.cost, { value: 0.84375, reported: 6 });
 	assert.equal(combined.byKind.summary?.count, 1);
 	assert.equal(combined.byKind.review?.count, 2);
 	assert.equal(summarized.length, 1);
 	assert.equal(reviewed.length, 2);
+});
+
+void test('reconnecting without a usage receipt keeps the known per-run and whole-chat usage after reopening', async (t) => {
+	const { connect } = await fixture(t);
+	const initial = { reportedUsage: { input: 20, cacheRead: 4, cacheWrite: 0, output: 6 }, total: 0.25 };
+	const recovered = { reportedUsage: { input: 32, cacheRead: 8, cacheWrite: 0, output: 10 }, total: 0.5 };
+	let requests = 0;
+	const sessions = connect((request) => {
+		switch (++requests) {
+			case 1: return reply('第一轮完成。', [], initial);
+			case 2: {
+				const disconnected = reply('');
+				return { ...disconnected,
+					async *[Symbol.asyncIterator]() {
+						await request.beforeSend?.('https://fixture.test/chat');
+						yield* disconnected;
+					},
+					result: () => Promise.reject(new RetryableModelError('connection interrupted')),
+				};
+			}
+			case 3: return reply('已重连并完成。', [], recovered);
+			default: throw new Error('多余的模型请求');
+		}
+	});
+	const id = await sessions.createConversation();
+	const ask = (instruction: string) => sessions.submit({ conversationId: id, instruction, refs: [] }).result;
+	const first = await ask('开始第一轮');
+	const retried = await ask('开始第二轮');
+	assert.equal(first.status, 'done');
+	assert.equal(retried.status, 'done', retried.error);
+	assert.equal(requests, 3);
+	assert.deepEqual(retried.auxiliaryUsage, [{ kind: 'main-attempt' }]);
+	assert.deepEqual(retried.messages.at(-1)?.reportedUsage, recovered.reportedUsage);
+	sessions.dispose();
+	const reopened = connect(() => assert.fail('重开聊天不应调用模型'));
+	t.after(() => reopened.dispose());
+	const saved = await reopened.openConversation(id);
+	assert.equal(saved?.runs.length, 2);
+	const states = saved.runs.map(({ state }) => state);
+	const round = runUsage(states[1]!);
+	const whole = conversationMetrics(states).usage;
+	assert.deepEqual(round, runUsage(retried));
+	assert.deepEqual(whole, conversationMetrics([first, retried]).usage);
+	assert.ok(round && whole);
+	assert.equal(round.count, 2);
+	assert.equal(round.total, undefined);
+	assert.deepEqual(round.partial?.total, { value: 50, reported: 1 });
+	assert.deepEqual(round.partial?.cacheWrite, { value: 0, reported: 1 });
+	assert.deepEqual(round.partial?.cost, { value: 0.5, reported: 1 });
+	assert.deepEqual(whole.byKind.main?.partial, whole.partial);
+	assert.equal(whole.count, 3);
+	assert.deepEqual(whole.partial?.input, { value: 52, reported: 2 });
+	assert.deepEqual(whole.partial?.prompt, { value: 64, reported: 2 });
+	assert.deepEqual(whole.partial?.cacheRead, { value: 12, reported: 2 });
+	assert.deepEqual(whole.partial?.output, { value: 16, reported: 2 });
+	assert.deepEqual(whole.partial?.hit, { value: 12 / 64, reported: 2 });
+	assert.deepEqual(whole.partial?.total, { value: 80, reported: 2 });
+	assert.deepEqual(whole.partial?.cost, { value: 0.75, reported: 2 });
+});
+
+void test('streamed usage estimates input at transmission and keeps per-attempt usage across retries and reopening', async (t) => {
+	const { connect } = await fixture(t);
+	const interrupted = '相同的开头，仍在输出。';
+	const recovered = '相同的开头，重试完成。';
+	const beforeUpdate = '这段正文已计入下一次累计回执。';
+	let markSent = () => {};
+	let returnResponse = () => {};
+	const requestSent = new Promise<void>((resolve) => { markSent = resolve; });
+	const responseAllowed = new Promise<void>((resolve) => { returnResponse = resolve; });
+	let releaseBody = () => {};
+	const bodyAllowed = new Promise<void>((resolve) => { releaseBody = resolve; });
+	const attempts = [
+		{ snapshots: [], content: '', complete: true, final: 0, prompt: 7 },
+		{ snapshots: [0], content: interrupted, complete: false, holdBody: true, prompt: 40 }, { snapshots: [], content: recovered, complete: true, final: 30 },
+		{ snapshots: [4, 12], beforeUpdate, content: interrupted, complete: false }, { snapshots: [], content: recovered, complete: true, final: 30, omitPrompt: true },
+		{ snapshots: [0], content: '仅在开头报告过零。', complete: true },
+		{ snapshots: [0], content: '结尾重新报告了零。', complete: true, final: 0 },
+		{ snapshots: [], content: interrupted, complete: false }, { snapshots: [], content: recovered, complete: true, final: 30 },
+	];
+	let requests = 0;
+	const model = createModelService({
+		read: async () => undefined, list: async () => [], modify: async (_provider, fn) => fn(undefined), delete: async () => {},
+	}, {
+		configure() {}, onStatus: () => () => {}, logs: () => [],
+		fetch: async () => {
+			const attempt = attempts[requests++];
+			assert.ok(attempt, 'unexpected model request');
+			if (attempt.holdBody) {
+				markSent();
+				await responseAllowed;
+			}
+			const chunk = (output: number | undefined, content = '', kind: 'delta' | 'stop' | 'usage' = 'delta') => 'data: ' + JSON.stringify({
+				id: 'request-' + requests, model: firstModel.model, object: 'chat.completion.chunk', created: 1,
+				choices: kind === 'usage' ? [] : [{ index: 0, delta: { content }, finish_reason: kind === 'stop' ? 'stop' : null }],
+				...(output !== undefined && { usage: { completion_tokens: output, ...(!attempt.omitPrompt && { prompt_tokens: attempt.prompt ?? 0 }) } }),
+			}) + '\n\n';
+			const body = chunk(undefined, attempt.content);
+			const frames = attempt.snapshots.map((value) => chunk(value));
+			if (attempt.beforeUpdate) frames.splice(1, 0, chunk(undefined, attempt.beforeUpdate));
+			frames.push(body);
+			if (attempt.holdBody) frames.push(chunk(0));
+			if (attempt.complete) frames.push(chunk(undefined, '', 'stop'));
+			if (attempt.final !== undefined) frames.push(chunk(attempt.final, '', 'usage'), 'data: [DONE]\n\n');
+			return new Response(new ReadableStream<Uint8Array>({
+				async pull(controller) {
+					const frame = frames.shift();
+					if (frame === body && attempt.holdBody) await bodyAllowed;
+					if (frame) controller.enqueue(new TextEncoder().encode(frame));
+					else if (attempt.complete) controller.close();
+					else controller.error(new Error('upstream stream was interrupted'));
+				},
+			}, { highWaterMark: 0 }), { headers: { 'content-type': 'text/event-stream' } });
+		},
+	}, { customProviders: () => [{ id: firstModel.providerId, label: 'Usage test', models: [firstModel.model],
+		baseUrl: 'https://usage-fixture.invalid/v1', protocol: 'openai-completions' }] });
+	const sessions = connect((request, onUsage) => model.stream(request, onUsage));
+	t.after(() => sessions.dispose());
+	const id = await sessions.createConversation();
+	const live: RunState[] = [];
+	const retries: { shown: string; usage: ReturnType<typeof runUsage> }[] = [];
+	const output = (usage: ReturnType<typeof runUsage>) => usage?.output ?? usage?.partial?.output?.value;
+	const prompt = (usage: ReturnType<typeof runUsage>) => usage?.prompt ?? usage?.partial?.prompt?.value;
+	const retryInputs: number[] = [];
+	let inputWithoutReceipt: number | undefined;
+	const confirmedZeroUpdates: number[] = [];
+	for (const instruction of ['空答复', '从零开始的快照', '多次累计快照', '丢失最终用量', '最终重新确认零', '只收到正文']) {
+		let displayed = emptyExecution;
+		let shown = '';
+		let received = () => {};
+		const firstReceipt = new Promise<void>((resolve) => { received = resolve; });
+		const pending = sessions.submit({ conversationId: id, instruction, refs: [] }, {
+			onEvent(event) {
+				displayed = updateExecution(displayed, event);
+				if (event.type === 'text-delta') shown += event.text;
+				const usage = displayed.state ? runUsage(displayed.state) : undefined;
+				const displayedOutput = output(usage);
+				const displayedPrompt = prompt(usage);
+				if (instruction === '最终重新确认零' && displayedOutput !== undefined) confirmedZeroUpdates.push(displayedOutput);
+				if (instruction === '从零开始的快照' && usage?.count === 2 && displayedPrompt !== undefined) retryInputs.push(displayedPrompt);
+				if (instruction === '多次累计快照' && usage?.count === 2 && inputWithoutReceipt === undefined) inputWithoutReceipt = displayedPrompt;
+				if (displayedPrompt === 40 && displayedOutput === 0 && !shown) received();
+				if (event.type === 'model-retry') retries.push({ shown, usage });
+			},
+		});
+		if (instruction === '从零开始的快照') {
+			const timeout = timers.setTimeout(releaseBody, 5000);
+			try {
+				await Promise.race([requestSent, pending.result.then(() => assert.fail('请求应当已发出'))]);
+				assert.ok(displayed.state);
+				const sent = runUsage(displayed.state);
+				const estimate = prompt(sent);
+				assert.ok(estimate !== undefined && estimate > 0, '收到首个响应帧前应显示输入估算');
+				assert.equal(sent?.count, 1);
+				assert.equal(shown, '');
+				const duringSend = conversationMetrics([...live, displayed.state]).usage;
+				assert.equal(duringSend?.count, 2);
+				assert.equal(prompt(duringSend), 7 + estimate);
+				returnResponse();
+				await Promise.race([firstReceipt, pending.result.then(() => assert.fail('正文到达前应当显示服务商回执'))]);
+				assert.equal(shown, '');
+				assert.ok(displayed.state);
+				const current = runUsage(displayed.state);
+				assert.equal(current?.count, 1);
+				assert.equal(output(current), 0);
+				assert.equal(current.cacheWrite ?? current.partial?.cacheWrite?.value, undefined);
+				const chat = conversationMetrics([...live, displayed.state]).usage;
+				assert.equal(chat?.count, 2);
+				assert.equal(prompt(chat), 47);
+				assert.equal(output(chat), 0);
+			} finally {
+				timers.clearTimeout(timeout);
+				returnResponse();
+				releaseBody();
+				await pending.result;
+			}
+		}
+		const state = await pending.result;
+		assert.equal(state.status, 'done', state.error);
+		live.push(state);
+	}
+	assert.equal(requests, 9);
+	assert.equal(retries.length, 3);
+	assert.ok(retryInputs.some((value) => value > 40), '重试发送后应保留之前已报告的 40 并加上新请求估算');
+	assert.equal(retryInputs.at(-1), 40);
+	assert.ok(confirmedZeroUpdates.includes(Math.ceil('结尾重新报告了零。'.length / 3.5)));
+	assert.equal(confirmedZeroUpdates.at(-1), 0);
+	const tailTokens = Math.ceil(interrupted.length / 3.5);
+	for (const [index, retry] of retries.entries()) {
+		assert.equal(retry.shown, index === 1 ? beforeUpdate + interrupted : interrupted);
+		assert.equal(retry.usage?.count, 1);
+		assert.equal(output(retry.usage), (index === 1 ? 12 : 0) + tailTokens);
+	}
+	sessions.dispose();
+	const reopened = connect(() => assert.fail('reopening must not issue a request'));
+	t.after(() => reopened.dispose());
+	const saved = (await reopened.openConversation(id))?.runs.map(({ state }) => state);
+	assert.ok(saved);
+	assert.deepEqual(saved.map(runUsage), live.map(runUsage));
+	assert.deepEqual(conversationMetrics(saved).usage, conversationMetrics(live).usage);
+	const zero = runUsage(saved[0]!);
+	assert.equal(zero?.output, 0);
+	assert.equal(zero.partial, undefined);
+	const retry = saved[1]!;
+	assert.equal(retry.auxiliaryUsage?.[0]?.reportedUsage?.prompt, 40);
+	const corrected = retry.messages.at(-1);
+	assert.equal(corrected?.reportedUsage?.prompt, 0);
+	assert.equal(corrected.estimatedUsage?.prompt, undefined);
+	assert.equal(prompt(runUsage(retry)), 40);
+	assert.ok(inputWithoutReceipt !== undefined && inputWithoutReceipt > 0);
+	const outputOnly = saved[2]!.messages.at(-1);
+	assert.equal(outputOnly?.reportedUsage?.prompt, undefined);
+	assert.equal(outputOnly?.estimatedUsage?.prompt, inputWithoutReceipt);
+	assert.equal(prompt(runUsage(saved[2]!)), inputWithoutReceipt);
+	for (const [round, lastSnapshot] of [[1, 0], [2, 12], [5, undefined]] as const) {
+		const state: RunState = saved[round]!;
+		assert.equal(state.auxiliaryUsage?.length, 1);
+		const [failed] = state.auxiliaryUsage;
+		assert.equal(failed?.kind, 'main-attempt');
+		assert.equal(failed.reportedUsage?.output, lastSnapshot);
+		assert.equal(failed.estimatedUsage?.output, (lastSnapshot ?? 0) + tailTokens);
+		const usage = runUsage(state);
+		assert.equal(usage?.count, 2);
+		assert.equal(output(usage), (lastSnapshot ?? 0) + tailTokens + 30);
+	}
+	const missingFinal = saved[3]!;
+	const lastMessage = missingFinal.messages.at(-1);
+	assert.equal(lastMessage?.content, '仅在开头报告过零。');
+	const incomplete = runUsage(missingFinal);
+	assert.equal(incomplete?.count, 1);
+	const unconfirmedTokens = Math.ceil('仅在开头报告过零。'.length / 3.5);
+	assert.equal(lastMessage.reportedUsage?.output, 0);
+	assert.equal(lastMessage.estimatedUsage?.output, unconfirmedTokens);
+	assert.equal(output(incomplete), unconfirmedTokens);
+	const repeatedZero = runUsage(saved[4]!);
+	assert.equal(saved[4]!.messages.at(-1)?.estimatedUsage, undefined);
+	assert.equal(repeatedZero?.count, 1);
+	assert.equal(repeatedZero.output, 0);
+	assert.equal(repeatedZero.partial, undefined);
+	const whole = conversationMetrics(saved).usage;
+	assert.equal(whole?.count, 9);
+	assert.equal(output(whole), 102 + 3 * tailTokens + unconfirmedTokens);
+	const missingPrompt = prompt(retries[2]?.usage);
+	assert.ok(missingPrompt !== undefined && missingPrompt > 0);
+	assert.equal(saved[5]!.auxiliaryUsage?.[0]?.estimatedUsage?.prompt, missingPrompt);
+	assert.equal(prompt(runUsage(saved[5]!)), missingPrompt);
+	assert.equal(prompt(whole), 47 + missingPrompt + inputWithoutReceipt);
 });
 
 void test('stopping during an automatic review saves its usage once even when the reply arrives late', async (t) => {
@@ -890,7 +1390,8 @@ void test('stopping during an automatic review saves its usage once even when th
 	const held = new Promise<void>((resolve) => { release = resolve; });
 	const read: ToolCall = { id: 'late-review', name: 'Read', input: { file_path: outside } };
 	const sessions = connect(() => reply('', [read]), firstModel, undefined, {
-		async send() {
+		async send(request) {
+			await request.onTransmission?.('https://test.example/review');
 			markStarted();
 			await held;
 			return reply('APPROVE').result();
@@ -981,14 +1482,15 @@ void test('after reopening, the same conversation sends prior messages and tool 
 	assert.equal(request?.model, secondModel.model);
 	assert.equal(request.providerId, secondModel.providerId);
 	assert.equal(request.sessionId, id);
-	assert.deepEqual(request.messages.map(({ role }) => role), ['user', 'assistant', 'tool', 'assistant', 'user']);
-	assert.match(request.messages[0]?.content ?? '', /读取笔记/);
-	assert.match(request.messages[0]?.content ?? '', /来自主聊天的引文/);
-	assert.equal(request.messages[1]?.toolCalls?.[0]?.id, read.id);
-	assert.equal(request.messages[2]?.toolCallId, read.id);
-	assert.match(request.messages[2]?.content ?? '', /银杏灯塔-733/);
-	assert.match(request.messages[3]?.content ?? '', /第一轮结论/);
-	assert.equal(request.messages[4]?.content, '把刚才的地点写成一句话。');
+	const dialog = dialogMessages(request);
+	assert.deepEqual(dialog.map(({ role }) => role), ['user', 'assistant', 'tool', 'assistant', 'user']);
+	assert.match(dialog[0]?.content ?? '', /读取笔记/);
+	assert.match(dialog[0] ? promptText(dialog[0]) : '', /来自主聊天的引文/);
+	assert.equal(dialog[1]?.toolCalls?.[0]?.id, read.id);
+	assert.equal(dialog[2]?.toolCallId, read.id);
+	assert.match(dialog[2]?.content ?? '', /银杏灯塔-733/);
+	assert.match(dialog[3]?.content ?? '', /第一轮结论/);
+	assert.equal(dialog[4]?.content, '把刚才的地点写成一句话。');
 	const resumedHistory = await reopened.openConversation(id);
 	assert.equal(resumedHistory?.runs.length, 2);
 	assert.equal(resumedHistory.runs[1]?.state.messages.at(-1)?.content, '已接续。');
@@ -996,7 +1498,7 @@ void test('after reopening, the same conversation sends prior messages and tool 
 	const newId = await reopened.createConversation();
 	assert.notEqual(newId, id);
 	assert.equal((await reopened.submit({ conversationId: newId, instruction: '这是一次全新的对话。', refs: [] }).result).status, 'done');
-	assert.deepEqual(sent[1]?.messages.map(({ content }) => content), ['这是一次全新的对话。']);
+	assert.deepEqual(dialogMessages(sent[1]).map(({ content }) => content), ['这是一次全新的对话。']);
 	reopened.dispose();
 });
 
@@ -1013,7 +1515,7 @@ void test('a side chat reads notes while the main chat runs, then closes without
 	const mainWaiting = new Promise<void>((resolve) => { finishMain = resolve; });
 	const sessions = connect((request) => {
 		requests.push(request);
-		const prompt = request.messages.filter(({ role }) => role === 'user').at(-1)?.content ?? '';
+		const prompt = dialogMessages(request).filter(({ role }) => role === 'user').at(-1)?.content ?? '';
 		if (prompt.includes('主聊天继续')) {
 			mainStarted();
 			const answer = reply('主聊天完成。');
@@ -1046,8 +1548,8 @@ void test('a side chat reads notes while the main chat runs, then closes without
 	const sideRequests = requests.filter(({ sessionId }) => sessionId === side.id);
 	assert.deepEqual(sideRequests[0]?.tools.map(({ name }) => name).sort(), ['Glob', 'Grep', 'Read']);
 	assert.equal(sideRequests[0]?.model, secondModel.model);
-	assert.match(sideRequests[0]?.messages.at(-1)?.content ?? '', /本次任务的资料引用.*fact\.md/);
-	const context = sideRequests[0]?.messages.map(({ content }) => content).join('\n') ?? '';
+	assert.match(requestText(sideRequests[0]), /本次任务的资料引用.*fact\.md/);
+	const context = requestText(sideRequests[0]);
 	assert.match(sideRequests[0]?.messages.find(({ content }) => content.startsWith('主聊天起点'))?.content ?? '', /fact\.md/);
 	assert.match(context, /这里是所选文字/);
 	assert.match(context, /打开侧聊时，主任务仍在进行/);
@@ -1060,7 +1562,7 @@ void test('a side chat reads notes while the main chat runs, then closes without
 	assert.equal(await readFile(note, 'utf8'), '临时笔记事实-733');
 	const followRequest = requests.filter(({ sessionId }) => sessionId === side.id)[2];
 	assert.equal(followRequest?.model, firstModel.model);
-	assert.match(followRequest?.messages.map(({ content }) => content).join('\n') ?? '', /侧聊读完/);
+	assert.match(requestText(followRequest), /侧聊读完/);
 
 	const stopped = await side.submit({ instruction: '关闭侧聊' }, { onEvent: (event) => { if (event.type === 'text-delta') side.close(); } }).result;
 	assert.equal(stopped.status, 'cancelled');
@@ -1080,7 +1582,7 @@ void test('a side chat can read only the external file attached to its current q
 	const sibling = join(cwd, '..', 'sibling.md');
 	await Promise.all([writeFile(allowed, '所选库外文件'), writeFile(sibling, '不应读取的文件')]);
 	const calls = [allowed, sibling].map((path, index) => ({ id: `external-${index}`, name: 'Read', input: { file_path: path } }));
-	const side = connect((request) => request.messages.at(-1)?.role === 'tool' ? reply('已检查。') : reply('', calls)).createSideChat([]);
+	const side = connect((request) => dialogMessages(request).at(-1)?.role === 'tool' ? reply('已检查。') : reply('', calls)).createSideChat([]);
 
 	const first = await side.submit({ instruction: '读取这次的资料', refs: [{ path: allowed, kind: 'file', addedExternal: true }] }).result;
 	assert.match(first.messages.find(({ toolCallId }) => toolCallId === calls[0]?.id)?.content ?? '', /所选库外文件/);
@@ -1091,6 +1593,92 @@ void test('a side chat can read only the external file attached to its current q
 	assert.equal(follow.messages.filter(({ toolCallId }) => toolCallId).length, 2);
 	side.close();
 });
+
+for (const valid of [true, false]) {
+	void test(valid ? 'explicit steering skips unstarted writes and persists each paired result'
+		: 'out-of-scope steering leaves its queue entry and allows the original writes', async (t) => {
+		const { cwd, directory, connect } = await fixture(t);
+		const store = createConversationStore(directory);
+		const calls = ['A', 'B', 'C'].map((id) => ({ id, name: 'Write', input: { file_path: id + '.md', content: id } }));
+		const requests: ModelRequest[] = [];
+		const sessions = connect((request) => {
+			requests.push(request);
+			return requests.length === 1 ? reply('', calls) : reply('已核对。');
+		});
+		t.after(() => sessions.dispose());
+		const conversationId = await sessions.createConversation();
+		const external = join(directory, '..', 'private.md');
+		await writeFile(external, 'private');
+		const row = { id: 'correction', request: { conversationId, instruction: '只保留 A', refs: valid ? [] : [{ path: external }] } };
+		const queued = { id: 'later', request: { conversationId, instruction: '稍后独立处理', refs: [] } };
+		await store.enqueue(conversationId, row);
+		await store.enqueue(conversationId, queued);
+		let delivery: Promise<string> | undefined;
+		const run = sessions.submit({ conversationId, instruction: '依次创建 A、B、C', refs: [] }, {
+			approve: () => Promise.resolve(true),
+			onEvent(event) {
+				if (event.type === 'tool-start' && event.call.id === 'A') {
+					delivery = sessions.steer(run.taskId, row).then(() => 'delivered', () => 'rejected');
+				}
+			},
+		});
+		const result = await run.result;
+		assert.equal(result.status, 'done', result.error);
+		assert.equal(await delivery, valid ? 'delivered' : 'rejected');
+		assert.equal(await readFile(join(cwd, 'A.md'), 'utf8'), 'A');
+		for (const id of ['B', 'C']) {
+			const file = join(cwd, id + '.md');
+			if (valid) await assert.rejects(access(file), { code: 'ENOENT' });
+			else assert.equal(await readFile(file, 'utf8'), id);
+		}
+		const saved = await createConversationStore(directory).load(conversationId);
+		const messages = saved.runs[0]!.state.messages;
+		assert.deepEqual(messages.filter((m) => m.role === 'tool').map((m) => [m.toolCallId, Boolean(m.skipped)]),
+			[['A', false], ['B', valid], ['C', valid]]);
+		assert.equal(messages.filter((m) => m.id === 'steer:correction').length, Number(valid));
+		assert.deepEqual(requests.at(-1)?.messages.filter((m) => m.role === 'tool').map((m) => m.toolCallId), ['A', 'B', 'C']);
+		assert.equal(requests.at(-1)?.messages.some((m) => m.id === 'steer:correction'), valid);
+		assert.deepEqual(saved.queue, valid ? [queued] : [row, queued]);
+	});
+}
+
+for (const scenario of ['skipped', 'completed', 'reopened']) {
+	void test(`accepted steering can request a fresh read after three identical calls (${scenario})`, async (t) => {
+		const beforeReads = scenario === 'skipped';
+		const { cwd, directory, connect } = await fixture(t);
+		await writeFile(join(cwd, 'fact.md'), '最新资料');
+		const read = (id: string) => ({ id, name: 'Read', input: { file_path: 'fact.md' } });
+		const batches = [['a', 'b', 'c'].map(read), [read('fresh')]];
+		const sessions = connect(() => reply('核对', batches.shift()));
+		t.after(() => sessions.dispose());
+		const conversationId = await sessions.createConversation();
+		const row = { id: 'reread', request: { conversationId, instruction: '现在重新读一次。', refs: [] } };
+		await createConversationStore(directory).enqueue(conversationId, row);
+		let delivery: Promise<void> | undefined;
+		const run = sessions.submit({ conversationId, instruction: '读取笔记', refs: [] }, {
+			onEvent(event) {
+				if (scenario === 'reopened' && event.type === 'state' && event.state.pendingCalls[0]?.id === 'fresh') sessions.pause(run.taskId);
+				if (!delivery && (beforeReads ? event.type === 'state' && event.state.pendingCalls.length === 3
+					: event.type === 'tool-end' && event.call.id === 'c')) delivery = sessions.steer(run.taskId, row);
+			},
+		});
+		let result = await run.result;
+		await delivery;
+		if (scenario === 'reopened') {
+			assert.equal(result.status, 'interrupted');
+			const retries = [[read('resumed')]];
+			const reopened = connect(() => reply('续做', retries.shift()));
+			t.after(() => reopened.dispose());
+			result = await reopened.resume(conversationId, run.taskId).result;
+		}
+		assert.equal(result.status, 'done', result.error);
+		assert.deepEqual(result.messages.filter((m) => m.role === 'tool').map((m) => [m.toolCallId, !!m.skipped, !!m.isError]), [
+			['a', beforeReads, beforeReads], ['b', beforeReads, beforeReads], ['c', beforeReads, beforeReads],
+			...(scenario === 'reopened' ? [['fresh', true, true], ['resumed', false, false]] : [['fresh', false, false]]),
+		]);
+		assert.match(result.messages.filter((m) => m.role === 'tool').at(-1)!.content, /最新资料/u);
+	});
+}
 
 void test('a queued turn leaves the saved queue only once the next transcript starts', async (t) => {
 	const { connect, directory } = await fixture(t);
@@ -1207,7 +1795,7 @@ void test('branching copies through the selected reply and editing replaces only
 	const run = submit('修改后的指令', edited.taskId);
 	await assert.rejects(sessions.forkConversation(conversationId, first.taskId), /正在运行/);
 	assert.equal((await run.result).status, 'done');
-	assert.deepEqual(sent[3]?.messages.map(({ content }) => content), ['保留这轮', '回答 1', '修改后的指令']);
+	assert.deepEqual(dialogMessages(sent[3]).map(({ content }) => content), ['保留这轮', '回答 1', '修改后的指令']);
 	assert.deepEqual((await sessions.openConversation(conversationId))?.runs.map(({ state }) => state.taskId), [first.taskId, run.taskId]);
 	assert.deepEqual(await sessions.openConversation(branch.id), branch);
 });
@@ -1433,14 +2021,15 @@ void test('an interrupted task resumes as history and closes orphaned calls with
 
 void test('closing and reopening resumes the same task without replaying a saved write or an old approval', async (t) => {
 	const { cwd, connect } = await fixture(t);
-	const a = { id: 'a', name: 'Write', input: { file_path: 'A.md', content: '甲' } };
-	const b = { id: 'b-before-close', name: 'Write', input: { file_path: 'B.md', content: '乙' } };
+	const a = { id: 'a', name: 'Write', input: { file_path: 'A.md', content: '甲', intent: '写入笔记甲' } };
+	const b = { id: 'b-before-close', name: 'Write', input: { file_path: 'B.md', content: '乙', intent: '写入笔记乙' } };
 	const original = connect(() => reply('', [a, b]));
 	const id = await original.createConversation();
 	const request = { conversationId: id, instruction: '请创建 A.md 和 B.md。', refs: [] };
 	const old = original.submit(request, { approve: async (preview) => {
-		if (preview.target === 'A.md') return true;
+		if (preview.target === 'A.md') { assert.equal(preview.intent, a.input.intent); return true; }
 		assert.equal(preview.target, 'B.md');
+		assert.equal(preview.intent, b.input.intent);
 		original.dispose();
 		return false;
 	} });
@@ -1503,7 +2092,7 @@ void test('a long task resumes with saved evidence and does not replay a compact
 	const handoff = `已核验 ${evidence}，见 [[${source}]]。已创建 ${target}。下一步核对剩余材料。`;
 	const auxiliary: ModelRequest[] = [];
 	const service: Pick<ModelService, 'send' | 'contextLimits'> = {
-		contextLimits: () => ({ contextWindow: 12_000, maxTokens: 1_024 }),
+		contextLimits: () => ({ contextWindow: 18_000, maxTokens: 1_024 }),
 		async send(request) {
 			auxiliary.push(request);
 			return reply(handoff).result();
@@ -1511,7 +2100,7 @@ void test('a long task resumes with saved evidence and does not replay a compact
 	};
 	let compactedRequest: ModelRequest | undefined;
 	const original = connect((request) => {
-		if (request.messages.some(({ content }) => content.includes(handoff))) {
+		if (requestText(request).includes(handoff)) {
 			compactedRequest = request;
 			original.pause(active.taskId);
 			return reply('');
@@ -1533,7 +2122,7 @@ void test('a long task resumes with saved evidence and does not replay a compact
 	assert.ok(material.includes(`${source}（第 1–1 行）`) && material.includes(evidence) && material.includes(`已创建 ${target}。`));
 	assert.deepEqual(summaryInput.tools, []);
 	assert.equal(compactedRequest.messages.some(({ toolCallId }) => toolCallId === source || toolCallId === write.id), false);
-	const latest = laterBatches.find((batch) => batch.at(-1)?.id === compactedRequest?.messages.at(-1)?.toolCallId);
+	const latest = laterBatches.find((batch) => batch.at(-1)?.id === dialogMessages(compactedRequest).at(-1)?.toolCallId);
 	assert.ok(latest);
 	assert.equal(await readFile(join(cwd, target), 'utf8'), written);
 	const writtenAt = (await stat(join(cwd, target))).mtimeMs;
@@ -1564,13 +2153,19 @@ void test('a long task resumes with saved evidence and does not replay a compact
 			confirmations++;
 			assert.equal(auxiliary.length, 1);
 			assert.deepEqual(sent, []);
-			assert.ok(request.messages.some(({ content }) => content.includes(handoff)));
+			assert.ok(requestText(request).includes(handoff));
 			assert.ok(request.messages.some(({ toolCalls }) => toolCalls?.every(({ id }, index) => id === latest[index]?.id)
 				&& toolCalls.length === latest.length));
 			for (const { id } of latest) {
 				const originalResult: Message | undefined = saved.state.messages.find(({ toolCallId }) => toolCallId === id);
 				assert.ok(originalResult);
-				assert.deepEqual(request.messages.find(({ toolCallId }) => toolCallId === id), originalResult);
+				const delivered = request.messages.find(({ toolCallId }) => toolCallId === id);
+				assert.ok(delivered);
+				assert.deepEqual({ ...delivered, content: originalResult.content }, originalResult);
+				if (delivered.content !== originalResult.content) {
+					assert.ok(delivered.content.startsWith(originalResult.content.split('\n')[0]!));
+					assert.match(delivered.content, /已缩短[\s\S]*重新读取/u);
+				}
 			}
 			return true;
 		},
@@ -1748,13 +2343,14 @@ void test('resume reviews the request before sending and leaves the saved task i
 	const before = await store.load(id);
 	const sent: ModelRequest[] = [];
 	const address = 'http://127.0.0.1:14080/v1/chat/completions';
-	const resumed = connect((request) => {
-		const stream = reply('续做完成。');
+	const resumed = connect((request, onUsage) => {
+		const stream = reply('续做完成。', [], { reportedUsage: { output: 10 } });
 		return {
 			...stream,
 			async *[Symbol.asyncIterator]() {
 				assert.ok(request.beforeSend);
 				await request.beforeSend(address);
+				onUsage?.({ reportedUsage: { input: 5 }, usageStatus: 'provisional' });
 				await request.beforeSend(address);
 				sent.push(request);
 				yield* stream;
@@ -1787,6 +2383,10 @@ void test('resume reviews the request before sending and leaves the saved task i
 	assert.equal(completed.status, 'done', completed.error);
 	assert.equal(approvals, 1);
 	assert.equal(sent.length, 1);
+	assert.deepEqual(completed.auxiliaryUsage?.at(-1), {
+		kind: 'main-attempt', reportedUsage: { input: 5 }, usageStatus: 'provisional',
+	});
+	assert.deepEqual(completed.messages.at(-1)?.reportedUsage, { output: 10 });
 });
 
 void test('a resumed run refuses to send to an address other than the one approved', async (t) => {
@@ -1821,7 +2421,7 @@ void test('队列和重新编辑沿用有选择记录的库外资料', async (t)
 	const store = createConversationStore(directory);
 	const outside = join(cwd, '..', '资料.md');
 	await writeFile(outside, '测试资料');
-	const sessions = connect((request) => request.messages.at(-1)?.role === 'tool' ? reply('已核对。')
+	const sessions = connect((request) => dialogMessages(request).at(-1)?.role === 'tool' ? reply('已核对。')
 		: reply('', [{ id: 'read', name: 'Read', input: { file_path: outside } }]));
 	t.after(() => sessions.dispose());
 	for (const explicit of [true, false]) {
@@ -1860,7 +2460,7 @@ void test('续做保留只读技能工具且侧聊继承压缩后的对话和原
 	const follow = side.submit({ instruction: '继续核对' });
 	assert.deepEqual(follow.request.skillNotePaths, ['会议/原稿.md']);
 	assert.equal((await follow.result).status, 'done');
-	const sent = requests.at(-1)!.messages.map(({ content }) => content).join('\n');
+	const sent = requestText(requests.at(-1));
 	assert.match(sent, /原决定仅留摘要/u);
 	assert.doesNotMatch(sent, /旧正文|新稿/u);
 	const handoff = side.submit({ instruction: '队列转来的问题', skillScope: ['课题'], skillNotePaths: ['课题/排队时打开.md'] });
@@ -1921,4 +2521,109 @@ void test('旧队列插话沿用原记录完成出队，并把补齐的技能范
 	assert.equal(result.status, 'done', result.error);
 	assert.deepEqual(result.messages.find(({ id }) => id === 'steer:old-queue')?.skillNotePaths, ['附件.md']);
 	assert.deepEqual(await store.getQueued(id), []);
+});
+
+void test('模型提交的计划只读、可编辑，确认时核对版本和执行上下文', async (t) => {
+	const { connect, cwd, directory } = await fixture(t);
+	const earlier = '旧对话私有前缀，fresh 执行不应引用。';
+	const original = '# 整理索引\n\n## 验收条件\n- 核对现有索引。';
+	const edited = original.replace('核对现有索引', '归档已核对的索引');
+	const revisedDraft = edited.replace('归档已核对的索引', '把归档规则写入计划');
+	const outside = join(cwd, '..', 'plan-external.md');
+	await writeFile(outside, 'EXTERNAL-PLAN-SECRET');
+	const calls: ToolCall[] = [
+		{ id: 'enter-plan', name: 'EnterPlanMode', input: {} },
+		{ id: 'illegal-write', name: 'Write', input: { file_path: 'illegal.md', content: 'unexpected write' } },
+		{ id: 'illegal-read', name: 'Read', input: { file_path: outside } },
+		{ id: 'empty-submit', name: 'SubmitPlan', input: {} },
+		{ id: 'save-plan', name: 'SavePlan', input: { markdown: original } },
+		{ id: 'submit-plan', name: 'SubmitPlan', input: {} },
+	];
+	let turns = 0;
+	const executions: ModelRequest[] = [];
+	let continued: ModelRequest | undefined;
+	const sessions = connect((request) => {
+		turns++;
+		if (request.messages.some(({ content }) => content === '请补充归档规则。')) {
+			const previous = request.messages.find(({ toolCallId }) => toolCallId === 'read-prior-plan');
+			if (previous) {
+				assert.match(previous.content, /归档已核对的索引/u);
+				return reply('已提交修订，请核对。');
+			}
+			return reply('', [
+				{ id: 'read-prior-plan', name: 'ReadPlan', input: {} },
+				{ id: 'save-revised-plan', name: 'SavePlan', input: { markdown: revisedDraft } },
+				{ id: 'submit-revised-plan', name: 'SubmitPlan', input: {} },
+			]);
+		}
+		if (request.messages.some(({ content }) => content === '执行后的新请求。')) {
+			continued = request;
+			return reply('继续处理。');
+		}
+		if (request.messages.some((message) => promptText(message).includes('<approved-plan>'))) {
+			executions.push(request);
+			return reply('已执行。');
+		}
+		if (turns === 1) return reply('保留旧对话。');
+		if (!request.messages.some(({ toolCallId }) => toolCallId === 'submit-plan')) return reply('', calls);
+		return reply('计划已提交，请确认。');
+	}, firstModel, undefined, undefined, false, true);
+	t.after(() => sessions.dispose());
+	const id = await sessions.createConversation();
+	await sessions.submit({ conversationId: id, instruction: earlier, refs: [] }).result;
+	const run = await sessions.submit({ conversationId: id, instruction: '规划索引更新。', refs: [] }, {}, undefined, { executionMode: 'full-access' }).result;
+	assert.equal(run.status, 'done', run.error);
+	for (const callId of ['enter-plan', 'save-plan', 'submit-plan']) {
+		const result = run.messages.find(({ toolCallId }) => toolCallId === callId);
+		assert.equal(result?.isError, false, result?.content ?? callId);
+	}
+	for (const callId of ['illegal-write', 'illegal-read', 'empty-submit']) {
+		assert.equal(run.messages.find(({ toolCallId }) => toolCallId === callId)?.isError, true, callId);
+	}
+	await assert.rejects(access(join(cwd, 'illegal.md')), { code: 'ENOENT' });
+	assert.doesNotMatch(JSON.stringify(run.messages), /EXTERNAL-PLAN-SECRET/u);
+	const reopened = createConversationStore(directory);
+	const saved = (await reopened.load(id)).runs.at(-1);
+	assert.equal(saved?.request.intent, 'plan');
+	const plan = submittedPlan(saved);
+	assert.ok(plan);
+	assert.equal(plan.markdown, original);
+	const file = join(directory, `${id}.plan.${plan.taskId}.md`);
+	assert.match(await readFile(file, 'utf8'), /scribe-saved-plan: submitted/u);
+	await reopened.savePlanDraft(id, plan.taskId, { submitted: true, markdown: edited }, plan.revision);
+	const fork = await sessions.forkConversation(id, plan.taskId);
+	const revised = submittedPlan((await reopened.load(id)).runs.at(-1));
+	const forked = submittedPlan(fork.runs.at(-1));
+	assert.ok(revised && forked);
+	assert.equal(revised.markdown, edited);
+	assert.equal(forked.revision, revised.revision);
+	await assert.rejects(reopened.savePlanDraft(id, plan.taskId, { submitted: true, markdown: original }, plan.revision), /计划已变化/u);
+	const stale = await sessions.submit(approvedPlanRequest(plan, 'fresh')).result;
+	assert.equal(stale.status, 'failed');
+	assert.match(stale.error ?? '', /计划已变化/u);
+	const broadened = await sessions.submit({ ...approvedPlanRequest(revised), refs: [{ path: 'added.md', kind: 'file' }] }).result;
+	assert.equal(broadened.status, 'failed');
+	assert.equal(executions.length, 0);
+	const revisionBranch = await sessions.forkConversation(id, plan.taskId);
+	const revision = await sessions.submit({ conversationId: revisionBranch.id, instruction: '请补充归档规则。',
+		intent: 'plan', revisesPlanTaskId: plan.taskId, refs: [] }).result;
+	assert.equal(revision.status, 'done', revision.error);
+	assert.equal(submittedPlan((await reopened.load(revisionBranch.id)).runs.at(-1))?.markdown, revisedDraft);
+	assert.equal((await sessions.submit(approvedPlanRequest(revised, 'fresh')).result).status, 'done');
+	assert.equal((await sessions.submit(approvedPlanRequest(forked, 'continue')).result).status, 'done');
+	assert.equal(executions.length, 2);
+	assert.doesNotMatch(JSON.stringify(executions[0]), new RegExp(earlier, 'u'));
+	assert.match(JSON.stringify(executions[1]), new RegExp(earlier, 'u'));
+	assert.match(requestText(executions[0]), /<approved-plan>[\s\S]*归档已核对的索引[\s\S]*<\/approved-plan>/u);
+	const completed = await reopened.load(id);
+	assert.equal(completed.runs.find(({ state }) => state.taskId === plan.taskId)?.planArchived, true);
+	const executionBranch = await sessions.forkConversation(id, completed.runs.at(-1)!.state.taskId);
+	const branchFromPlan = await sessions.forkConversation(executionBranch.id, plan.taskId);
+	assert.equal(submittedPlan(branchFromPlan.runs.at(-1))?.markdown, edited);
+	assert.equal((await sessions.submit({ conversationId: id, instruction: '执行后的新请求。', refs: [] }).result).status, 'done');
+	assert.ok(continued);
+	assert.doesNotMatch(JSON.stringify(continued.messages), new RegExp(earlier, 'u'));
+	assert.match(JSON.stringify(continued.messages), /归档已核对的索引/u);
+	await sessions.deleteConversation(id);
+	await assert.rejects(access(file), { code: 'ENOENT' });
 });

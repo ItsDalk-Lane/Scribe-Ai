@@ -8,6 +8,7 @@ import { finishGoalRound, MAX_GOAL_CRITERIA, MAX_GOAL_LENGTH, parseChatGoal,
 import type { ChatGoal, GoalPause, GoalWorkClock } from './chatGoal';
 import { confirmAction } from './ConfirmModal';
 import type { SlashUi } from './slashUi';
+import { uiText } from './uiText';
 
 export function goalText() {
 	const chinese = getLanguage().toLowerCase().startsWith('zh');
@@ -22,7 +23,7 @@ export function goalText() {
 		active: '进行中', paused: '已暂停', complete: '已完成', current: '本次', total: '累计轮数',
 		proof: '完成依据', reasons: {
 			manual: '已手动暂停。', plan: '已切换到计划模式。', closed: '聊天已关闭或重开，请手动继续。', stalled: '上一轮未取得可确认的新进展。请查看聊天记录。', failed: '上一轮未成功结束，请查看聊天记录。',
-			blocked: '需要你处理上一轮的问题。处理后可手动继续。',
+			blocked: '需要你处理上一轮的问题。处理后可手动继续。', verification: '独立复核未确认全部验收条件。请核对待处理项后继续。',
 		},
 	} : {
 		title: 'Chat goal', objective: 'Objective', criteria: 'Acceptance criteria (one per line)', create: 'Start goal',
@@ -35,7 +36,7 @@ export function goalText() {
 		active: 'In progress', paused: 'Paused', complete: 'Complete', current: 'This start', total: 'Total rounds',
 		proof: 'Completion evidence', reasons: {
 			manual: 'Paused manually.', plan: 'Switched to Plan mode.', closed: 'The chat was closed or reopened. Resume to continue.', stalled: 'The last round made no confirmed progress. See chat history.', failed: 'The last round ended early. See chat history.',
-			blocked: 'The last round needs your attention. Resume when ready.',
+			blocked: 'The last round needs your attention. Resume when ready.', verification: 'The independent review could not verify every criterion. Check the remaining items before resuming.',
 		},
 	};
 }
@@ -54,7 +55,7 @@ function editGoal(app: App, draft: GoalDraft, ui?: SlashUi) {
 			objective.maxLength = MAX_GOAL_LENGTH;
 			objective.setAttribute('aria-label', text.objective);
 		});
-		new Setting(host).setName(text.criteria).addTextArea((field) => {
+		new Setting(host).setName(text.criteria).setDesc(uiText().chatGoalReviewDisclosure).addTextArea((field) => {
 			criteria = field.setValue(draft.criteria?.join('\n') ?? '').inputEl;
 			criteria.rows = 3;
 			criteria.setAttribute('aria-label', text.criteria);
@@ -222,7 +223,7 @@ export function useChatGoal({ app, store, localState, conversationId, isOpen, ca
 			// 任务出错时暂停，详细信息由原有聊天记录显示。
 		} finally {
 			// 聊天先保存本轮结果，验收状态保存完成后才能开始下一轮。
-			if (mounted.current && current.current === value) await save(finishGoalRound(sealWork(result ? started : value), result));
+			if (mounted.current && current.current === value) await save(finishGoalRound(sealWork(result ? started : value), result, result?.goalReview));
 			workOwner.current = undefined;
 			running.current = false;
 			if (mounted.current) setWorking(false);

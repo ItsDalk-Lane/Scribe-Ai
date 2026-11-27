@@ -18,11 +18,13 @@ export interface McpServerView {
 	version?: string;
 	error?: string;
 	signedIn?: boolean;
+	prompts?: boolean;
 	tools: (McpToolInfo & { enabled: boolean })[];
 }
 
 interface ConnectionEntry {
 	key: string;
+	generation: string;
 	controller: AbortController;
 	connection?: McpConnection;
 	state: McpServerState;
@@ -89,9 +91,11 @@ async function waitForConnections(entries: readonly ConnectionEntry[], signal: A
 export interface McpLiveServer {
 	server: McpServer;
 	connectionKey: string;
+	generation: string;
 	connection: McpConnection;
 	signal: AbortSignal;
 	resources: boolean;
+	instructions?: string;
 	tools: { tool: McpToolInfo; signature: string }[];
 	verify(signature?: string, toolName?: string): void;
 }
@@ -156,7 +160,7 @@ export function createMcpManager(options: ManagerOptions) {
 		const id = server.id;
 		release(id);
 		const controller = new AbortController();
-		const entry: ConnectionEntry = { key: connectionKey(server), controller, state: 'connecting' };
+		const entry: ConnectionEntry = { key: connectionKey(server), generation: randomUUID(), controller, state: 'connecting' };
 		entries.set(id, entry);
 		const current = () => entries.get(id) === entry && !controller.signal.aborted;
 		const refresh = () => {
@@ -298,7 +302,8 @@ export function createMcpManager(options: ManagerOptions) {
 		const { catalog, connection } = entry;
 		if (!catalog || !connection || entry.refreshing || entry.state !== 'ready' || !server.enabled || connectionKey(server) !== entry.key) return;
 		return {
-			server, connectionKey: entry.key, connection, signal: entry.controller.signal, resources: catalog.resources,
+			server, connectionKey: entry.key, generation: entry.generation, connection, signal: entry.controller.signal,
+			resources: catalog.resources, instructions: catalog.instructions,
 			tools: catalog.tools.filter(({ name }) => toolEnabled(server, name))
 				.map((tool) => ({ tool, signature: toolSignature(entry, tool) })),
 			verify(signature, name) {
@@ -327,7 +332,7 @@ export function createMcpManager(options: ManagerOptions) {
 				const raw = options.storage.getSecret(oauthKey(server));
 				const enabled = server.enabled && localApproved(server);
 				return { server: enabled === server.enabled ? server : { ...server, enabled }, state: enabled ? entry?.state ?? 'connecting' : 'disabled',
-					error: entry?.error, version: catalog?.version, signedIn: Boolean(raw && /"access_token"\s*:/.test(raw)),
+					error: entry?.error, version: catalog?.version, prompts: catalog?.prompts, signedIn: Boolean(raw && /"access_token"\s*:/.test(raw)),
 					tools: catalog ? catalog.tools.map((tool) => ({ ...tool, enabled: toolEnabled(server, tool.name) })) : [] };
 			});
 		},
@@ -400,6 +405,34 @@ export function createMcpManager(options: ManagerOptions) {
 				const live = entry && ready(server, entry);
 				return live ? [live] : [];
 			});
+		},
+		allowsDefinition(serverId: string, key: string, name?: string): boolean {
+			const server = lookup(serverId);
+			return Boolean(server?.enabled && connectionKey(server) === key && (name === undefined || toolEnabled(server, name)));
+		},
+		promptSession(serverId: string) {
+			const server = lookup(serverId);
+			const entry = entries.get(serverId);
+			const live = server && entry && ready(server, entry);
+			const { listPrompts, getPrompt } = live?.connection ?? {};
+			if (!live || !entry?.catalog?.prompts || !listPrompts || !getPrompt) {
+				throw new Error('此 MCP 服务尚未连接或不提供提示模板。');
+			}
+			return {
+				server: live.server.name,
+				async list(signal: AbortSignal) {
+					live.verify();
+					const prompts = await listPrompts(AbortSignal.any([signal, live.signal]));
+					live.verify();
+					return prompts;
+				},
+				async expand(name: string, args: Record<string, string>, signal: AbortSignal) {
+					live.verify();
+					const text = await getPrompt(name, args, AbortSignal.any([signal, live.signal]));
+					live.verify();
+					return text;
+				},
+			};
 		},
 		async waitForServer(id: string, signal: AbortSignal) {
 			const server = lookup(id);

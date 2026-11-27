@@ -144,8 +144,8 @@ void test('round and conversation metrics use measured timings and provider toke
 	const first = state([output, { role: 'tool', content: 'result', toolCallId: read.id, toolDurationMs: 137 }]);
 	const second = { ...state([next]), taskId: 'second' };
 	const metrics = conversationMetrics([first, second]);
-	const main = { count: 2, input: 300, cacheRead: 500, cacheWrite: 51, output: 75, total: 926,
-		hit: 500 / 851, cost: undefined };
+	const main = { count: 2, prompt: 851, input: 300, cacheRead: 500, cacheWrite: 51, output: 75, total: 926,
+		hit: 500 / 851, partial: { cost: { value: 1, reported: 1 } } };
 	assert.deepEqual(metrics, {
 		rounds: 2, count: 2, modelMs: 5000, toolMs: 137, lagMs: 750, speed: 75000 / 3500,
 		usage: { ...main, byKind: { main, review: undefined, summary: undefined } },
@@ -159,6 +159,8 @@ void test('round and conversation metrics use measured timings and provider toke
 	const missing = conversationMetrics([first, { ...second, messages: [noUsage] }]);
 	assert.equal(missing.usage?.total, undefined);
 	assert.equal(missing.usage?.cost, undefined);
+	assert.deepEqual(missing.usage?.partial?.total, { value: 475, reported: 1 });
+	assert.deepEqual(missing.usage?.partial?.cost, { value: 1, reported: 1 });
 	assert.equal(missing.context, undefined);
 	assert.equal(missing.speed, 12.5);
 	assert.equal(conversationMetrics([first, { ...second, messages: [
@@ -223,7 +225,7 @@ void test('a local receipt remains visible without affecting model timing, conte
 	assert.throws(() => persisted({ ...receipt, usage: reply.usage }));
 });
 
-void test('usage keeps provider totals and zeros while marking missing fields across request types unknown', () => {
+void test('usage keeps provider totals and zeros and marks partial coverage per field across request types', () => {
 	const turn: RunState = { ...state([{
 		role: 'assistant', content: 'Reply',
 		reportedUsage: { prompt: 200, output: 10, total: 211, cacheRead: 0, cacheWrite: 0 },
@@ -245,10 +247,81 @@ void test('usage keeps provider totals and zeros while marking missing fields ac
 	assert.equal(usage.cacheRead, 1);
 	assert.equal(usage.cacheWrite, undefined);
 	assert.equal(usage.cost, undefined);
+	assert.deepEqual(usage.partial?.cacheWrite, { value: 3, reported: 2 });
+	assert.deepEqual(usage.partial?.input, { value: 212, reported: 2 });
+	assert.deepEqual(usage.partial?.cost, { value: 0.125, reported: 2 });
 	const metrics = conversationMetrics([turn]);
 	assert.deepEqual(metrics.usage, usage);
 	assert.equal(metrics.count, 1);
 	assert.equal(metrics.context?.prompt, 200);
+});
+
+void test('cache hit uses only paired counters; zero, missing and total input stay distinct after reconnect', () => {
+	const run = state([{ role: 'assistant', content: '成功', reportedUsage: { prompt: 24, output: 0 } }]);
+	const usage = runUsage({ ...run, auxiliaryUsage: [
+		{ kind: 'main-attempt', reportedUsage: { cacheRead: 8 }, estimatedUsage: { prompt: 100 } },
+		{ kind: 'main-attempt', reportedUsage: { prompt: 8, cacheRead: 2 } },
+		{ kind: 'main-attempt', reportedUsage: { prompt: 12, cacheRead: 8 } },
+	] });
+	assert.equal(usage?.count, 4);
+	assert.deepEqual(usage.partial?.hit, { value: 0.5, reported: 2, provisional: 2 });
+	assert.deepEqual(usage.partial?.cacheRead, { value: 18, reported: 3, provisional: 3 });
+	assert.deepEqual(usage.partial?.prompt, { value: 144, reported: 4, provisional: 3 });
+	assert.deepEqual(usage.partial?.total, { value: 24, reported: 1 });
+	assert.deepEqual(usage.partial?.output, { value: 0, reported: 1 });
+	assert.equal(usage.input, undefined);
+	assert.equal(usage.partial?.input, undefined);
+
+	const zero = runUsage(state([{ role: 'assistant', content: '', reportedUsage: { prompt: 0, output: 0, cacheRead: 0 } }]));
+	assert.equal(zero?.total, 0);
+	assert.equal(zero.hit, undefined);
+	assert.equal(zero.partial, undefined);
+	assert.deepEqual(runUsage({ ...state([]), auxiliaryUsage: [{ kind: 'main-attempt' }] })?.byKind.main, { count: 1 });
+});
+
+void test('interim totals keep reported zeros and count each attempt once even with full field coverage', () => {
+	const retry = state([
+		{ role: 'assistant', incomplete: true, content: '相同的开头。断线前的一部分。' },
+		{ role: 'assistant', content: '相同的开头。完整回答。', reportedUsage: { prompt: 40, cacheRead: 20, output: 30 } },
+	]);
+	for (const output of [0, 12]) {
+		const run: RunState = { ...retry, auxiliaryUsage: [{
+			kind: 'main-attempt', usageStatus: 'provisional', reportedUsage: { prompt: 10, cacheRead: 4, output },
+		}] };
+		const usage = runUsage(run);
+		assert.ok(usage);
+		assert.equal(usage.count, 2);
+		assert.equal(usage.output, undefined);
+		assert.deepEqual(usage.partial?.output, { value: output + 30, reported: 2, provisional: 1 });
+		assert.deepEqual(usage.partial?.total, { value: output + 80, reported: 2, provisional: 1 });
+		assert.deepEqual(usage.partial?.hit, { value: 24 / 50, reported: 2, provisional: 1 });
+		assert.deepEqual(conversationMetrics([run]).usage, usage);
+	}
+	const final = runUsage({ ...retry, auxiliaryUsage: [{ kind: 'main-attempt', usageStatus: 'final', reportedUsage: { output: 0 } }] });
+	assert.equal(final?.output, 30);
+	assert.equal(final.partial?.output, undefined);
+	const auxiliary = runUsage({ ...state([]), auxiliaryUsage: [{ kind: 'review', usageStatus: 'provisional', reportedUsage: { output: 0 } }] });
+	assert.deepEqual(auxiliary?.byKind.review?.partial?.output, { value: 0, reported: 1, provisional: 1 });
+});
+
+void test('a completed reply with only interim usage keeps its counters without deriving speed or context from them', () => {
+	const reply: Message = { role: 'assistant', content: '已生成的答复', usageStatus: 'provisional',
+		reportedUsage: { prompt: 80, output: 0 }, metrics: { endedAt: 2000, modelMs: 1500, decodeMs: 1000, contextWindow: 200 } };
+	const turn = state([reply]);
+	const metrics = conversationMetrics([turn]);
+	assert.deepEqual(metrics.usage, runUsage(turn));
+	assert.equal(metrics.usage?.count, 1);
+	assert.equal(metrics.usage.output, undefined);
+	assert.deepEqual(metrics.usage.partial?.output, { value: 0, reported: 1, provisional: 1 });
+	assert.deepEqual(metrics.usage.partial?.total, { value: 80, reported: 1, provisional: 1 });
+	assert.equal(metrics.speed, undefined);
+	assert.equal(metrics.context, undefined);
+
+	const first = { ...state([{ ...reply, usageStatus: 'final', reportedUsage: { prompt: 40, output: 20 } }]), taskId: 'first' };
+	const combined = conversationMetrics([first, turn]);
+	assert.equal(combined.speed, 20);
+	assert.equal(combined.context, undefined);
+	assert.deepEqual(combined.usage?.partial?.output, { value: 20, reported: 2, provisional: 1 });
 });
 
 void test('turn navigation previews the displayed prompt and last reply without exposing other activity', () => {

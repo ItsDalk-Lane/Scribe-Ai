@@ -5,6 +5,18 @@ export const SKILL_LIBRARY = `${SCRIBE_DATA_DIRECTORY}/skills`;
 export const IMAGE_CACHE_PREFIX = 'scribe-ai-image-';
 export const VIDEO_CACHE_PREFIX = 'scribe-ai-video-';
 
+export function conversationPlanPrefix(conversationId: string): string {
+	return `${conversationId}.plan.`;
+}
+
+export function runProgressFilename(conversationId: string, taskId: string): string {
+	return `${conversationId}.${taskId}.progress.json`;
+}
+
+export function conversationPlanFilename(conversationId: string, taskId: string): string {
+	return `${conversationPlanPrefix(conversationId)}${taskId}.md`;
+}
+
 export function scribeDataPaths(vaultRoot: string) {
 	const root = join(vaultRoot, SCRIBE_DATA_DIRECTORY);
 	return {
@@ -13,6 +25,7 @@ export function scribeDataPaths(vaultRoot: string) {
 		state: join(root, 'state.json'),
 		conversations: join(root, 'conversations'),
 		logs: join(root, 'logs'),
+		memory: join(root, 'memory'),
 		cache: join(root, 'cache'),
 		modelCatalog: join(root, 'cache', 'model-catalog.json'),
 		skills: join(vaultRoot, SKILL_LIBRARY),

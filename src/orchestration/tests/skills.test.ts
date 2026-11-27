@@ -1,3 +1,4 @@
+import { promptText } from '../context/promptXml';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, realpath, rm, writeFile, symlink, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -58,8 +59,8 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 	const builder = createContextBuilder(tools);
 	const initial = taskMessage(request);
 	const first = await builder.build(ctx, [initial], 100_000);
-	assert.ok(first.messages.some((m) => m.content.includes('项目 ' + body)));
-	assert.ok(!first.messages.some((m) => m.content.includes('个人 ' + body)));
+	assert.ok(first.messages.some((m) => promptText(m).includes('项目 ' + body)));
+	assert.ok(!first.messages.some((m) => promptText(m).includes('个人 ' + body)));
 	assert.ok(!first.system!.includes('项目 ' + body));
 	assert.deepEqual(first.tools.map((s) => s.name).sort(), ['list_skills', 'read_skill']);
 	assert.equal(tools.find('list_skill_files'), undefined);
@@ -67,13 +68,22 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 	const executor = createToolExecutor(tools);
 	const lookup = (input: Record<string, unknown>) => executor.execute({ id: 'lookup', name: 'list_skills', input }, { ...ctx, app });
 	const catalog = (await lookup({})).content;
-	assert.ok(!catalog.includes(root) && !first.system!.includes(root) && first.messages.every((m) => !m.content.includes(root)));
-	const catalogItems = (text: string) => (JSON.parse(text) as { items: { name: string; id: string }[] }).items;
+	assert.ok(!catalog.includes(root) && !first.system!.includes(root) && first.messages.every((m) => !promptText(m).includes(root)));
+	const catalogItems = (text: string) => (JSON.parse(text) as { items: { name: string; id: string; source: string }[] }).items;
 	const identities = catalogItems(catalog).filter((skill) => skill.name === 'outline');
 	assert.equal(identities.length, 2);
-	const localReference = identities.find(({ id }) => !first.system!.includes(id))!.id;
-	const personalReference = identities.find(({ id }) => first.system!.includes(id))!.id;
+	const project = first.messages.flatMap(({ promptSections }) => promptSections ?? []).find(({ tag }) => tag === 'available-skills')?.text ?? '';
+	const localReference = identities.find(({ source }) => source === '小说 · outline')!.id;
+	const personalReference = identities.find(({ source }) => source === '共享目录 shared')!.id;
+	assert.ok(project.split('\n').includes(JSON.stringify([{ name: 'outline', source: '共享目录 shared' }, '整理章节提纲'])));
+	assert.doesNotMatch(project, /s_[\w-]{12}|只适用于本轮|read_skill/u);
 	assert.match(personalReference, /^s_[\w-]{12}$/u);
+	const readByName = (source?: string) => executor.execute({ id: 'read-name', name: 'read_skill',
+		input: { id: 'outline', ...(source && { source }) } }, { ...ctx, app });
+	assert.match((await readByName()).content, /多个同名技能/u);
+	assert.equal(parseSkillReadReceipt((await readByName('小说 · outline')).content)?.id, local.id);
+	assert.equal(parseSkillReadReceipt((await readByName('共享目录 shared')).content)?.id, personal.id);
+	assert.equal((await readByName('其他来源')).isError, true);
 	const localReceipt = await runtime.read(localReference, 'example.md', 0);
 	assert.equal((JSON.parse(localReceipt.split('\n').at(-1)!) as { id: string }).id, local.id);
 	assert.deepEqual(catalogItems((await lookup({ offset: 1 })).content), catalogItems(catalog).slice(1));
@@ -111,18 +121,18 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 	assert.doesNotMatch(await runtime.list(0), /"renamed"/);
 	await writeFile(local.id, localText);
 	const receipt = await runtime.read(personalReference, 'example.md', 0);
-	// 模型可能把清单里的名称当作标识传入；名称唯一时按名称也能读取，并返回真实标识。
+	// 名称读取和旧标识读取都保存同一种可核对的回执。
 	const builtin = list.find((s) => s.sourceLabel === '内置' && s.implicit)!;
 	const namedReceipt = await runtime.read(builtin.name, 'SKILL.md', 0);
 	assert.equal((JSON.parse(namedReceipt.split('\n').at(-1)!) as { id: string }).id, builtin.id);
 	const call: Message = { role: 'assistant', content: '', toolCalls: [{ id: 'read1', name: 'read_skill', input: { id: personalReference, file: 'example.md' } }] };
 	const result: Message = { role: 'tool', content: receipt, toolCallId: 'read1', toolName: 'read_skill' };
 	const next = await builder.build(ctx, [initial, call, result], 100_000);
-	assert.match(next.messages.at(-1)!.content, /个人资源内容[\s\S]*下一页 offset=20000/u);
-	assert.ok(!next.messages.at(-1)!.content.includes(root));
+	assert.match(next.messages.find(({ toolCallId }) => toolCallId === 'read1')!.content, /个人资源内容[\s\S]*下一页 offset=20000/u);
+	assert.ok(!next.messages.find(({ toolCallId }) => toolCallId === 'read1')!.content.includes(root));
 	assert.doesNotMatch(receipt, /资源内容/u);
 	await writeFile(join(shared, 'outline/example.md'), '已更新的资源');
-	assert.match((await builder.build(ctx, [initial, call, result], 100_000)).messages.at(-1)!.content, /重新读取/u);
+	assert.match((await builder.build(ctx, [initial, call, result], 100_000)).messages.find(({ toolCallId }) => toolCallId === 'read1')!.content, /重新读取/u);
 	await symlink(join(root, 'outside'), join(shared, 'outline/outside.md'));
 	await writeFile(join(root, 'outside'), '外部文件');
 	await assert.rejects(runtime.read(personal.id, 'outside.md', 0), /授权目录/);
@@ -135,6 +145,7 @@ void test('技能从真实文件发现，点名首次投递，自动加载按页
 	assert.match(await registry.read(personal), /外部工具服务 example 尚未连接/u);
 	config.skillSettings!.sharedDirectories = [];
 	assert.equal((await lookup({ id: personalReference })).isError, true);
+	assert.equal((await readByName('共享目录 shared')).isError, true);
 	const revoked = await builder.build(ctx, [initial, ...listings], 100_000);
 	for (const { toolName } of listings.filter((m) => m.role === 'tool')) {
 		assert.match(revoked.messages.find((m) => m.toolName === toolName)?.content ?? '', /目录已失效/u);
@@ -173,7 +184,7 @@ void test('扫描缺项时仍能按当前笔记推荐和读取技能，手动选
 	const request: TaskRequest = { conversationId: 'chat', instruction: '帮我整理', refs: [] };
 	const current = createSkillRun(registry, request, 32_000, signal, 'current');
 	const preview = await current.project([taskMessage(request)], true);
-	assert.match(preview.guidance, /扫描有异常[\s\S]*仍可使用/u);
+	assert.doesNotMatch(preview.guidance, /扫描有异常/u);
 	assert.match(preview.guidance, /"weekly"[\s\S]*"meeting"|"meeting"[\s\S]*"weekly"/u);
 	assert.ok(!preview.guidance.includes(root));
 	const listing = JSON.parse(await current.list(0)) as { incomplete: boolean; items: { name: string; id: string }[] };
@@ -194,7 +205,7 @@ void test('扫描缺项时仍能按当前笔记推荐和读取技能，手动选
 	const folder = { ...request, refs: [{ path: '会议', kind: 'folder' as const }] };
 	assert.match((await createSkillRun(registry, folder, 32_000, signal).project([], true)).guidance, /"meeting"/u);
 	const manual = { ...request, instruction: '$weekly 帮我整理' };
-	assert.match((await createSkillRun(registry, manual, 32_000, signal).project([], true)).instructions, /请按要求完成/u);
+	assert.match((await createSkillRun(registry, manual, 32_000, signal).project([], true)).instructionsByMessage.get('') ?? '', /请按要求完成/u);
 	await writeSkill('weekly', '会议/另一天.md');
 	await assert.rejects(preview.beforeSend!(), /技能权限或目录已变化/u);
 	await assert.rejects(current.read(weekly, 'SKILL.md', 0), /不在本轮/u);
@@ -238,11 +249,11 @@ void test('创建预览只写入确认的位置，同名草稿保留原件', asy
 void test('技能清单按中文实际字节计算容量，公平保留说明和完整字符', () => {
 	const skill = { name: '笔记', id: '本库', enabled: true, implicit: true, manual: true, sourceLabel: '库', description: '📖提纲'.repeat(80) };
 	const settings = { ...normalizeSettings(null).skillSettings!, catalogBudgetMaxTokens: 35 };
-	const { list, omitted, shortened } = renderSkillCatalog([skill, { ...skill, id: '共享' }], settings, 100_000);
+	const { list, omitted, shortened } = renderSkillCatalog([skill, { ...skill, id: '共享', sourceLabel: '共享' }], settings, 100_000);
 	const lines = list.split('\n');
 	assert.equal(lines.length, 2);
 	assert.deepEqual(omitted, []);
 	assert.ok(shortened);
 	assert.ok(lines.reduce((sum, line) => sum + Math.ceil((Buffer.byteLength(line) + 1) / 4), 0) <= 35);
-	for (const line of lines) assert.match((JSON.parse(line) as string[])[2]!, /^📖/u);
+	for (const line of lines) assert.match((JSON.parse(line) as [object, string])[1], /^📖/u);
 });

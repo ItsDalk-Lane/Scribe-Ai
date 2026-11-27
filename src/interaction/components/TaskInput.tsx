@@ -8,7 +8,7 @@ import type { ExecutionMode, SkillInfo, SkillMention, SkillRegistry, TaskTarget 
 import { clipboardImages, saveClipboardImage } from '../composerImages';
 import { isImageFile, MAX_IMAGES } from '../../tools/support/imageData';
 import { composerShortcut, sideChatCommand } from '../composerKeyboard';
-import { parseSlashCommand, readSlashDraft, slashCommandAcceptsArgs, slashCommandAllowed, slashTargetCommand, slashTargetMatches } from '../slashCommands';
+import { parseSlashCommand, readSlashDraft, slashCommandAcceptsArgs, slashCommandAllowed, slashGoalActions, slashTargetCommand, slashTargetMatches } from '../slashCommands';
 import type { SlashCommand, SlashCommandName, SlashCommandSurface, SlashSubcommand, SlashTargetChoice } from '../slashCommands';
 import type { SlashUi } from '../slashUi';
 import { slashCommandText } from '../slashCommandText';
@@ -128,6 +128,8 @@ export default function TaskInput({
 	useEffect(() => searchingTargets ? subscribeTargets?.(() => refreshTargets((value) => value + 1)) : undefined,
 		[searchingTargets, subscribeTargets]);
 	const command = slashDraft && parseSlashCommand(instruction);
+	const goalDraft = modeKind === 'goal' || (slashCommands?.surface === 'main' && command?.name === 'goal'
+		&& !slashGoalActions.some((action) => action === command.args.toLowerCase()));
 	const isSideCommand = command?.name === 'side' || (!slashCommands && queueDuringRun && sideChatCommand(instruction) !== null);
 	const isSkillMenu = command?.name === 'skills' || (!slashCommands && instruction.trim() === '/skills');
 	const menu = useRef<(() => void) | null>(null);
@@ -316,6 +318,7 @@ export default function TaskInput({
 						}
 					}}
 				/>
+				{goalDraft && <div className="setting-item-description">{text.chatGoalReviewDisclosure}</div>}
 				{(skillError || error) && <div className="scribe-chat-error" role="alert">{skillError || error}</div>}
 				<div className="scribe-compose-toolbar">
 					<button type="button" className="scribe-compose-action scribe-compose-reference" disabled={referencesDisabled}

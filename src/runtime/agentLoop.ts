@@ -1,7 +1,7 @@
 import { realpath } from 'node:fs/promises';
 import { obsidianSearchToolName } from '../tools/workspaceTools';
 import { relative, resolve } from 'node:path';
-import { canUseToolWhileAnswering, taskMessage } from '../orchestration/context/contextBuilder';
+import { taskMessage } from '../orchestration/context/contextBuilder';
 import { pauseRun } from '../orchestration/runResume';
 import { SkillSteeringError } from '../skills/mentions';
 import type { McpManager } from '../tools/external/mcp';
@@ -9,20 +9,22 @@ import { createMcpRun } from '../tools/external/mcpTools';
 import { webSearchToolName } from '../tools/external/webTools';
 import { readOnlySkillTools } from '../tools/skillTools';
 import { chatTaskToolNames } from '../tools/chatTaskTools';
+import { planDraftToolNames } from '../tools/planTools';
 import { contactSubagentTool, manageSubagentsTool } from '../tools/subagentTools';
-import { isWithinPath, toolAbsolutePath } from '../tools/support/pathUtils';
+import { isWithinPath, resolveToolPath, toolAbsolutePath } from '../tools/support/pathUtils';
 import { toolSignature } from '../tools/support/toolSignature';
-import type { AgentLoop, Message, ModelCoordinator, ModelResponse, NoteRef, RunContext, RunEvent, RunState, SubagentNote, ToolApproval, ToolCall, ToolCoordinator, ToolResult } from '../types';
-import { isCachedImagePath } from '../orchestration/storage/paths';
+import type { AgentLoop, Message, ModelCoordinator, RunEvent, RunState, SubagentNote, ToolApproval, ToolCall, ToolCoordinator, ToolResult } from '../types';
+import { batchAdmission, hasNewInboxMessage, readSteering, waitForTurnInput } from './toolAdmission';
 import { latestIncompleteReply, mayHaveStoppedEarly, newContinuationText } from './continuationText';
 import { InitialContextBudgetError } from './modelCoordinator';
 import { explicitNoteTargets } from './noteTargets';
 import { assistantMessageId } from './runState';
+import { nextTurnAction } from './turnDecision';
 
 const MAX_UNCHANGED_RESULTS = 3;
 const fileChangeTools = new Set(['Write', 'Edit', 'NotebookEdit']);
 const resumeTools = new Set(['Read', 'Glob', 'Grep', obsidianSearchToolName, webSearchToolName, ...readOnlySkillTools, ...fileChangeTools,
-	contactSubagentTool, manageSubagentsTool, 'wait_agent', 'review_subagent_result', 'read_subagent_result', ...chatTaskToolNames]);
+	contactSubagentTool, manageSubagentsTool, 'wait_agent', 'review_subagent_result', 'read_subagent_result', ...chatTaskToolNames, ...planDraftToolNames]);
 const repeatedToolsError = '工具多次返回相同结果，已停止重复操作。';
 const pendingResume = '退出前未执行。继续任务时请补做此步骤，修改文件仍需重新请求确认。';
 const legacyPendingResume = '退出前未执行。继续任务时需要重新请求确认。';
@@ -54,12 +56,15 @@ function collaborationMessages(notes: readonly SubagentNote[], existing: readonl
 	});
 }
 
-function assistantReply(state: RunState, response: ModelResponse, content: string, raw: boolean, toolCalls?: ToolCall[]): Message {
+function assistantReply(state: RunState, response: Awaited<ReturnType<ModelCoordinator['nextTurn']>>, content: string, raw: boolean, toolCalls?: ToolCall[]): Message {
 	const message: Message = {
 		role: 'assistant', id: response.id ?? assistantMessageId(state), content, toolCalls,
 		truncated: response.stopReason === 'limit' ? true : undefined,
 		metrics: response.metrics,
 		reportedUsage: response.reportedUsage,
+		...(response.goalReportRequired && { goalReportRequired: true }),
+		...(response.estimatedUsage && { estimatedUsage: response.estimatedUsage }),
+		...(response.usageStatus === 'provisional' && { usageStatus: response.usageStatus }),
 	};
 	if (raw) return { ...message, rawAssistant: response.raw };
 	message.usage = response.usage ?? response.raw.usage;
@@ -74,6 +79,7 @@ function assistantReply(state: RunState, response: ModelResponse, content: strin
 function* savedResults(messages: Message[]) {
 	let calls = new Map<string, ToolCall>();
 	for (const message of messages) {
+		if (message.role === 'user' && message.id?.startsWith('steer:')) yield { steering: true as const };
 		if (message.role === 'assistant' && !message.incomplete) calls = new Map(message.toolCalls?.map((call) => [call.id, call]));
 		if (message.role !== 'tool' || !message.toolCallId) continue;
 		const call = calls.get(message.toolCallId);
@@ -96,23 +102,6 @@ function fileChangeSignature(call: ToolCall, path: string): string {
 		if (input.edit_mode === 'delete' && input.new_source === undefined) input.new_source = '';
 	}
 	return toolSignature({ ...call, input });
-}
-
-async function canSteerWithRefs(ctx: RunContext, refs: NoteRef[]): Promise<boolean> {
-	const { cwd, permissions } = ctx;
-	const readable = await Promise.all(refs.map(async ({ path, lines, pastedImage }) => {
-		try {
-			if (pastedImage && !lines) return isCachedImagePath(path, ctx.task.request.conversationId);
-			const absolute = toolAbsolutePath(cwd, path);
-			if (!permissions.canRead(absolute)) return false;
-			const canonical = await realpath(absolute);
-			const allowed = permissions.readLines?.(canonical);
-			return permissions.canRead(canonical) && (!allowed || Boolean(lines && lines[0] >= allowed[0] && lines[1] <= allowed[1]));
-		} catch {
-			return false;
-		}
-	}));
-	return readable.every(Boolean);
 }
 
 export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator, mcp?: McpManager): AgentLoop {
@@ -143,15 +132,6 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 				status: 'limit', error, pendingCalls: [],
 				messages: [...state.messages, ...skippedResults(state.pendingCalls, error)],
 			});
-			const readSteering = async () => {
-				const messages: (Message & { id: string })[] = [];
-				for (const { id, request } of ctx.takeSteering?.() ?? []) {
-					if (!request.refs.length || await canSteerWithRefs(ctx, request.refs)) messages.push({ ...taskMessage(request), id: `steer:${id}` });
-					else ctx.rejectSteering?.([id]);
-				}
-				signal.throwIfAborted();
-				return messages;
-			};
 
 			const approve = async (approval: ToolApproval): Promise<boolean> => {
 				signal.throwIfAborted();
@@ -205,6 +185,8 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 				const requestContext = resuming ? {
 					...ctx,
 					subagents: ctx.subagents && { ...ctx.subagents, resuming: true },
+					canDescribeTool: (tool: Parameters<typeof ctx.permissions.canCallTool>[0]) =>
+						ctx.permissions.canCallTool(tool) && (resumeTools.has(tool.name) || Boolean(tool.mcp)),
 					permissions: {
 						...ctx.permissions,
 						canWrite: (path: string) => ctx.permissions.canWrite(path) && mayWrite(path),
@@ -250,7 +232,12 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					if (kind === 'restored') priorWrittenPaths.add(path);
 				};
 				if (resuming) {
-					for (const { call, pending, result } of savedResults(state.messages)) {
+					for (const saved of savedResults(state.messages)) {
+						if (saved.steering) {
+							progressVersion++;
+							continue;
+						}
+						const { call, pending, result } = saved;
 						if (pending) await rememberResumeChange(call, 'pending');
 						else {
 							// 退出后认领会释放，协作者也能变更清单。续做时重新观察当前结果。
@@ -278,9 +265,10 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					observer.onEvent?.(start);
 					const nudge = earlyEndCheck === 'pending';
 					const finishing = lateSteering !== undefined || nudge;
-					const steering = lateSteering ?? await readSteering();
+					const steering = lateSteering ?? await readSteering(ctx);
 					lateSteering = undefined;
 					if (nudge) earlyEndCheck = 'used';
+					const restoring = Boolean(resumePrompt);
 					const reminder = resumePrompt ?? (outputSoFar === undefined ? undefined : outputContinuation)
 						?? (nudge && !steering.length ? earlyEndReminder : undefined);
 					resumePrompt = undefined;
@@ -291,7 +279,8 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					const received = collaborationMessages(inbox ?? [], state.messages, ctx.subagentId);
 					if (received.length) await update({ messages: [...state.messages, ...received] });
 					const userNotes: Message[] = (inbox ?? []).flatMap((note) => note.from === 'user'
-						? [{ role: 'user', id: `steer:${note.id}`, content: note.text }] : []);
+						? [{ role: 'user', id: `steer:${note.id}`, content: note.text,
+							taskPrompt: { instruction: note.text.length, references: 0, quotes: 0 } }] : []);
 					const answering = inbox?.some(({ kind }) => kind === 'question');
 					const turnContext = inbox ? {
 						...requestContext,
@@ -307,11 +296,11 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 							if (event.type !== 'text-delta') observer.onEvent?.(event);
 						} },
 					} : turnContext;
-					let response: ModelResponse;
+					let response: Awaited<ReturnType<ModelCoordinator['nextTurn']>>;
 					ctx.skillRun?.rememberCommitted(state.messages);
 					for (;;) {
 						const requestState = steering.length ? { ...baseRequest, messages: [...baseRequest.messages, ...steering] } : baseRequest;
-						try { response = await models.nextTurn(requestState, modelContext); break; } catch (error) {
+						try { response = await models.nextTurn(requestState, { ...modelContext, promptMessageCount: state.messages.length, promptResuming: restoring }); break; } catch (error) {
 							// 只在模型请求尚未发出时移除插话并继续原任务。
 							if (error instanceof SkillSteeringError) {
 								const index = steering.findIndex((message) => message.id === error.messageId);
@@ -341,11 +330,16 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					}
 					const truncated = response.stopReason === 'limit';
 					const calls = truncated ? [] : response.toolCalls.map((call) => {
-						const label = ctx.mcpRun?.label(call.name);
+						const label = ctx.mcpRun?.label(call.name, call.input);
 						return label ? { ...call, label } : call;
 					});
 					const finished = response.stopReason === 'end' && calls.length === 0;
-					const held = finished && collaboration?.pending().blocking === true;
+					if (finished && ctx.takeSteering) {
+						const pending = await readSteering(ctx);
+						if (pending.length) lateSteering = pending;
+					}
+					const progress = finished ? collaboration?.pending() : undefined;
+					const held = progress?.blocking === true;
 					awaitingCollaboration = held;
 					const content = held ? '' : outputSoFar === undefined ? response.content : newContinuationText(outputSoFar, response.content);
 					// 工具请求保留原始签名，修正后的纯文字用已拼接的正文回放。
@@ -353,61 +347,50 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 					if (calls.some((call) => !call.id) || new Set(calls.map((call) => call.id)).size !== calls.length) {
 						throw new Error('模型返回了无法配对的工具请求。');
 					}
-					if (finished) {
-						if (ctx.takeSteering) {
-							const pending = await readSteering();
-							if (pending.length) lateSteering = pending;
-						}
-						if (!held && !lateSteering && !earlyEndCheck && outputSoFar === undefined && !response.content.trim() && mayHaveStoppedEarly(state.messages)) {
-							earlyEndCheck = 'pending';
-						}
-					}
-					const newNote = finished && ctx.inbox?.().some((note) =>
-						(note.from === 'user' || collaboration) && !inbox?.some(({ id }) => id === note.id));
-					const followUp = lateSteering !== undefined || earlyEndCheck === 'pending' || newNote || held;
+					const next = nextTurnAction(response, content, {
+						newInput: finished && (Boolean(lateSteering) || hasNewInboxMessage(ctx, inbox)),
+						collaboration: progress,
+						checkEmptyReply: finished && !held && !earlyEndCheck && outputSoFar === undefined
+							&& !response.content.trim() && mayHaveStoppedEarly(state.messages),
+					});
 					await update({
 						messages: [...state.messages, ...userNotes, assistantReply(state, response, content, keepRaw, calls)],
 						pendingCalls: calls,
-						status: finished && !followUp ? 'done' : state.status,
+						status: next === 'finish' ? 'done' : state.status,
 					});
 					if (inbox?.length) await ctx.acceptInbox?.(inbox.map(({ id }) => id));
+					if (steering.length || userNotes.length) progressVersion++;
 
-					if (truncated) {
-						if (!response.structuredOutput && content.trim()) {
-							outputSoFar = (outputSoFar ?? '') + content;
-							continue;
-						}
+					if (next === 'continue-text') {
+						outputSoFar = (outputSoFar ?? '') + content;
+						continue;
+					}
+					if (next === 'stop-at-limit') {
 						await stopAtLimit('模型的回答被截断，已保留收到的内容。');
 						break;
 					}
 					outputSoFar = undefined;
-					if (calls.length === 0) {
-						if (response.stopReason === 'tool-calls') throw new Error('模型结束了本轮，却没有给出完整的工具请求。');
-						if (held && collaboration && !newNote && !lateSteering && !collaboration.pending().actionable) {
-							await collaboration.waitForProgress(signal);
-						}
-						if (followUp) continue;
-						break;
+					if (next === 'finish') break;
+					if (next === 'incomplete-calls') throw new Error('模型结束了本轮，却没有给出完整的工具请求。');
+					if (next !== 'run-tools') {
+						if (next === 'check-empty-reply') earlyEndCheck = 'pending';
+						if (next === 'wait-for-collaboration') await waitForTurnInput(ctx);
+						continue;
 					}
+					const admission = batchAdmission(ctx, inbox, answering === true, resuming ? skipContinuation : undefined, response.requiredToolIntents);
 					const signatures = new Map(calls.map((call) => [call.id, toolSignature(call)]));
 					const allStalled = (pending: ToolCall[]) => pending.length > 0 && pending.every((call) => {
 						const outcome = toolOutcomes.get(signatures.get(call.id)!);
 						return outcome?.progressVersion === progressVersion && outcome.unchanged >= MAX_UNCHANGED_RESULTS;
 					});
-					if (allStalled(calls)) {
+					if (allStalled(calls) && !await admission.userHasSteered()) {
 						await stopAtLimit(repeatedToolsError);
 						break;
 					}
 
-					const skip = collaboration || resuming ? async (call: ToolCall) => {
-						if ((answering || collaboration?.pending().questions) && (!answering || !canUseToolWhileAnswering(call))) {
-							return '本轮优先答复子 Agent。已保留此前完成的操作，请在后续轮次继续。';
-						}
-						return resuming ? skipContinuation(call) : undefined;
-					} : undefined;
-					for await (const { call, result, skipped } of tools.runCalls(state, requestContext, approve, skip)) {
+					for await (const { call, result, skipped } of tools.runCalls(state, requestContext, approve, admission.skip)) {
 						if (result.isError && signal.reason === pauseRun) signal.throwIfAborted();
-						remember(call, result);
+						if (!skipped || !await admission.userHasSteered()) remember(call, result);
 						if (resuming && !skipped && !result.isError) await rememberResumeChange(call, 'current');
 						const message: Message = {
 							role: 'tool', content: result.content, toolCallId: call.id,
@@ -419,13 +402,20 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 							...(result.imageRefs?.length && !skipped && !result.isError && { imageRefs: result.imageRefs }),
 						};
 						if (result.fileRead) ctx.readDelivery.remember(message, result.fileRead);
+						if (call.name === 'Read' && !result.isError && ctx.promptContext && ctx.directoryRules?.trusted()) {
+							const path = (call.input as { file_path?: unknown } | null)?.file_path;
+							if (typeof path === 'string' && !/^https?:/iu.test(path)) {
+								const location = await resolveToolPath(ctx, path, 'read').catch(() => undefined);
+								if (location?.vaultPath) ctx.promptContext.directories.add(location.vaultPath);
+							}
+						}
 						await update({
 							messages: [...state.messages, message],
 							pendingCalls: state.pendingCalls.slice(1),
 						});
 						observer.onEvent?.({ type: 'tool-end', call, result, skipped });
 						signal.throwIfAborted();
-						if (allStalled(state.pendingCalls)) {
+						if (allStalled(state.pendingCalls) && !await admission.userHasSteered()) {
 							await stopAtLimit(repeatedToolsError);
 							break;
 						}

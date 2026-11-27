@@ -1,4 +1,5 @@
 import { TOOL_NOT_APPROVED } from '../types';
+import { goalNoteObservations, localNoteCondition, noteConditionMet } from './goalNoteEvidence';
 import type { Message, NoteRef, RunState, SkillMention } from '../types';
 import { isSkillMentionAt } from '../skills/mentions';
 import { safeResourcePath } from '../skills/library/vaultAdapter';
@@ -10,10 +11,12 @@ export const MAX_GOAL_PLAN_LENGTH = 16_000;
 
 const maxEvidenceLength = 600;
 const maxNotePaths = 100;
+const maxObservationDigests = 256;
 const reportStart = '<!-- scribe-goal-report: ';
 const reportEnd = ' -->';
+export const reportGoalToolName = 'ReportGoal';
 
-export type GoalPause = 'manual' | 'plan' | 'closed' | 'stalled' | 'failed' | 'blocked';
+export type GoalPause = 'manual' | 'plan' | 'closed' | 'stalled' | 'failed' | 'blocked' | 'verification';
 
 export interface GoalCheck {
 	criterion: string;
@@ -22,9 +25,14 @@ export interface GoalCheck {
 }
 
 export interface GoalProgress {
+	observations?: string[];
 	checks: GoalCheck[];
 	remaining: string[];
 	blocked?: string;
+}
+
+interface NumberedGoalReport extends Omit<GoalProgress, 'checks' | 'observations'> {
+	checks: (Omit<GoalCheck, 'criterion'> & { criterion: number })[];
 }
 
 export interface ChatGoal {
@@ -104,6 +112,8 @@ function savedProgress(value: unknown, criteria: string[]): value is GoalProgres
 		&& value.checks.every((check: unknown) => record(check) && typeof check.criterion === 'string'
 			&& criteria.includes(check.criterion) && text(check.evidence, maxEvidenceLength)
 			&& (check.notePaths === undefined || notePaths(check.notePaths)))
+		&& (value.observations === undefined || (Array.isArray(value.observations) && value.observations.length <= maxObservationDigests
+			&& value.observations.every((item: unknown) => typeof item === 'string' && /^[a-f0-9]{64}$/u.test(item))))
 		&& textList(value.remaining, MAX_GOAL_CRITERIA * 2, MAX_GOAL_LENGTH)
 		&& (value.blocked === undefined || text(value.blocked, maxEvidenceLength));
 }
@@ -143,7 +153,7 @@ export function parseChatGoal(value: unknown): ChatGoal | undefined {
 		objective, usedRounds, totalRounds, status,
 		...(workedMs !== undefined && { workedMs }),
 		...(reason === 'limit' ? { reason: 'manual' } :
-			(reason === 'manual' || reason === 'plan' || reason === 'closed' || reason === 'stalled' || reason === 'failed' || reason === 'blocked') && { reason }),
+			(reason === 'manual' || reason === 'plan' || reason === 'closed' || reason === 'stalled' || reason === 'failed' || reason === 'blocked' || reason === 'verification') && { reason }),
 		...(typeof evidence === 'string' && { evidence: evidence.slice(0, maxEvidenceLength) }),
 		...(criteria && { criteria }), ...(refs && { refs }), ...(chatQuotes && { chatQuotes }),
 		...(imageSourcePath && { imageSourcePath }),
@@ -175,36 +185,53 @@ export function stripGoalReport(content: string): string {
 		.replace(/<!-- scribe-goal-(?:complete:[^\r\n]*?|blocked) -->/gu, '').trimEnd();
 }
 
-function readReport(line: string | undefined, criteria: string[]): GoalProgress | undefined {
-	if (!line?.startsWith(reportStart) || !line.endsWith(reportEnd) || line.length > 125_000) return;
-	let value: unknown;
-	try { value = JSON.parse(line.slice(reportStart.length, -reportEnd.length)); } catch { return; }
-	if (!record(value) || !Array.isArray(value.checks) || value.checks.length > criteria.length
+export function parseNumberedGoalReport(value: unknown, criterionCount: number): NumberedGoalReport | undefined {
+	if (!record(value) || !Array.isArray(value.checks) || value.checks.length > criterionCount
 		|| !textList(value.remaining, MAX_GOAL_CRITERIA, maxEvidenceLength)
 		|| (value.blocked !== undefined && !text(value.blocked, maxEvidenceLength))) return;
-	const checks: GoalCheck[] = [];
+	const checks: NumberedGoalReport['checks'] = [];
 	for (const check of value.checks as unknown[]) {
-		if (!record(check) || !count(check.criterion) || !text(check.evidence, maxEvidenceLength)
-			|| (check.notePaths !== undefined && !notePaths(check.notePaths))) return;
-		const criterion = criteria[check.criterion - 1];
-		if (!criterion || checks.some((saved) => saved.criterion === criterion)) return;
-		checks.push({ criterion, evidence: check.evidence.trim(), ...(check.notePaths && { notePaths: check.notePaths }) });
+		if (!record(check) || !count(check.criterion) || check.criterion < 1 || check.criterion > criterionCount
+			|| !text(check.evidence, maxEvidenceLength) || (check.notePaths !== undefined && !notePaths(check.notePaths))
+			|| checks.some((saved) => saved.criterion === check.criterion)) return;
+		checks.push({ criterion: check.criterion, evidence: check.evidence.trim(), ...(check.notePaths && { notePaths: check.notePaths }) });
 	}
 	return { checks, remaining: value.remaining.map((item) => item.trim()), ...(value.blocked && { blocked: value.blocked.trim() }) };
 }
 
-function successfulNoteReceipts(messages: Message[]) {
-	const read = new Set<string>();
-	const changed = new Set<string>();
-	for (const message of messages) {
-		if (message.role !== 'tool' || message.isError !== false || message.skipped) continue;
-		if (message.noteChange) changed.add(message.noteChange.path);
-		if (message.toolName === 'Read') {
-			const path = /^([^\r\n]+)（(?:第 \d+–\d+ 行|空文件)）(?:\r?\n|$)/u.exec(message.content)?.[1];
-			if (notePath(path)) read.add(path);
+export function confirmedGoalReport(messages: readonly Message[], criterionCount: number): NumberedGoalReport | undefined {
+	const receipts = new Set<string>();
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i]!;
+		if (msg.local) continue;
+		if (msg.role === 'user') return;
+		if (msg.role === 'tool' && msg.toolName === reportGoalToolName && msg.toolCallId && msg.isError === false && !msg.skipped) {
+			receipts.add(msg.toolCallId);
+		}
+		if (msg.role !== 'assistant') continue;
+		const call = !msg.incomplete && !msg.truncated && msg.toolCalls?.find(({ name, id }) => name === reportGoalToolName && receipts.has(id));
+		if (call) return parseNumberedGoalReport(call.input, criterionCount);
+		receipts.clear();
+	}
+	return undefined;
+}
+
+function goalProgress(report: NumberedGoalReport, criteria: string[]): GoalProgress {
+	return { ...report, checks: report.checks.map((check) => ({ ...check, criterion: criteria[check.criterion - 1]! })) };
+}
+
+function readLegacyReport(line: string | undefined, criteria: string[], legacyGoal: boolean): GoalProgress | undefined {
+	if (legacyGoal) {
+		const evidence = line?.match(/^<!-- scribe-goal-complete: ([^<>\r\n]{1,600}) -->$/u)?.[1]?.trim();
+		if (evidence && evidence !== '实际的完成依据') {
+			return { checks: [{ criterion: criteria[0]!, evidence }], remaining: [] };
 		}
 	}
-	return { read, changed };
+	if (!line?.startsWith(reportStart) || !line.endsWith(reportEnd) || line.length > 125_000) return;
+	let value: unknown;
+	try { value = JSON.parse(line.slice(reportStart.length, -reportEnd.length)); } catch { return; }
+	const report = parseNumberedGoalReport(value, criteria.length);
+	return report && goalProgress(report, criteria);
 }
 
 function citedPaths(criterion: string, evidence: string): string[] {
@@ -212,24 +239,66 @@ function citedPaths(criterion: string, evidence: string): string[] {
 		.map((match) => match[1]).filter(notePath);
 }
 
-function settleProgress(goal: ChatGoal, result: RunState | undefined, report: GoalProgress | undefined): GoalProgress {
-	const { read, changed } = successfulNoteReceipts(result?.messages ?? []);
+function settleProgress(goal: ChatGoal, answer: string, report: GoalProgress | undefined,
+	{ latest, changed }: ReturnType<typeof goalNoteObservations>): GoalProgress {
 	const criteria = goal.criteria ?? [goal.objective];
-	const checks = new Map(goal.progress?.checks.filter(({ notePaths }) => !notePaths?.some((path) => changed.has(path)))
-		.map((check) => [check.criterion, check] as const));
+	const checks = new Map<string, GoalCheck>();
+	const relevantPaths = new Set(criteria.flatMap((criterion) => {
+		const local = localNoteCondition(criterion);
+		return local ? [local.path] : citedPaths(criterion, '');
+	}));
+	for (const check of goal.progress?.checks ?? []) {
+		const local = localNoteCondition(check.criterion);
+		if (local) {
+			// 在宣告全部完成之前，使用本轮最新观察复核，即使该项是从旧版本的目标记录恢复的。
+			if ((latest.has(local.path) || report?.remaining.length === 0) && !noteConditionMet(local, latest.get(local.path))) continue;
+		} else if (check.notePaths?.some((path) => changed.has(path))) continue;
+		checks.set(check.criterion, check);
+	}
 	for (const check of report?.checks ?? []) {
-		const paths = [...new Set([...(check.notePaths ?? []), ...citedPaths(check.criterion, check.evidence)])];
-		if (paths.length > maxNotePaths) continue;
-		if (paths.some((path) => !read.has(path) && !changed.has(path))) continue;
+		const local = localNoteCondition(check.criterion);
+		const paths = local ? [local.path] : [...new Set([...(check.notePaths ?? []), ...citedPaths(check.criterion, check.evidence)])];
+		if (paths.length > maxNotePaths || paths.some((path) => !latest.has(path))) continue;
+		if (local && !noteConditionMet(local, latest.get(local.path))) continue;
 		checks.set(check.criterion, paths.length ? { ...check, notePaths: paths } : check);
 	}
 	const missing = criteria.filter((criterion) => !checks.has(criterion));
 	const outstanding = report?.remaining ?? goal.progress?.remaining ?? [];
 	const remaining = [...new Set([...missing, ...outstanding.filter((item) => !checks.has(item))])].slice(0, MAX_GOAL_CRITERIA * 2);
-	return { checks: Array.from(checks.values()), remaining, ...(report?.blocked && { blocked: report.blocked }) };
+	const account = [goal.objective, stripGoalReport(answer), ...(report?.remaining ?? []),
+		...(report?.checks.flatMap((check) => [check.evidence, ...(check.notePaths ?? [])]) ?? [])].filter(Boolean).join('\n');
+	const seen = new Set(goal.progress?.observations);
+	for (const [path, observation] of latest) {
+		if (!observation.digest || !observation.body?.trim()) continue;
+		if (relevantPaths.has(path) || account.includes(path) || goal.refs?.some((ref) => ref.kind === 'folder'
+			? path.startsWith(ref.path + '/') : path === ref.path)) seen.add(observation.digest);
+	}
+	return { checks: [...checks.values()], remaining, ...(seen.size > 0 && { observations: [...seen].slice(-maxObservationDigests) }), ...(report?.blocked && { blocked: report.blocked }) };
 }
 
-export function finishGoalRound(goal: ChatGoal, result: RunState | undefined): ChatGoal {
+type GoalReview = 'passed' | 'needs-evidence';
+
+export function goalCompletionEvidence(goal: ChatGoal, result: RunState) {
+	if (goal.status !== 'active') return;
+	const notes = goalNoteObservations(result.messages, notePath);
+	const proposed = finishGoalRound(goal, result, 'passed', notes);
+	if (proposed.status !== 'complete' || !proposed.progress) return;
+	const checks: GoalCheck[] = [];
+	const local = new Map<string, { path: string; start: number; body: string }>();
+	for (const check of proposed.progress.checks) {
+		const condition = localNoteCondition(check.criterion);
+		if (!condition) checks.push(check);
+		else {
+			const observed = notes.latest.get(condition.path);
+			if (observed?.body === undefined) return;
+			local.set(condition.path, { path: condition.path, start: observed.start, body: observed.body });
+		}
+	}
+	return { checks, local: [...local.values()] };
+}
+
+export function finishGoalRound(goal: ChatGoal, result: RunState | undefined, review?: GoalReview,
+	notes = goalNoteObservations(result?.messages ?? [], notePath)): ChatGoal {
 	if (goal.status !== 'active') return goal;
 	const criteria = goal.criteria ?? [goal.objective];
 	const successful = result?.status === 'done' || result?.status === 'file-changes-done';
@@ -237,10 +306,12 @@ export function finishGoalRound(goal: ChatGoal, result: RunState | undefined): C
 		&& !message.subagentActivity).at(-1);
 	const lastLine = answer && !answer.incomplete && !answer.truncated && !answer.toolCalls?.length
 		? answer.content.trimEnd().split('\n').at(-1) : undefined;
-	const report = readReport(lastLine, criteria);
+	const structured = lastLine !== undefined && result ? confirmedGoalReport(result.messages, criteria.length) : undefined;
+	const legacy = answer && !answer.goalReportRequired && !structured;
+	const report = structured ? goalProgress(structured, criteria) : legacy ? readLegacyReport(lastLine, criteria, !goal.criteria && !goal.progress) : undefined;
 	const denied = result?.messages.some(({ role, content, approvalReview }) => role === 'tool'
 		&& (content === TOOL_NOT_APPROVED || approvalReview === 'denied'));
-	const next = goal.criteria || goal.progress || report ? { ...goal, progress: settleProgress(goal, result, successful && !denied ? report : undefined) } : goal;
+	const next = goal.criteria || goal.progress || report ? { ...goal, progress: settleProgress(goal, answer ? answer.content : '', successful && !denied ? report : undefined, notes) } : goal;
 	if (denied) {
 		const progress = next.progress && { ...next.progress, blocked: TOOL_NOT_APPROVED };
 		return { ...next, status: 'paused', reason: 'blocked', ...(progress && { progress }) };
@@ -249,17 +320,19 @@ export function finishGoalRound(goal: ChatGoal, result: RunState | undefined): C
 		return { ...next, status: 'paused', reason: result?.status === 'limit' ? 'stalled' : result?.status === 'cancelled' ? 'manual' : 'failed' };
 	}
 	if (answer && answer.toolCalls?.length) return { ...next, status: 'paused', reason: 'failed' };
-	if (report?.blocked || lastLine === '<!-- scribe-goal-blocked -->') return { ...next, status: 'paused', reason: 'blocked' };
-	if (report && next.progress?.remaining.length === 0 && report.remaining.length === 0) return { ...next, status: 'complete' };
-	if (!goal.criteria && !goal.progress) {
-		// 已保存的旧轮次仍按原格式恢复。
-		const evidence = lastLine?.match(/^<!-- scribe-goal-complete: ([^<>\r\n]{1,600}) -->$/u)?.[1]?.trim();
-		if (evidence && evidence !== '实际的完成依据') return { ...next, status: 'complete', evidence };
+	if (report?.blocked || (legacy && lastLine === '<!-- scribe-goal-blocked -->')) return { ...next, status: 'paused', reason: 'blocked' };
+	if (report && next.progress?.remaining.length === 0 && report.remaining.length === 0) {
+		const semantic = next.progress.checks.filter((check) => !localNoteCondition(check.criterion));
+		if (review === 'needs-evidence' || (semantic.length && review !== 'passed')) {
+			const unresolved = review === 'needs-evidence' ? next.progress.checks : semantic;
+			return { ...next, status: 'paused', reason: 'verification', progress: { ...next.progress,
+				checks: next.progress.checks.filter((check) => !unresolved.includes(check)), remaining: unresolved.map((check) => check.criterion) } };
+		}
+		return { ...next, status: 'complete' };
 	}
 	const checked = new Set(goal.progress?.checks.map(({ criterion }) => criterion));
-	const remaining = new Set(goal.progress?.remaining ?? criteria);
+	const previouslySeen = new Set(goal.progress?.observations);
 	const advanced = next.progress?.checks.some(({ criterion }) => !checked.has(criterion))
-		|| (next.progress && (next.progress.remaining.length !== remaining.size || next.progress.remaining.some((item) => !remaining.has(item))))
-		|| successfulNoteReceipts(result.messages).changed.size > 0;
+		|| next.progress?.observations?.some((digest) => !previouslySeen.has(digest));
 	return advanced ? next : { ...next, status: 'paused', reason: 'stalled' };
 }

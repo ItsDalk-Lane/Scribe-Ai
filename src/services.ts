@@ -99,7 +99,7 @@ export async function createServices(app: App, settings: ScribeSettings, manifes
 	const skills = createSkillRegistry(app, settings, saveSettings, skillReview, mcp.isConnected);
 	const orchestration: OrchestrationLayer = {
 		sessions: createSessionController(
-			app, settings, runtime, conversations, communication.models.thinkingOptions, communication.models, tools.shellJobs, skills, onConversationDeleted,
+			app, settings, runtime, conversations, communication.models.thinkingOptions, communication.models, tools.shellJobs, skills, onConversationDeleted, localState,
 		),
 		context,
 		skills,

@@ -42,13 +42,17 @@ export async function readStoredJson(path: string): Promise<unknown> {
 }
 
 export async function writeStoredJson(path: string, data: unknown): Promise<void> {
+	await writeStoredText(path, JSON.stringify(data, null, 2) + '\n');
+}
+
+export async function writeStoredText(path: string, text: string): Promise<void> {
 	const directory = dirname(path);
 	const temporary = join(directory, `.write-${randomUUID()}.tmp`);
 	if (!(await lstat(directory)).isDirectory()) throw new Error('Scribe Ai 的数据目录无效。');
 	const file = await open(temporary, 'wx', 0o600);
 	try {
 		try {
-			await file.writeFile(JSON.stringify(data, null, 2) + '\n', 'utf8');
+			await file.writeFile(text, 'utf8');
 			await file.sync();
 		} finally {
 			await file.close();

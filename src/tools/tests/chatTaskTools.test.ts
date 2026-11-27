@@ -55,11 +55,12 @@ void test('chat checklist tools expose the latest batch, use the bound chat, and
 	assert.equal(history.length, 4);
 });
 
-void test('plan exposes drafting operations only and side chat, review and disabled tools cannot access the checklist', async () => {
+void test('plan uses the same checklist definitions while enforcing drafting-only access and side chat, review and disabled tools cannot access the checklist', async () => {
 	const { create, execute, builder, history } = fixture();
 	const plan = await create('plan');
-	const update = (await builder.build(plan, [], 100_000)).tools.find(({ name }) => name === 'TaskUpdate');
-	assert.deepEqual((update?.inputSchema.properties as { status: { enum: string[] } }).status.enum, ['pending', 'deleted']);
+	const planned = await builder.build(plan, [], 100_000);
+	const regular = await builder.build(await create(), [], 100_000);
+	assert.deepEqual(planned.tools, regular.tools);
 	for (const status of ['in_progress', 'completed']) {
 		assert.equal((await execute(plan, 'TaskUpdate', { taskId: '8', status })).isError, true);
 	}

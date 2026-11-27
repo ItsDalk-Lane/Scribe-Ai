@@ -39,6 +39,7 @@ export default function ApprovalView({ approval, source }: { approval: ChatAppro
 			</div>
 			<div className="scribe-approval-body" role="group" aria-labelledby={headingId} tabIndex={0}>
 				<h3 id={headingId}>{title}</h3>
+				{approval.intent && <p className="scribe-chat-disclosure" dir="auto">{approval.intent}</p>}
 				{shell && <div>{text.chatWorkingFolder}</div>}
 				<div className="scribe-chat-path" dir="auto">{approval.target}</div>
 				{approval.reason && <p className="scribe-chat-disclosure">{approval.reason}</p>}

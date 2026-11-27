@@ -17,6 +17,10 @@ const globalLegacyKeys = [executionModeKey(), expansionKey, oauthDeviceIdKey];
 
 interface StoredState {
 	device: string;
+	contextScope?: string;
+	trustDirectoryRules?: true;
+	longTermMemory?: true;
+	searchVaultHistory?: true;
 	lastExecutionMode: ExecutionMode;
 	conversationModes: Record<string, ExecutionMode>;
 	timelineExpanded: string[];
@@ -43,12 +47,18 @@ export async function initializeLocalState(path: string, app: LegacyStorage, con
 	const ids = [...new Set(conversationIds)];
 	// 搬到另一台设备的笔记库不能自动继承本机的工具权限和登录标识。
 	const device = createHash('sha256').update(JSON.stringify([process.platform, hostname(), homedir()])).digest('hex');
+	const contextScope = createHash('sha256').update(JSON.stringify([device, path])).digest('hex');
 	const saved = record(await readStoredJson(path));
 	const currentDevice = saved.device === device;
+	const sameContext = currentDevice && saved.contextScope === contextScope;
 	const oldMode = (id?: string) => executionMode(legacyValue(app, executionModeKey(id)));
 	const storedModes = record(saved.conversationModes);
 	let state: StoredState = {
 		device,
+		contextScope,
+		...(sameContext && saved.trustDirectoryRules === true && { trustDirectoryRules: true as const }),
+		...(sameContext && saved.longTermMemory === true && { longTermMemory: true as const }),
+		...(sameContext && saved.searchVaultHistory === true && { searchVaultHistory: true as const }),
 		lastExecutionMode: (currentDevice ? executionMode(saved.lastExecutionMode) : oldMode()) ?? 'ask',
 		conversationModes: Object.fromEntries((currentDevice ? Object.keys(storedModes) : ids).flatMap((id) => {
 			const mode = currentDevice ? executionMode(storedModes[id]) : oldMode(id);
@@ -63,6 +73,7 @@ export async function initializeLocalState(path: string, app: LegacyStorage, con
 	let writes = Promise.resolve();
 	const pending = new Set<(current: StoredState) => StoredState>();
 	let deviceIdSave: Promise<string> | undefined;
+	let contextVersion = 0;
 	function save(update: (current: StoredState) => StoredState): Promise<void> {
 		pending.add(update);
 		state = update(state);
@@ -96,7 +107,21 @@ export async function initializeLocalState(path: string, app: LegacyStorage, con
 		if (legacy) await store.saveGoal(id, legacy);
 		return { goal: legacy ?? restoreChatGoal(recorded), migrated: Boolean(legacy) };
 	}
+	const contextSetting = (key: 'trustDirectoryRules' | 'longTermMemory' | 'searchVaultHistory') =>
+		state[key] === true && persisted[key] === true;
+	const saveContextSetting = (key: 'trustDirectoryRules' | 'longTermMemory' | 'searchVaultHistory', enabled: boolean) => {
+		contextVersion++;
+		return save((current) => ({ ...current, [key]: enabled ? true : undefined })).finally(() => { contextVersion++; });
+	};
 	return {
+		memoryScope: contextScope,
+		contextVersion: () => contextVersion,
+		directoryRulesTrusted: () => contextSetting('trustDirectoryRules'),
+		saveDirectoryRulesTrust: (enabled: boolean) => saveContextSetting('trustDirectoryRules', enabled),
+		memoryEnabled: () => contextSetting('longTermMemory'),
+		saveMemoryEnabled: (enabled: boolean) => saveContextSetting('longTermMemory', enabled),
+		vaultHistoryEnabled: () => contextSetting('searchVaultHistory'),
+		saveVaultHistoryEnabled: (enabled: boolean) => saveContextSetting('searchVaultHistory', enabled),
 		loadExecutionMode(id?: string): ExecutionMode {
 			return id ? executionMode(state.conversationModes[id]) ?? 'ask' : state.lastExecutionMode;
 		},

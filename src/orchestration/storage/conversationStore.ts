@@ -1,3 +1,4 @@
+import { runProgressFilename } from './paths';
 import { randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { constants } from 'node:fs';
@@ -6,6 +7,8 @@ import type { FileHandle } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { parseChatGoal } from '../../interaction/chatGoal';
+import { matchesApprovedPlan, parsePlanMarkdown, planRevision, submittedPlan } from '../../interaction/chatPlan';
+import type { PlanDraft } from '../../interaction/chatPlan';
 import { SAVED_SHELL_JOB_LIMIT } from '../../tools/external/shellJobs';
 import type { SavedShellJob } from '../../tools/external/shellJobs';
 import { MissingConversationError } from '../../types';
@@ -21,11 +24,16 @@ import { createSubagentRecordIndex } from './subagentRecords';
 import { sameQueuedDestination } from '../settings/modelConnection';
 import { ChatTaskBoard } from './chatTasks';
 import type { ChatTask } from './chatTasks';
+import { conversationPlanFilename, conversationPlanPrefix } from './paths';
 
 const idPattern = /^(?!(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$)[A-Z0-9][A-Z0-9-]{0,95}$/i;
 const titleLimit = 120;
 const goalSuffix = '.goal.json';
 const goalSizeLimit = 1024 * 1024;
+const planSizeLimit = 16_000;
+const planFileLimit = planSizeLimit * 4 + 64;
+const planDraftMarker = '<!-- scribe-saved-plan: draft -->\n';
+const planSubmittedMarker = '<!-- scribe-saved-plan: submitted -->\n';
 const writeQueue = new Map<string, Promise<unknown>>();
 const deletedLogs = new Set<string>();
 const taskSubscribers = new Map<string, Set<() => void>>();
@@ -285,6 +293,40 @@ export function createConversationStore(directory: string, recordMigrationChange
 	const archiveName = (id: string) => `${id}.archived`;
 	const archivePath = (id: string) => join(root, archiveName(id));
 	const compactionPath = (id: string) => join(root, `${id}.compaction.json`);
+	const planPath = (id: string, taskId: string) => {
+		checkId(taskId);
+		return join(root, conversationPlanFilename(id, taskId));
+	};
+	const isPlanFile = (id: string, name: string) => name.startsWith(conversationPlanPrefix(id)) && name.endsWith('.md');
+	const progressPath = (id: string, taskId: string) => {
+		checkId(id);
+		checkId(taskId);
+		return join(root, runProgressFilename(id, taskId));
+	};
+	const isProgressFile = (id: string, name: string) => name.startsWith(`${id}.`) && name.endsWith('.progress.json');
+	async function readPlan(id: string, taskId: string): Promise<PlanDraft | undefined> {
+		const opened = await openIfExists(planPath(id, taskId));
+		if (!opened) return;
+		try {
+			if (opened.stat.size > planFileLimit) return { markdown: '', submitted: false };
+			const raw = await opened.file.readFile('utf8');
+			const submitted = raw.startsWith(planSubmittedMarker);
+			const marker = submitted ? planSubmittedMarker : planDraftMarker;
+			return { markdown: (raw.startsWith(marker) ? raw.slice(marker.length) : raw).trim(), submitted };
+		} finally { await opened.file.close(); }
+	}
+	function writePlan(id: string, taskId: string, draft: PlanDraft) {
+		return writeAtomically(planPath(id, taskId), (draft.submitted ? planSubmittedMarker : planDraftMarker) + draft.markdown + '\n');
+	}
+	async function latestRun(id: string, path: string) {
+		const opened = await openIfExists(path);
+		if (!opened) return;
+		try {
+			const run = (await replayConversation(id, readRecords(opened.file, opened.stat.size))).runs.at(-1);
+			if (run?.request.intent === 'plan' && idPattern.test(run.state.taskId)) run.planDraft = await readPlan(id, run.state.taskId);
+			return run;
+		} finally { await opened.file.close(); }
+	}
 	async function readGoal(id: string) {
 		const opened = await openIfExists(goalPath(id));
 		if (!opened) return undefined;
@@ -414,6 +456,35 @@ export function createConversationStore(directory: string, recordMigrationChange
 	}
 
 	const store: ConversationStore = {
+		async readPlanDraft(id, taskId) {
+			const path = logPath(id);
+			return enqueue(path, () => readPlan(id, taskId));
+		},
+		async saveRunProgress(id, taskId, summary) {
+			const path = logPath(id);
+			const target = progressPath(id, taskId);
+			await enqueue(path, async () => {
+				await requireConversation(id, path);
+				await writeAtomically(target, JSON.stringify(summary, null, 2) + '\n');
+			});
+		},
+		async savePlanDraft(id, taskId, draft, expectedRevision) {
+			const path = logPath(id);
+			const markdown = draft.markdown.trim();
+			if (!markdown || markdown.length > planSizeLimit) throw new Error('计划正文为空或过长。');
+			if (draft.submitted && !parsePlanMarkdown(markdown)) throw new Error('计划需要一级标题及列有验收条件的章节。');
+			return enqueue(path, async () => {
+				const run = await latestRun(id, path);
+				if (run?.state.taskId !== taskId || run.request.intent !== 'plan') throw new Error('计划已变化，请重新打开。');
+				if (expectedRevision !== undefined) {
+					const revision = run.finalized ? submittedPlan(run)?.revision : run.planDraft && planRevision(run.planDraft.markdown);
+					if (revision !== expectedRevision) throw new Error('计划已变化，请重新核对后保存。');
+				} else if (run.finalized) throw new Error('该计划任务已经结束。');
+				const saved = { markdown, submitted: draft.submitted };
+				await writePlan(id, taskId, saved);
+				return saved;
+			});
+		},
 		chatTasks: {
 			async list(id) {
 				const path = logPath(id);
@@ -531,6 +602,11 @@ export function createConversationStore(directory: string, recordMigrationChange
 			if (opened) {
 				try {
 					snapshot = await replayConversation(id, readRecords(opened.file, opened.stat.size));
+					const latest = snapshot.runs.at(-1);
+					if (latest?.request.intent === 'plan' && idPattern.test(latest.state.taskId)) {
+						const draft = await readPlan(id, latest.state.taskId);
+						if (draft) latest.planDraft = draft;
+					}
 					const compact = await readCompaction(id);
 					if (compact && snapshot.runs.some(({ state }) => state.taskId === compact.throughTaskId)) snapshot.manualCompaction = compact;
 				} finally {
@@ -596,14 +672,26 @@ export function createConversationStore(directory: string, recordMigrationChange
 					if (run.type === 'start') run.task.request.conversationId = branchId;
 				}
 				const branch = await replayConversation(branchId, entries);
+				const copiedDrafts: string[] = [];
 				const compact = await readCompaction(id);
 				if (compact && branch.runs.some(({ state }) => state.taskId === compact.throughTaskId)) {
 					await writeAtomically(compactionPath(branchId), JSON.stringify(compact));
 					branch.manualCompaction = compact;
 				}
 				try {
+					for (const run of branch.runs) if (run.request.intent === 'plan' && idPattern.test(run.state.taskId)) {
+						const draft = await readPlan(id, run.state.taskId);
+						if (!draft) continue;
+						await writePlan(branchId, run.state.taskId, draft);
+						copiedDrafts.push(run.state.taskId);
+						run.planDraft = draft;
+					}
 					await writeAtomically(logPath(branchId), serialize(entries));
+					for (const { state, runSummary } of branch.runs) if (runSummary && idPattern.test(state.taskId)) {
+						await writeAtomically(progressPath(branchId, state.taskId), JSON.stringify(runSummary, null, 2) + '\n').catch(() => {});
+					}
 				} catch (error) {
+					for (const taskId of copiedDrafts) await unlinkIfExists(planPath(branchId, taskId)).catch(() => {});
 					if (branch.manualCompaction) await unlinkIfExists(compactionPath(branchId)).catch(() => {});
 					throw error;
 				}
@@ -622,6 +710,11 @@ export function createConversationStore(directory: string, recordMigrationChange
 				await recordMigrationChange?.(id, body);
 				await writeAtomically(path, body);
 				subagentIndexes.delete(path);
+				const retained = new Set(kept.flatMap((entry) => entry.type === 'start'
+					? [runProgressFilename(id, entry.task.id), conversationPlanFilename(id, entry.task.id)] : []));
+				for (const name of await readdir(root)) if ((isProgressFile(id, name) || isPlanFile(id, name)) && !retained.has(name)) {
+					await unlinkIfExists(join(root, name)).catch(() => {});
+				}
 			});
 			changedTasks(path);
 		},
@@ -666,6 +759,11 @@ export function createConversationStore(directory: string, recordMigrationChange
 				await unlinkIfExists(titlePath(id));
 				await unlinkIfExists(archivePath(id));
 				await unlinkIfExists(compactionPath(id));
+				const files = await readdir(root).catch((error: unknown) => {
+					if (isMissing(error)) return [];
+					throw error;
+				});
+				for (const file of files.filter((name) => isProgressFile(id, name) || isPlanFile(id, name))) await unlinkIfExists(join(root, file));
 				await unlinkIfExists(path);
 				// 阻止已经排队的旧写入在删除后重新建立记录。
 				deletedLogs.add(path.toLowerCase());
@@ -696,8 +794,16 @@ export function createConversationStore(directory: string, recordMigrationChange
 			if (entries.some((entry) => entry.type === 'start' && entry.task.request.conversationId !== id)) {
 				throw new Error('任务不属于此对话。');
 			}
-			await write(id, async (path) => consumption?.messages.length
-				? consumeQueued(entries, await readQueued(path, id), consumption) : entries);
+			await write(id, async (path) => {
+				const start = entries[0];
+				if (start?.type === 'start' && start.task.request.approvedPlanTaskId) {
+					const run = await latestRun(id, path);
+					if (!matchesApprovedPlan(submittedPlan(run), start.task.request, Boolean(run?.planDraft))) {
+						throw new Error('计划已变化，请重新核对并确认。');
+					}
+				}
+				return consumption?.messages.length ? consumeQueued(entries, await readQueued(path, id), consumption) : entries;
+			});
 		},
 	};
 	return store;

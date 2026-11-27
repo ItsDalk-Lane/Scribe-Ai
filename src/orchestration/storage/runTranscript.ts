@@ -2,7 +2,7 @@ import { taskMessage } from '../context/contextBuilder';
 import { updateTaskState } from '../taskManager';
 import { latestIncompleteReply, newContinuationText } from '../../runtime/continuationText';
 import type {
-	AuxiliaryUsage, ConversationEntry, ConversationStore, Message, RunCheckpoint, RunObserver, RunState, RunStep, SavedRun, Task, TerminalRunStatus,
+	AuxiliaryUsage, ConversationEntry, ConversationStore, Message, ModelUsageReceipt, RunCheckpoint, RunObserver, RunState, RunStep, SavedRun, Task, TerminalRunStatus,
 } from '../../types';
 
 function finalStatus(state: RunState): TerminalRunStatus {
@@ -28,6 +28,8 @@ export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, t
 	let step: RunStep = restored?.step ?? { phase: 'starting', turn: 0 };
 	let savedMessages = restored?.state.messages.length ?? 0;
 	let auxiliaryUsage = restored?.state.auxiliaryUsage ?? [];
+	const mainUsage = Symbol();
+	const activeUsage = new Map<symbol, AuxiliaryUsage>();
 	let compaction = restored?.state.contextCompaction;
 	let canCheckpointThinking = false;
 	let draft: { id: string; blocks: Map<string, DraftBlock> } | undefined;
@@ -45,12 +47,25 @@ export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, t
 		}
 	}
 
-	function withDetails(state: RunState): RunState {
-		const usageChanged = auxiliaryUsage.length > 0 && state.auxiliaryUsage !== auxiliaryUsage;
+	function withDetails(state: RunState, usage = auxiliaryUsage): RunState {
+		const usageChanged = usage.length > 0 && state.auxiliaryUsage !== usage;
 		const compactionChanged = compaction !== undefined && state.contextCompaction !== compaction;
 		return usageChanged || compactionChanged ? {
-			...state, ...(usageChanged && { auxiliaryUsage }), ...(compactionChanged && { contextCompaction: compaction }),
+			...state, ...(usageChanged && { auxiliaryUsage: usage }), ...(compactionChanged && { contextCompaction: compaction }),
 		} : state;
+	}
+
+	function currentUsage() {
+		return activeUsage.size ? [...auxiliaryUsage, ...activeUsage.values()] : auxiliaryUsage;
+	}
+
+	function publishUsage() {
+		observer.onEvent?.({ type: 'auxiliary-usage', auxiliaryUsage: currentUsage() });
+	}
+
+	function previewUsage(this: void, key: symbol, usage: AuxiliaryUsage) {
+		activeUsage.set(key, usage);
+		publishUsage();
 	}
 
 	async function record(event: RunCheckpoint) {
@@ -76,6 +91,7 @@ export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, t
 			case 'state': {
 				const { state } = event;
 				const messages = state.messages.slice(savedMessages);
+				if (messages.some(({ role, local, incomplete }) => role === 'assistant' && !local && !incomplete)) activeUsage.delete(mainUsage);
 				if (messages.some((message) => message.role === 'assistant')) draft = undefined;
 				if (state.status === 'awaiting-approval' && step.phase !== 'approval') step = { ...step, phase: 'approval' };
 				if (state.status === 'running' && messages.some((message) => message.role === 'tool')) {
@@ -129,7 +145,7 @@ export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, t
 			}
 			if (event.type === 'state') {
 				updateTaskState(task, event.state);
-				observer.onEvent?.({ ...event, state: withDetails(event.state) });
+				observer.onEvent?.({ ...event, state: withDetails(event.state, currentUsage()) });
 				return;
 			}
 			observer.onEvent?.(event);
@@ -147,10 +163,17 @@ export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, t
 	}
 
 	return {
-		record, observed, withDetails,
-		async recordUsage(this: void, usage: AuxiliaryUsage) {
-			auxiliaryUsage = [...auxiliaryUsage, usage];
-			const write = checkpoints.then(() => append([{ type: 'auxiliary-usage', taskId, usage }]));
+		record, observed, withDetails, previewUsage,
+		previewModelUsage(this: void, receipt: ModelUsageReceipt) {
+			previewUsage(mainUsage, { kind: 'main-attempt', ...receipt });
+		},
+		async recordUsage(this: void, usage: AuxiliaryUsage, key = mainUsage) {
+			const write = checkpoints.then(async () => {
+				await append([{ type: 'auxiliary-usage', taskId, usage }]);
+				auxiliaryUsage = [...auxiliaryUsage, usage];
+				activeUsage.delete(key);
+				publishUsage();
+			});
 			checkpoints = write.catch(() => {});
 			await write;
 		},
@@ -170,6 +193,9 @@ export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, t
 			const remaining = previous ? newContinuationText(previous, partial) : partial;
 			const thinkingBlocks = visibleThinking(draft?.blocks.values() ?? []);
 			const entries: ConversationEntry[] = [];
+			// 模型已返回但任务在保存回复前停止时，仍保留这次请求的用量。
+			const pendingUsage = activeUsage.get(mainUsage);
+			if (pendingUsage) entries.push({ type: 'auxiliary-usage', taskId, usage: pendingUsage });
 			const message: Message | undefined = draft && (remaining || thinkingBlocks.length) ? {
 				role: 'assistant', id: draft.id, content: remaining, incomplete: true,
 				...(text[0]?.contentIndex ? { textIndex: text[0].contentIndex } : {}),
@@ -180,6 +206,10 @@ export function trackRun(store: Pick<ConversationStore, 'append'> | undefined, t
 				type: 'finish', taskId, status: finalStatus(state), turn: state.turn, error: state.error, resumed: state.resumed, finishedAt,
 			});
 			await append(entries);
+			if (pendingUsage) {
+				auxiliaryUsage = [...auxiliaryUsage, pendingUsage];
+				activeUsage.delete(mainUsage);
+			}
 			return { ...state, createdAt: state.createdAt ?? task.createdAt, finishedAt,
 				messages: message ? [...state.messages, message] : state.messages };
 		},

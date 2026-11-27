@@ -3930,6 +3930,12 @@ video.scribe-chat-player {
 	overflow: auto;
 }
 
+.scribe-task-card-plan textarea {
+	box-sizing: border-box;
+	inline-size: 100%;
+	resize: vertical;
+}
+
 .scribe-goal-status {
 	box-sizing: border-box;
 	flex: none;

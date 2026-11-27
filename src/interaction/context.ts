@@ -1,4 +1,4 @@
-import type { Message, RunEvent, RunState, RunStep, SavedRun, ToolApproval } from '../types';
+import type { AuxiliaryUsage, Message, RunEvent, RunState, RunStep, SavedRun, ToolApproval } from '../types';
 import { toolSignature } from '../tools/support/toolSignature';
 import { recordedTimeline, skippedNotice, toolRowId } from './chatTurnContent';
 import { applyTimelineChange, attemptGroup, blockId, retryNotice } from './chatTimeline';
@@ -19,6 +19,11 @@ export interface ChatExecution {
 }
 
 export type DisplayedRun = SavedRun & { displayed?: ChatExecution };
+
+export function withSummaryUsage(state: RunState, usage: AuxiliaryUsage | undefined): RunState {
+	if (!usage || (usage.id && state.auxiliaryUsage?.some((entry) => entry.id === usage.id))) return state;
+	return { ...state, auxiliaryUsage: [...(state.auxiliaryUsage ?? []), usage] };
+}
 
 export const emptyExecution: ChatExecution = { state: null, turn: 0, items: [] };
 
@@ -90,7 +95,11 @@ function acceptState(previous: ChatExecution, state: RunState, step?: RunStep, r
 }
 
 export function restoreExecution(run: DisplayedRun): ChatExecution {
-	if (run.displayed) return run.displayed;
+	if (run.displayed) {
+		const cached = run.displayed.state;
+		return cached && cached.auxiliaryUsage !== run.state.auxiliaryUsage
+			? { ...run.displayed, state: { ...cached, auxiliaryUsage: run.state.auxiliaryUsage } } : run.displayed;
+	}
 	const hasUser = run.state.messages.some(({ role, subagentActivity }) => role === 'user' && !subagentActivity);
 	const state = hasUser ? run.state : {
 		...run.state,
@@ -113,6 +122,8 @@ export function updateExecution(previous: ChatExecution, event: RunEvent): ChatE
 			return { ...previous, turn: event.turn, modelRetry: undefined, modelIntent: undefined };
 		case 'context-compaction':
 			return previous.state ? { ...previous, state: { ...previous.state, contextCompaction: event.compaction } } : previous;
+		case 'auxiliary-usage':
+			return previous.state ? { ...previous, state: { ...previous.state, auxiliaryUsage: event.auxiliaryUsage } } : previous;
 		case 'model-intent':
 			return previous.modelIntent === event.intent ? previous : { ...previous, modelIntent: event.intent, modelRetry: undefined };
 		case 'model-retry': {

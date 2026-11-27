@@ -1,7 +1,6 @@
 import { skillWriteLocations } from '../../skills/library/writeProtection';
 import { storageStat } from '../../orchestration/storage/jsonFile';
 import { scribeDataPaths } from '../../orchestration/storage/paths';
-import { WRITING_RULE_FILENAME } from '../../orchestration/context/writingRules';
 import { accessSync, constants } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -42,8 +41,7 @@ export async function macShellSandboxArgs(ctx: ToolContext, vaultWrite = false):
 	}));
 	for (const path of canonicalPaths) protectedPaths.add(path);
 	const skills = skillWriteLocations(vault);
-	const exact = [...skills.exact, resolve(vault, WRITING_RULE_FILENAME)];
-	const restrictedWrites = [...exact.map((path) => ({ scope: 'literal', path })), ...skills.trees.map((path) => ({ scope: 'subpath', path }))]
+	const restrictedWrites = [...skills.exact.map((path) => ({ scope: 'literal', path })), ...skills.trees.map((path) => ({ scope: 'subpath', path }))]
 		.map((entry, index) => ({ ...entry, key: 'SKILL_RO_' + index }));
 	const parameters = [...protectedPaths].map((path, index) => ({ key: `PROTECTED_${index}`, path }));
 	// 系统命令及其依赖只开放读取，笔记库外的其他资料与网络默认拒绝。
@@ -62,6 +60,7 @@ export async function macShellSandboxArgs(ctx: ToolContext, vaultWrite = false):
 		(allow file-read* file-write-data (literal "/dev/null"))
 		${vaultWrite ? '(allow file-write* (subpath (param "VAULT")))' : ''}
 		(deny file-write* ${restrictedWrites.map(({ scope, key }) => `(${scope} (param "${key}"))`).join(' ')})
+		(deny file-write* (require-all (subpath (param "VAULT")) (regex #"/[Aa][Gg][Ee][Nn][Tt][Ss][.][Mm][Dd]$")))
 		(deny file-read* file-write* ${parameters.map(({ key }) => `(subpath (param "${key}"))`).join(' ')})
 		(deny file-read* file-write* (require-all (subpath (param "SCRIBE_DATA"))
 			(require-not (subpath (param "SCRIBE_SKILLS")))))

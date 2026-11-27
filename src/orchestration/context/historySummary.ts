@@ -1,3 +1,4 @@
+import { systemXml } from './promptXml';
 import { Buffer } from 'node:buffer';
 import { isAbsolute, win32 } from 'node:path';
 import type { HistorySummary, Message, ModelRequest, ModelResponse, ModelService, RunContext, SavedRun } from '../../types';
@@ -80,7 +81,7 @@ export function createHistorySummarizer(runs: SavedRun[], ctx: RunContext, servi
 		if (attempted) return attempted === 'failed' ? { ...reuse, status: 'failed' } : reuse;
 		const known = existing ? `已有摘要（较旧）\n${existing}\n\n` : '';
 		const request: ModelRequest = {
-			...ctx.model, reasoning: null, system: summaryInstructions, tools: [],
+			...ctx.model, reasoning: null, system: systemXml({ task: summaryInstructions }), tools: [],
 			messages: [{ role: 'user', content: `${known}新增的较早记录（按时间排列）` }],
 			signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(30_000)]),
 			maxTokens: Math.min(768, Math.floor(room / 4)), maxRetries: 0,

@@ -44,8 +44,34 @@ export function showSlashMcp(plugin: ScribeAiPlugin, ui: SlashUi): Promise<boole
 	return ui.panel(slashCommandText().commandLabel('mcp'), (host) => drawSlashMcp(host, plugin.services.tools.mcp));
 }
 
-export function chooseSlashMcp(plugin: ScribeAiPlugin, ui: SlashUi): Promise<TaskTarget | undefined> {
-	return ui.custom<TaskTarget>(slashCommandText().commandLabel('mcp'), (host, select) => drawSlashMcp(host, plugin.services.tools.mcp, select));
+type McpSelection = TaskTarget | { promptServerId: string };
+
+export async function chooseSlashMcp(plugin: ScribeAiPlugin, ui: SlashUi,
+	request: <T>(run: (signal: AbortSignal) => Promise<T>) => Promise<T>): Promise<TaskTarget | { prompt: string } | undefined> {
+	const manager = plugin.services.tools.mcp;
+	const choice = await ui.custom<McpSelection>(slashCommandText().commandLabel('mcp'), (host, select) => drawSlashMcp(host, manager, select));
+	if (!choice || !('promptServerId' in choice) || !manager) return choice && 'kind' in choice ? choice : undefined;
+	const session = manager.promptSession(choice.promptServerId);
+	const options = await request((signal) => session.list(signal));
+	if (!options.length) throw new Error(tr('这台服务没有可用的提示模板。', 'This service has no available prompt templates.'));
+	const chosen = await ui.choose(tr('选择 MCP 提示模板', 'Choose MCP prompt template'), options,
+		({ name, title, description }) => [title ?? name, description].filter(Boolean).join(' · '), true);
+	if (!chosen) return;
+	const fields: [string, string][] = [];
+	for (const { name, description, required } of chosen.arguments ?? []) {
+		const value = await ui.prompt([name, description, required ? tr('必填', 'Required') : tr('选填', 'Optional')].filter(Boolean).join(' · '));
+		if (value === undefined) return;
+		if (!value.trim() && required) throw new Error(tr(`请填写 ${name}。`, `Enter ${name}.`));
+		if (value.trim()) fields.push([name, value]);
+	}
+	const args = Object.fromEntries(fields);
+	const label = chosen.title ?? chosen.name;
+	if (!await ui.confirm(tr('展开 MCP 提示模板', 'Expand MCP prompt'),
+		[tr(`将从「${session.server}」读取「${label}」。填入的参数会发给该服务。展开后可以编辑再发送。`,
+			`Load “${label}” from “${session.server}”. Its arguments will be sent to this service. You can edit the result before sending.`),
+		...(fields.length ? [JSON.stringify(args, null, 2)] : [])].join('\n\n'), tr('展开', 'Expand'))) return;
+	const body = await request((signal) => session.expand(chosen.name, args, signal));
+	return { prompt: tr(`MCP 提示模板「${session.server} / ${label}」`, `MCP prompt “${session.server} / ${label}”`) + '\n\n' + body };
 }
 
 function mcpSlashTarget(view: McpServerView): SlashTargetChoice {
@@ -75,7 +101,7 @@ export function getSlashTargets(plugin: ScribeAiPlugin): SlashTargetChoice[] {
 	return [...(plugin.services.tools.mcp?.snapshot().map(mcpSlashTarget) ?? []), ...agentSlashTargets(plugin)];
 }
 
-function drawSlashMcp(host: HTMLElement, manager?: McpSettingsManager, select?: (value: TaskTarget) => void) {
+function drawSlashMcp(host: HTMLElement, manager?: McpSettingsManager, select?: (value: McpSelection) => void) {
 	const draw = () => {
 		const focused = host.ownerDocument.activeElement as HTMLElement | null;
 		const activeId = host.contains(focused) ? focused?.dataset.targetId : undefined;
@@ -102,6 +128,10 @@ function drawSlashMcp(host: HTMLElement, manager?: McpSettingsManager, select?: 
 			row.createEl('strong', { text: server.name });
 			row.createSpan({ cls: 'scribe-mcp-type', text: mcpTypeLabels[server.type] });
 			row.createSpan({ cls: 'scribe-slash-mcp-status', text: mcpStatus(view, false) });
+			if (select && state === 'ready' && view.prompts) {
+				const prompts = item.createEl('button', { cls: 'scribe-slash-mcp-row', text: tr('选择提示模板', 'Choose prompt template'), attr: { type: 'button' } });
+				prompts.addEventListener('click', () => select({ promptServerId: server.id }));
+			}
 		}
 	};
 	draw();

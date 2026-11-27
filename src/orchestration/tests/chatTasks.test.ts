@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
+import { approvedPlanRequest, submittedPlan } from '../../interaction/chatPlan';
 import type { ConversationEntry, TaskRequest } from '../../types';
 import { createConversationStore } from '../storage/conversationStore';
 
@@ -112,7 +113,13 @@ void test('仅批准所选计划及连续修订，重写执行消息时草案恢
 	await store.append('chat', [start('revise', { intent: 'plan', revisesPlanTaskId: 'new' })]);
 	await list.update('chat', { owner: 'root', runId: 'revise', planRunId: 'revise' }, { id: item.id, subject: '更新核对范围' });
 	await assert.rejects(list.approvePlan('chat', 'new'), /确认/);
-	await store.append('chat', [start('execute', { approvedPlanTaskId: 'revise' })]);
+	await store.savePlanDraft('chat', 'revise', { markdown: '# 核对来源\n\n## 验收条件\n- 已核对引文', submitted: true });
+	await store.append('chat', [{ type: 'finish', taskId: 'revise', status: 'done', turn: 1 }]);
+	const plan = submittedPlan((await store.load('chat')).runs.at(-1));
+	assert.ok(plan);
+	const execute = approvedPlanRequest(plan);
+	await assert.rejects(store.append('chat', [start('execute', { ...execute, approvedPlanRevision: 'stale' })]), /计划已变化/);
+	await store.append('chat', [start('execute', execute)]);
 	const executor = { owner: 'root', runId: 'execute' };
 	await assert.rejects(list.update('chat', executor, { id: item.id, status: 'in_progress' }), /确认/);
 	await list.approvePlan('chat', 'revise');

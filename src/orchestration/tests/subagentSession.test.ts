@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -18,13 +18,17 @@ import { writeTools } from '../../tools/writeTools';
 import { contactSubagentTool, manageSubagentsTool, subagentTools } from '../../tools/subagentTools';
 import type { ModelRequest, ModelStream, SubagentNote, ToolCall } from '../../types';
 import { createContextBuilder } from '../context/contextBuilder';
+import { promptText } from '../context/promptXml';
 import { createSessionController } from '../sessionController';
 import { normalizeSettings } from '../settings/defaults';
+import { createTask } from '../taskManager';
 import { createConversationStore } from '../storage/conversationStore';
+import { fixtureToolIntents } from '../../runtime/tests/agentFixture';
 
 const model = { providerId: 'test-provider', model: 'subagent-fixture' };
 
 function reply(content: string, calls: ToolCall[] = [], gate?: Promise<void>, signal?: AbortSignal): ModelStream {
+	calls = fixtureToolIntents(calls);
 	const raw: AssistantMessage = {
 		role: 'assistant',
 		content: [
@@ -53,11 +57,25 @@ function reply(content: string, calls: ToolCall[] = [], gate?: Promise<void>, si
 }
 
 function incoming(request: ModelRequest): SubagentNote[] {
-	const note = request.messages.filter(({ role, content }) => role === 'user' && content.startsWith('协作资料，')).at(-1);
-	if (!note) return [];
-	const incoming = JSON.parse(note.content.slice(note.content.indexOf('\n') + 1)) as SubagentNote[];
-	for (const item of incoming) if (item.text) assert.ok(!request.system?.includes(JSON.stringify(item)));
-	return incoming;
+	const successfulCalls = new Set(request.messages.filter(({ role, isError }) => role === 'tool' && !isError).map(({ toolCallId }) => toolCallId));
+	const handled = new Set(request.messages.flatMap(({ toolCalls }) => toolCalls ?? []).flatMap(({ id, name, input }) => {
+		if (!successfulCalls.has(id)) return [];
+		const { result_id, action, question_id } = input as { result_id?: string; action?: string; question_id?: string };
+		return name === 'review_subagent_result' ? [result_id] : name === contactSubagentTool && action === 'answer' ? [question_id] : [];
+	}));
+	const notes = new Map<string, SubagentNote>();
+	for (const { tag, text } of request.messages.flatMap(({ promptSections }) => promptSections ?? [])) {
+		if (tag !== 'collaboration-update' || !text.startsWith('协作资料\n')) continue;
+		for (const note of JSON.parse(text.slice(text.indexOf('\n') + 1)) as SubagentNote[]) notes.set(note.id, note);
+	}
+	return [...notes.values()].filter((note) => {
+		if (note.text) assert.ok(!request.system?.includes(JSON.stringify(note)));
+		return !handled.has(note.id) || note.kind === 'result' && note.review?.status !== 'pending';
+	});
+}
+
+function lastConversationMessage(request: ModelRequest) {
+	return request.messages.filter(({ content, promptSections }) => content || !promptSections?.length).at(-1);
 }
 
 function actionOptions(request: ModelRequest, name: string) {
@@ -84,7 +102,7 @@ void test('a different model service waits for consent and stopping a worker dis
 	const models = createModelCoordinator({
 		stream(request) {
 			if (request.sessionId === rootId) {
-				const calls = request.messages.filter(({ content }) => !content.startsWith('协作资料，')).at(-1)?.role === 'user' ? ['A', 'B'].map((name) => ({
+				const calls = lastConversationMessage(request)?.role === 'user' ? ['A', 'B'].map((name) => ({
 					id: `spawn-${name}`, name: 'spawn_agent',
 					input: { message: `Check ${name}`, nickname: name, model: `${foreign.providerId}/${foreign.model}` },
 				})) : acceptPending(request);
@@ -198,7 +216,7 @@ void test('the child limit is shared and separate approvals cannot overwrite eac
 				id: `spawn-${name}`, name: 'spawn_agent', input: { message: name, nickname: name, agent_type: 'worker' },
 			}))) : reply('Main completed its review.', acceptPending(request));
 		}
-		const firstUser = request.messages.find(({ role }) => role === 'user');
+		const firstUser = request.messages.find(({ role, content }) => role === 'user' && content);
 		const name = firstUser?.content.split('\n')[0];
 		if (turn === 1) return reply('', [{ id: 'read', name: 'Read', input: { file_path: file } }]);
 		if (turn === 2) return reply('', [{ id: 'edit', name: 'Edit', input: { file_path: file, old_string: 'target', new_string: name } }]);
@@ -276,12 +294,15 @@ for (const variant of ['accept', 'repeated-error', 'continued-revision'] as cons
 		const corrected = '修订稿：分段相加为 165 分钟，原台账登记 170 分钟。';
 		const service = createModelCoordinator({ stream(request) {
 			const { messages } = request;
-			const last = messages.filter(({ content }) => !content.startsWith('协作资料，')).at(-1);
+			const last = lastConversationMessage(request);
 			const notes = incoming(request);
+			const sections = messages.flatMap(({ promptSections }) => promptSections ?? []);
 			if (request.sessionId !== conversationId) {
 				assert.deepEqual(actionOptions(request, contactSubagentTool), ['send', 'follow_up', 'ask_parent', 'answer']);
 				assert.ok(!request.tools.some(({ name }) => name === 'spawn_agent'));
-				assert.ok(request.system?.includes('用原始刷卡记录核算出勤。'));
+				assert.ok(sections.some(({ tag, text }) => tag === 'subagent-assignment' && text === '用原始刷卡记录核算出勤。'));
+				assert.ok(sections.some(({ tag, text }) => tag === 'subagent-state' && text.includes('当前子助手编号')));
+				assert.ok(!sections.some(({ tag }) => tag === 'available-subagents'));
 				const revisionRequest = messages.filter(({ role, content }) => role === 'user' && content.startsWith(revision)).at(-1);
 				if (revisionRequest) return reply(variant === 'accept' || (variant === 'continued-revision' && revisionRequest.content.endsWith('3')) ? corrected
 					: `仍有错误的修订稿 ${revisionRequest.content.at(-1)}。`, [], waited, request.signal);
@@ -297,6 +318,9 @@ for (const variant of ['accept', 'repeated-error', 'continued-revision'] as cons
 			}
 			if (last?.role === 'user' && last.content === 'What is 2 plus 2?') return reply('4');
 			if (last?.role === 'user') {
+				assert.ok(sections.some(({ tag, text }) => tag === 'available-subagents' && text.includes('"name":"explorer"')));
+				assert.ok(!sections.some(({ tag }) => tag === 'subagent-assignment'));
+				assert.ok(sections.every(({ text }) => !text.includes('以下 JSON 是同一对话内的协作消息和结果')));
 				assert.deepEqual(request.tools.map(({ name }) => name).filter((name) => name !== 'fixture_budget').sort(),
 					[contactSubagentTool, manageSubagentsTool, 'read_subagent_result', 'review_subagent_result', 'spawn_agent', 'wait_agent'].sort());
 				assert.deepEqual(actionOptions(request, contactSubagentTool), ['send', 'follow_up', 'answer']);
@@ -403,3 +427,122 @@ for (const variant of ['accept', 'repeated-error', 'continued-revision'] as cons
 		assert.equal(saved.runs.at(-1)?.subagentReport, undefined);
 	});
 }
+
+void test('a reopened worker receives only uncommitted inbox instructions and repairs a missing receipt once', { timeout: 5_000 }, async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), 'scribe-worker-inbox-'));
+	const store = createConversationStore(join(directory, 'conversations'));
+	const app = { vault: { adapter: { getBasePath: () => directory }, configDir: 'fixture-vault-config', getFileByPath: () => null } } as unknown as App;
+	const registry = createToolRegistry([subagentTools]);
+	const sent: string[][] = [];
+	const service = createModelCoordinator({ stream(request) {
+		const gate = request.beforeSend?.('https://fixture.test/chat').then(() => {
+			sent.push(request.messages.filter((m) => m.role === 'user').map((m) => m.content));
+		});
+		return reply('已完成。', [], gate, request.signal);
+	} }, createContextBuilder(registry));
+	const tools = createToolCoordinator(app, createToolExecutor(registry));
+	const runtime = { newState: createRunState, createAgent: bindAgent(createAgentLoop(service, tools)), models: service, tools };
+	const sessions = createSessionController(app, normalizeSettings(model), runtime, store);
+	t.after(async () => { sessions.dispose(); await rm(directory, { recursive: true, force: true }); });
+	const id = await sessions.createConversation();
+	const root = createTask({ conversationId: id, instruction: '委派核查', refs: [] });
+	const child = createTask({ conversationId: id, instruction: '核查资料', refs: [] });
+	const agentId = 'worker';
+	const received = { id: 'earlier', kind: 'message' as const, from: 'user', to: agentId, text: '仅检查清单中前两项' };
+	const pending = { ...received, id: 'newer', text: '把结论写成一段' };
+	await store.append(id, [
+		{ type: 'start', task: root, model },
+		{ type: 'subagent', agentId, record: { kind: 'create', agent: { id: agentId, rootTaskId: root.id, role: 'worker', name: '核查', model } } },
+		{ type: 'subagent', agentId, record: { kind: 'run', entry: { type: 'start', task: child, model } } },
+		...[received, pending].map((note) => ({ type: 'subagent' as const, agentId, record: { kind: 'note' as const, note } })),
+		{ type: 'subagent', agentId, record: { kind: 'run', entry: { type: 'messages', taskId: child.id, messages: [
+			{ role: 'user', content: child.request.instruction }, { role: 'user', id: 'steer:earlier', content: received.text },
+			{ role: 'assistant', content: '已收到前一条。' },
+		] } } },
+	]);
+	const controls = sessions.subagents!;
+	await controls.load(id);
+	const delivered = async () => (await store.load(id)).subagents?.flatMap(({ record }) => record.kind === 'delivered' ? record.ids : []);
+	assert.deepEqual(await delivered(), [received.id]);
+	const finished = new Promise<void>((resolve) => {
+		const unsubscribe = controls.subscribe(id, () => {
+			const snapshot = controls.snapshot(id);
+			for (const request of snapshot.requests) if (request.kind === 'send') controls.respond(id, request.id, true);
+			if (snapshot.agents[0]?.status === 'done') resolve();
+		});
+		t.after(unsubscribe);
+	});
+	await controls.resume(id, agentId);
+	await finished;
+	assert.equal(sent.length, 1);
+	for (const note of [received, pending]) {
+		assert.equal(sent[0]!.filter((text) => text === note.text).length, 1, note.id);
+		assert.equal(controls.snapshot(id).agents[0]?.runs[0]?.state.messages.filter((m) => m.id === 'steer:' + note.id).length, 1);
+	}
+	assert.deepEqual(await delivered(), [received.id, pending.id]);
+});
+
+void test('计划可以派出只读探索，重开后的子任务也受同一权限限制', { timeout: 8_000 }, async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), 'scribe-plan-exploration-'));
+	const cwd = join(directory, 'vault');
+	const outside = join(directory, 'outside.md');
+	await mkdir(cwd);
+	await Promise.all([writeFile(outside, 'OUTSIDE-ONLY'), writeFile(join(cwd, 'evidence.md'), 'VAULT-EVIDENCE')]);
+	const app = { vault: { adapter: { getBasePath: () => cwd }, configDir: 'fixture-config', getFileByPath: () => null } } as unknown as App;
+	const store = createConversationStore(join(directory, 'conversations'));
+	const registry = createToolRegistry([readTools, writeTools, subagentTools]);
+	const leaked = 'PARENT-PLAN-ONLY';
+	let id: string;
+	const models = createModelCoordinator({ stream(request) {
+		if (request.sessionId === id) {
+			return request.messages.some(({ toolCallId }) => toolCallId === 'spawn-plan')
+				? reply('已核对探索资料。', acceptPending(request))
+				: reply('', [{ id: 'spawn-plan', name: 'spawn_agent', input: { agent_type: 'worker', fork_turns: 'all', message: '只核对库内证据。' } }]);
+		}
+		assert.ok(!request.tools.some(({ name }) => name === 'Write'));
+		assert.doesNotMatch(request.messages.map(promptText).join('\n'), new RegExp(leaked, 'u'));
+		const last = lastConversationMessage(request);
+		if (last?.role === 'tool') return reply('已核对。');
+		return reply('', [
+			{ id: 'attempt-write', name: 'Write', input: { file_path: 'forbidden.md', content: 'unexpected' } },
+			{ id: 'outside-evidence', name: 'Read', input: { file_path: outside } },
+			{ id: 'inside-evidence', name: 'Read', input: { file_path: 'evidence.md' } },
+		]);
+	} }, createContextBuilder(registry));
+	const tools = createToolCoordinator(app, createToolExecutor(registry));
+	const runtime = { newState: createRunState, createAgent: bindAgent(createAgentLoop(models, tools)), models, tools };
+	const connect = () => createSessionController(app, normalizeSettings(model), runtime, store);
+	const sessions = connect();
+	t.after(async () => { sessions.dispose(); await rm(directory, { recursive: true, force: true }); });
+	id = await sessions.createConversation();
+	const state = await sessions.submit({ conversationId: id, intent: 'plan', instruction: leaked, refs: [{ path: outside, kind: 'file' }] },
+		{}, undefined, { executionMode: 'full-access' }).result;
+	assert.equal(state.status, 'done', state.error);
+	const initial = sessions.subagents!.snapshot(id).agents[0];
+	assert.ok(initial);
+	assert.deepEqual(initial.runs[0]?.request.refs, []);
+	const create = (await store.load(id)).subagents?.find(({ record }) => record.kind === 'create')?.record;
+	assert.ok(create?.kind === 'create' && create.readOnly && create.planning && !create.history);
+	const checkRun = ({ state: { messages } }: (typeof initial.runs)[number]) => {
+		assert.equal(messages.find(({ toolCallId }) => toolCallId === 'attempt-write')?.isError, true);
+		assert.equal(messages.find(({ toolCallId }) => toolCallId === 'outside-evidence')?.isError, true);
+		assert.match(messages.find(({ toolCallId }) => toolCallId === 'inside-evidence')?.content ?? '', /VAULT-EVIDENCE/u);
+	};
+	checkRun(initial.runs[0]);
+	sessions.dispose();
+	const reopened = connect();
+	t.after(() => reopened.dispose());
+	const agents = reopened.subagents!;
+	await agents.load(id);
+	const completed = new Promise<void>((resolve) => {
+		const unsubscribe = agents.subscribe(id, () => {
+			const agent = agents.snapshot(id).agents[0];
+			if (agent?.runs.length === 2 && agent.status === 'done') { unsubscribe(); resolve(); }
+		});
+		t.after(unsubscribe);
+	});
+	await agents.addInstruction(id, initial.id, '再核对一次库内证据。', 'full-access');
+	await completed;
+	checkRun(agents.snapshot(id).agents[0]!.runs[1]!);
+	await assert.rejects(access(join(cwd, 'forbidden.md')), { code: 'ENOENT' });
+});

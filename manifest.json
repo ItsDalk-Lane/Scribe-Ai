@@ -1,7 +1,7 @@
 {
 	"id": "scribe-ai",
 	"name": "Scribe Ai",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"minAppVersion": "1.11.4",
 	"isDesktopOnly": true,
 	"description": "Run AI agent tasks in Obsidian with your configured model: read, search and edit notes, run commands, and use skills, web search and MCP servers.",

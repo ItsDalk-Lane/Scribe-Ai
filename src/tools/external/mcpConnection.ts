@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { Buffer } from 'node:buffer';
 import { delimiter, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { extractWWWAuthenticateParams, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
@@ -26,10 +27,19 @@ export interface McpToolInfo {
 	annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean; title?: string };
 }
 
+export interface McpPromptInfo {
+	name: string;
+	title?: string;
+	description?: string;
+	arguments?: { name: string; description?: string; required?: boolean }[];
+}
+
 interface Catalog {
 	tools: McpToolInfo[];
 	version?: string;
 	resources: boolean;
+	instructions?: string;
+	prompts?: boolean;
 }
 
 interface CallResult extends ImageToolOutput {
@@ -43,6 +53,8 @@ export interface McpConnection {
 	callTool(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<CallResult>;
 	listResources(signal: AbortSignal): Promise<CallResult>;
 	readResource(uri: string, signal: AbortSignal): Promise<CallResult>;
+	listPrompts?(this: void, signal: AbortSignal): Promise<McpPromptInfo[]>;
+	getPrompt?(this: void, name: string, args: Record<string, string>, signal: AbortSignal): Promise<string>;
 	redact(text: string): string;
 	close(): Promise<void>;
 }
@@ -305,7 +317,9 @@ export function createMcpConnection(options: ConnectionOptions): McpConnection {
 			if (client !== candidate) throw lastError ?? new Error('MCP 连接已中断。');
 			if (!onChallenge) live = candidate;
 			const version = candidate.getServerVersion()?.version;
-			return { tools, version: version && redact(version), resources: Boolean(candidate.getServerCapabilities()?.resources) };
+			const instructions = candidate.getInstructions();
+			return { tools, version: version && redact(version), resources: Boolean(candidate.getServerCapabilities()?.resources),
+				instructions: instructions && redact(instructions).slice(0, 4_000), prompts: Boolean(candidate.getServerCapabilities()?.prompts) };
 		} catch (error) {
 			if (client === candidate) client = undefined;
 			await candidate.close().catch(() => {});
@@ -351,6 +365,28 @@ export function createMcpConnection(options: ConnectionOptions): McpConnection {
 			return connect();
 		},
 		listTools: (signal) => scoped(startupMs, signal, (scope) => catalog(ready(), scope)),
+		listPrompts: (signal) => scoped(operationMs, signal, async (scope) => {
+			const current = ready();
+			const prompts = await paginate(async (params) => {
+				const { prompts, nextCursor } = await current.listPrompts(params, scope);
+				return { entries: prompts, nextCursor };
+			}, scope.signal);
+			const sensitive = credentials();
+			return prompts.filter(({ name, arguments: args }) => !sensitive.some((secret) =>
+				name.includes(secret) || args?.some((arg) => arg.name.includes(secret)))).map(({ name, title, description, arguments: args }) => ({
+				name, title: title && redact(title), description: description && redact(description),
+				arguments: args?.map((arg) => ({ ...arg, description: arg.description && redact(arg.description) })),
+			}));
+		}),
+		getPrompt: (name, args, signal) => scoped(operationMs, signal, async (scope) => {
+			const { messages } = await ready().getPrompt({ name, arguments: args }, scope);
+			const text = messages.map(({ content }) => {
+				if (content.type !== 'text') throw new Error('此 MCP 模板包含当前输入框无法展开的非文本内容。');
+				return redact(content.text);
+			}).join('\n\n');
+			if (!text.trim() || Buffer.byteLength(text) > 128_000) throw new Error('此 MCP 模板没有可用文本，或文本长度超出上限。');
+			return text;
+		}),
 		callTool: (name, args, signal) => scoped(operationMs, signal, async (scope) => {
 			const { content, structuredContent, isError } = await ready().callTool({ name, arguments: args }, undefined, scope) as CallToolResult;
 			const media = toolImages();

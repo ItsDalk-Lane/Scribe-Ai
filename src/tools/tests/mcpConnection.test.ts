@@ -106,6 +106,39 @@ void test('MCP keeps valid image and image resource blocks alongside text and UR
 	assert.deepEqual((await connection.readResource(resource.uri, signal)).images, [image]);
 });
 
+void test('MCP captures redacted server instructions and expands prompts only on explicit requests', { timeout: 5_000 }, async (t) => {
+	const key = 'fixture-private-mcp-key';
+	const requests: string[] = [];
+	const url = await listen(t, async (request, response) => {
+		if (request.method === 'GET') { response.writeHead(405).end(); return; }
+		const { id, method, params } = JSON.parse(await readBody(request)) as RPC;
+		if (id === undefined) { response.writeHead(202).end(); return; }
+		requests.push(method);
+		switch (method) {
+			case 'initialize':
+				json(response, reply(id, { ...initialize, capabilities: { prompts: {} }, instructions: `Read catalogue ${key}` }));
+				break;
+			case 'prompts/list':
+				json(response, reply(id, { prompts: [{ name: 'notes', description: key, arguments: [{ name: 'title', required: true }] }] }));
+				break;
+			case 'prompts/get':
+				assert.deepEqual(params, { name: 'notes', arguments: { title: 'Planning' } });
+				json(response, reply(id, { messages: [{ role: 'assistant', content: { type: 'text', text: `Summarize Planning ${key}` } }] }));
+				break;
+			default: assert.fail(method);
+		}
+	});
+	const { connection } = connect(t, { type: 'http', url, secrets: { bearerToken: key } });
+	const server = await connection.start();
+	assert.equal(server.instructions, 'Read catalogue [已隐藏]');
+	assert.equal(server.prompts, true);
+	assert.deepEqual(requests, ['initialize']);
+	const signal = new AbortController().signal;
+	assert.equal((await connection.listPrompts?.(signal))?.[0]?.description, '[已隐藏]');
+	assert.equal(await connection.getPrompt?.('notes', { title: 'Planning' }, signal), 'Summarize Planning [已隐藏]');
+	assert.deepEqual(requests, ['initialize', 'prompts/list', 'prompts/get']);
+});
+
 void test('Streamable HTTP paginates discovery and resources, handles updates, redacts secrets, and times out calls', { timeout: 5_000 }, async (t) => {
 	let stream: ServerResponse | undefined;
 	let notify!: () => void;

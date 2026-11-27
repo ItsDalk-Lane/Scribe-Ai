@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { AsyncResource } from 'node:async_hooks';
 import { once } from 'node:events';
 import http from 'node:http';
 import test from 'node:test';
@@ -11,11 +12,11 @@ import * as google from '@earendil-works/pi-ai/api/google-generative-ai';
 import * as bedrock from '@earendil-works/pi-ai/api/bedrock-converse-stream';
 import { createCredentialStore } from '../credentials';
 import { diagnostics } from '../diagnostics';
-import { modelRequestConfirmation } from '../modelRequestConfirmation';
 import { createNodeFetch, modelNodeFetch, nodeFetch } from '../nodeFetch';
 import { createModelService } from '../providers';
 import { readProviderCatalog } from '../modelCatalog';
 import { conversationMetrics } from '../../interaction/chatMetrics';
+import { meteredService } from '../../orchestration/meteredService';
 import { providerCategory } from '../../interaction/providerCategories';
 import { groupProviders } from '../../interaction/providerGroups';
 import { providerIcon } from '../../interaction/providerIcons';
@@ -23,7 +24,7 @@ import { applyModelDraft } from '../../interaction/modelDraft';
 import { normalizeSettings } from '../../orchestration/settings/defaults';
 import { chatModelKey, updateChatThinking } from '../../orchestration/settings/thinking';
 import { configureProxy, matchesLegacyProxy, readConfiguredProxy, storeProxyCredentials } from '../proxy';
-import type { CommunicationSettings, ModelUsageReceipt, Transport } from '../../types';
+import type { AuxiliaryUsage, CommunicationSettings, ModelUsageReceipt, Transport } from '../../types';
 
 let baseUrl = '';
 let proxyUrl = '';
@@ -114,9 +115,10 @@ const server = http.createServer((request, response) => {
 		if (url === '/abort') return;
 		if (url.startsWith('/anthropic/')) {
 			response.writeHead(200, { 'content-type': 'text/event-stream' });
-			response.write('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}\n\n');
+			response.write('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\n');
 			response.write('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n');
 			response.write('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OAuth OK"}}\n\n');
+			if (url.startsWith('/anthropic/interrupt/')) return;
 			response.write('event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n');
 			response.write('event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}\n\n');
 			response.end('event: message_stop\ndata: {"type":"message_stop"}\n\n');
@@ -399,6 +401,49 @@ void test('OpenAI SDK uses the unified transport and normalizes tool calls', asy
 	assert.equal(eventTypes.at(-1), 'done');
 });
 
+void test('model requests wait for their own confirmation after leaving the Node async scope', async () => {
+	const adapter = testProvider('openai-completions');
+	// Simulate Obsidian scheduling the SDK callback outside the Node promise chain.
+	const sdk = new AsyncResource('scribe-test-sdk');
+	const provider: Provider = {
+		...adapter,
+		streamSimple: (...args) => sdk.runInAsyncScope(() => adapter.streamSimple(...args)),
+	};
+	const service = createModelService(credentials, transport, { additionalProviders: [provider] });
+	const request = {
+		providerId: provider.id, model: 'test-model', tools: [], maxRetries: 0,
+		messages: [{ role: 'user' as const, content: 'Detached SDK fixture' }],
+	};
+	const rejected = new Error('拒绝测试请求');
+	openAIBody = {};
+	await assert.rejects(service.send({
+		...request, signal: AbortSignal.timeout(3_000),
+		beforeSend: async () => { throw rejected; },
+	}), (error: unknown) => error === rejected);
+	assert.deepEqual(openAIBody, {});
+
+	let startCheckpoint!: () => void;
+	const checkpointStarted = new Promise<void>((resolve) => { startCheckpoint = resolve; });
+	let finishCheckpoint!: () => void;
+	const checkpointSaved = new Promise<void>((resolve) => { finishCheckpoint = resolve; });
+	const result = service.send({
+		...request, signal: AbortSignal.timeout(3_000),
+		beforeSend: async (address) => {
+			assert.equal(address, `${baseUrl}/openai/chat/completions`);
+			startCheckpoint();
+			await checkpointSaved;
+		},
+	});
+	try {
+		await Promise.race([checkpointStarted, result.then(() => assert.fail('请求未等检查点保存就发出了'))]);
+		assert.deepEqual(openAIBody, {});
+	} finally {
+		finishCheckpoint();
+	}
+	await result;
+	assert.match(JSON.stringify(openAIBody), /Detached SDK fixture/u);
+});
+
 void test('OpenAI, Google and Bedrock wait for the actual address to be confirmed before sending', async () => {
 	const endpoint = `${baseUrl}/redirect-model`;
 	const bedrockProvider = createProvider({
@@ -491,9 +536,9 @@ void test('every repeated send checks the confirmed address and hidden URL chang
 	const address = `${baseUrl}/confirmed-request`;
 	const shown: string[] = [];
 	const beforeSend = async (destination: string) => { shown.push(destination); };
-	const send = (query: string, body: string) => modelRequestConfirmation.run(
+	const send = (query: string, body: string) => modelNodeFetch(
+		`${address}?route=${query}`, { method: 'POST', body },
 		{ beforeSend, controller: new AbortController() },
-		() => modelNodeFetch(`${address}?route=${query}`, { method: 'POST', body }),
 	);
 	await (await send('mock-route-one', 'one')).text();
 	await (await send('mock-route-one', 'two')).text();
@@ -510,18 +555,32 @@ void test('provider usage distinguishes real zeros, reported totals and missing 
 	});
 	async function measure(model: string) {
 		const receipts: ModelUsageReceipt[] = [];
-		const response = await service.send({ providerId, model, messages: [], tools: [] }, (usage) => receipts.push(usage));
-		assert.deepEqual(receipts, [{ reportedUsage: response.reportedUsage, cost: undefined }]);
+		const response = await service.send({ providerId, model, messages: [{ role: 'user', content: 'Measure this prompt.' }], tools: [] },
+			(usage) => receipts.push(usage));
+		const prompt = receipts[0]?.estimatedUsage?.prompt;
+		assert.ok(prompt && prompt > 0);
+		assert.deepEqual(receipts.slice(0, 2), [
+			{ reportedUsage: {}, estimatedUsage: { prompt, total: prompt }, usageStatus: 'provisional' },
+			{ reportedUsage: {}, estimatedUsage: { prompt, output: 2 }, usageStatus: 'provisional' },
+		]);
+		const recorded = { reportedUsage: response.reportedUsage, ...(response.estimatedUsage && { estimatedUsage: response.estimatedUsage }),
+			usageStatus: response.usageStatus ?? 'final' };
+		assert.deepEqual(receipts.slice(2), [
+			recorded,
+			{ ...recorded, cost: undefined },
+		]);
 		const metrics = conversationMetrics([{ taskId: model, turn: 1, status: 'done', pendingCalls: [], messages: [{
 			role: 'assistant', content: response.content, usage: response.usage, reportedUsage: response.reportedUsage,
+			estimatedUsage: response.estimatedUsage, usageStatus: response.usageStatus,
 			metrics: { endedAt: 10, modelMs: 1000, decodeMs: 500, contextWindow: 1000 },
 		}] }]);
-		return { report: response.reportedUsage, metrics };
+		return { report: response.reportedUsage, estimate: response.estimatedUsage, prompt, metrics };
 	}
 	const complete = await measure('with-counts');
 	assert.deepEqual(complete.report, { input: 8, cacheRead: 800, cacheWrite: 2, prompt: 810, output: 42 });
 	assert.deepEqual(complete.metrics.context, { prompt: 810, capacity: 1000, remaining: 190, percent: 81 });
 	assert.equal(complete.metrics.usage?.total, 852);
+	assert.equal(complete.estimate?.prompt, undefined);
 	const withCacheRead = await measure('with-cache-read');
 	assert.deepEqual(withCacheRead.report, { prompt: 810, cacheRead: 800, output: 42 });
 	assert.equal(withCacheRead.metrics.usage?.input, undefined);
@@ -530,7 +589,8 @@ void test('provider usage distinguishes real zeros, reported totals and missing 
 	const partial = await measure('output-only');
 	assert.deepEqual(partial.report, { output: 42 });
 	assert.equal(partial.metrics.context, undefined);
-	assert.equal(partial.metrics.usage?.total, undefined);
+	assert.equal(partial.metrics.usage?.prompt, partial.prompt);
+	assert.equal(partial.metrics.usage?.total, partial.prompt + 42);
 	assert.equal(partial.metrics.usage?.input, undefined);
 	assert.equal(partial.metrics.usage?.cacheRead, undefined);
 	assert.equal(partial.metrics.usage?.cacheWrite, undefined);
@@ -542,8 +602,67 @@ void test('provider usage distinguishes real zeros, reported totals and missing 
 	assert.equal(zero.metrics.usage?.hit, undefined);
 	const totalOnly = await measure('total-only');
 	assert.deepEqual(totalOnly.report, { total: 73 });
-	assert.equal(totalOnly.metrics.usage?.total, 73);
-	assert.equal(totalOnly.metrics.usage?.output, undefined);
+	assert.equal(totalOnly.metrics.usage?.partial?.total?.value, 73);
+	assert.equal(totalOnly.metrics.usage?.partial?.output?.value, 2);
+});
+
+void test('a live Anthropic usage snapshot survives stopping after text but before the final usage frame', async () => {
+	const providerId = 'anthropic-usage-test';
+	const service = createModelService(credentials, transport, {
+		customProviders: () => [{ id: providerId, label: 'Usage fixture', baseUrl: baseUrl + '/anthropic/interrupt',
+			protocol: 'anthropic-messages', models: ['claude-test'] }],
+	});
+	const receipts: ModelUsageReceipt[] = [];
+	const stream = service.stream({ providerId, model: 'claude-test', messages: [{ role: 'user', content: 'Hi' }],
+		tools: [], maxRetries: 0, signal: AbortSignal.timeout(3_000) }, (usage) => receipts.push(usage));
+	let stopped = false;
+	const initial = { reportedUsage: { input: 1, output: 0 }, usageStatus: 'provisional' };
+	const withText = { ...initial, estimatedUsage: { output: 3 } };
+	try {
+		for await (const event of stream) {
+			if (event.type !== 'text_delta') continue;
+			assert.equal(event.delta, 'OAuth OK');
+			const prompt = receipts[0]?.estimatedUsage?.prompt;
+			assert.ok(prompt && prompt > 0);
+			assert.deepEqual(receipts, [{ reportedUsage: {}, estimatedUsage: { prompt, total: prompt }, usageStatus: 'provisional' }, initial, withText]);
+			stopped = true;
+			break;
+		}
+	} finally {
+		stream.cancel();
+	}
+	assert.ok(stopped);
+	await assert.rejects(stream.result());
+	assert.deepEqual(receipts.at(-1), { ...withText, cost: undefined });
+});
+
+void test('auxiliary metering saves each transmitted SDK attempt and ignores a pre-send refusal', async () => {
+	const providerId = 'metered-retry';
+	let sends = 0;
+	const model = createModelService(credentials, { ...transport, fetch: async (...args) => {
+		if (++sends === 1) return Response.json({ error: { message: 'Busy' } }, { status: 503, headers: { 'retry-after-ms': '1' } });
+		return transport.fetch(...args);
+	} }, { customProviders: () => [{ id: providerId, label: 'Usage fixture', baseUrl: baseUrl + '/reported-usage',
+		protocol: 'openai-completions', models: ['output-only'] }] });
+	const records: AuxiliaryUsage[] = [];
+	const previews = new Map<symbol, AuxiliaryUsage>();
+	const metered = meteredService(model, 'video', async (receipt, key) => {
+		records.push(receipt);
+		assert.ok(previews.delete(key));
+	}, (key, receipt) => { previews.set(key, receipt); });
+	const request = { providerId, model: 'output-only', messages: [{ role: 'user' as const, content: 'A model request' }], tools: [], maxRetries: 1 };
+	await metered.send(request);
+	assert.equal(sends, 2);
+	const prompt = records[0]?.estimatedUsage?.prompt;
+	assert.ok(prompt && prompt > 0);
+	assert.deepEqual(records, [
+		{ kind: 'video', reportedUsage: {}, estimatedUsage: { prompt, total: prompt }, usageStatus: 'provisional' },
+		{ kind: 'video', reportedUsage: { output: 42 }, estimatedUsage: { prompt } },
+	]);
+	await assert.rejects(metered.send({ ...request, beforeSend: async () => { throw new Error('未确认'); } }), /未确认/u);
+	assert.equal(sends, 2);
+	assert.equal(records.length, 2);
+	assert.equal(previews.size, 0);
 });
 
 void test('Base URL override is used for every model of the provider', async () => {

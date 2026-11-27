@@ -1,3 +1,4 @@
+import { isPromptCheckpoint } from '../context/promptContext';
 import { Buffer } from 'node:buffer';
 import { MAX_REVIEW_MATERIAL_BYTES } from '../../constants';
 import type { ConversationEntry, ConversationSnapshot, MainConversationEntry, QueuedMessage, SavedRun, SavedSubagentEntry, TaskRequest } from '../../types';
@@ -49,6 +50,9 @@ function retryBlock(value: unknown): boolean {
 function reportedUsage(value: unknown): boolean {
 	return record(value) && ['prompt', 'input', 'cacheRead', 'cacheWrite', 'output', 'total', 'videoInput']
 		.every((key) => value[key] === undefined || count(value[key]));
+}
+function estimatedUsage(value: unknown): boolean {
+	return record(value) && ['prompt', 'output', 'total'].every((key) => value[key] === undefined || count(value[key]));
 }
 
 function rawAssistant(value: unknown): boolean {
@@ -113,12 +117,20 @@ function validSkillScope(value: unknown): boolean {
 function message(value: unknown): boolean {
 	return record(value) && roles.has(value.role) && text(value.content) && validSkillMentions(value.skillMentions) && validSkillScope(value.skillScope)
 		&& validSkillScope(value.skillNotePaths)
+		&& (value.taskPrompt === undefined || (value.role === 'user' && record(value.taskPrompt)
+			&& count(value.taskPrompt.instruction) && count(value.taskPrompt.references) && count(value.taskPrompt.quotes)
+			&& Number(value.taskPrompt.instruction) + Number(value.taskPrompt.references) + Number(value.taskPrompt.quotes) <= value.content.length
+			&& (value.taskPrompt.approvedPlan === undefined || (Array.isArray(value.taskPrompt.approvedPlan) && value.taskPrompt.approvedPlan.length === 2
+				&& value.taskPrompt.approvedPlan.every(count) && Number(value.taskPrompt.approvedPlan[0]) < Number(value.taskPrompt.approvedPlan[1])
+				&& Number(value.taskPrompt.approvedPlan[1]) < Number(value.taskPrompt.instruction)))
+			&& (value.taskPrompt.assignment === undefined || value.taskPrompt.assignment === true)))
 		&& (value.skillInputLength === undefined || (count(value.skillInputLength) && Number(value.skillInputLength) <= value.content.length))
 		&& (value.subagentActivity === undefined || (value.local === true && (value.role === 'assistant' || value.role === 'user')
 			&& subagentActivity(value.subagentActivity)))
 		&& (value.local === undefined || ((value.role === 'assistant' || value.subagentActivity !== undefined) && value.local === true
 			&& value.toolCalls === undefined && value.rawAssistant === undefined && value.thinkingBlocks === undefined
 			&& value.metrics === undefined && value.usage === undefined && value.reportedUsage === undefined
+			&& value.estimatedUsage === undefined && value.usageStatus === undefined
 			&& value.incomplete === undefined && value.truncated === undefined))
 		&& (value.deliveryAgents === undefined || (value.local === true && value.subagentActivity === undefined && deliveryAgentIds(value.deliveryAgents)))
 		&& (value.id === undefined || (text(value.id) && (value.role === 'assistant'
@@ -139,6 +151,8 @@ function message(value: unknown): boolean {
 		&& (value.metrics === undefined || (value.role === 'assistant' && modelMetrics(value.metrics)))
 		&& (value.usage === undefined || (value.role === 'assistant' && record(value.usage)))
 		&& (value.reportedUsage === undefined || (value.role === 'assistant' && reportedUsage(value.reportedUsage)))
+		&& (value.estimatedUsage === undefined || (value.role === 'assistant' && estimatedUsage(value.estimatedUsage)))
+		&& (value.usageStatus === undefined || (value.role === 'assistant' && (value.usageStatus === 'provisional' || value.usageStatus === 'final')))
 		&& (value.toolDurationMs === undefined || (value.role === 'tool' && duration(value.toolDurationMs)))
 		&& (value.shellStatus === undefined || (value.role === 'tool' && shellStatuses.has(value.shellStatus)))
 		&& (value.approvalReview === undefined || (value.role === 'tool' && approvalReviewStatuses.has(value.approvalReview)))
@@ -147,6 +161,7 @@ function message(value: unknown): boolean {
 		&& (value.incomplete === undefined || (value.role === 'assistant' && value.incomplete === true
 			&& value.toolCalls === undefined && value.rawAssistant === undefined))
 		&& (value.toolCalls === undefined || (Array.isArray(value.toolCalls) && value.toolCalls.every(call)))
+		&& (value.goalReportRequired === undefined || (value.role === 'assistant' && value.goalReportRequired === true && !value.local && !value.incomplete))
 		&& (value.rawAssistant === undefined || (value.role === 'assistant' && rawAssistant(value.rawAssistant)));
 }
 
@@ -157,6 +172,10 @@ function request(value: unknown): value is TaskRequest {
 		&& (value.intent === undefined || value.intent === 'plan' || value.intent === 'review')
 		&& (value.approvedPlanTaskId === undefined || (value.intent === undefined && text(value.approvedPlanTaskId)
 			&& value.approvedPlanTaskId.length > 0 && value.approvedPlanTaskId.length <= 128))
+		&& (value.approvedPlanMode === undefined || (value.approvedPlanTaskId !== undefined
+			&& (value.approvedPlanMode === 'continue' || value.approvedPlanMode === 'fresh')))
+		&& (value.approvedPlanRevision === undefined || (value.approvedPlanTaskId !== undefined
+			&& text(value.approvedPlanRevision) && /^[a-f0-9]{64}$/u.test(value.approvedPlanRevision)))
 		&& (value.revisesPlanTaskId === undefined || (value.intent === 'plan' && text(value.revisesPlanTaskId)
 			&& value.revisesPlanTaskId.length > 0 && value.revisesPlanTaskId.length <= 128))
 		&& (value.target === undefined || (value.intent === undefined && record(value.target)
@@ -227,9 +246,13 @@ export function isMainEntry(value: unknown): value is MainConversationEntry {
 				&& (value.step === undefined || step(value.step));
 		case 'step':
 			return step(value.step);
+		case 'plan-enter':
+			return true;
 		case 'history-summary':
 			return record(value.summary) && text(value.summary.throughTaskId) && value.summary.throughTaskId.length > 0
 				&& text(value.summary.text) && Buffer.byteLength(value.summary.text) <= 4_096;
+		case 'prompt-context':
+			return isPromptCheckpoint(value.checkpoint);
 		case 'run-summary':
 			return record(value.summary) && count(value.summary.throughMessage) && value.summary.throughMessage > 1
 				&& text(value.summary.text) && Boolean(value.summary.text.trim()) && Buffer.byteLength(value.summary.text) <= 4_096;
@@ -248,8 +271,11 @@ export function isMainEntry(value: unknown): value is MainConversationEntry {
 				&& (item.throughMessage === undefined || (count(item.throughMessage) && item.throughMessage > 1));
 		}
 		case 'auxiliary-usage':
-			return record(value.usage) && (value.usage.kind === 'review' || value.usage.kind === 'summary' || value.usage.kind === 'video' || value.usage.kind === 'main-attempt')
+			return record(value.usage) && (value.usage.kind === 'review' || value.usage.kind === 'goal-review' || value.usage.kind === 'summary' || value.usage.kind === 'video' || value.usage.kind === 'main-attempt')
+				&& (value.usage.id === undefined || identifier(value.usage.id))
+				&& (value.usage.usageStatus === undefined || value.usage.usageStatus === 'provisional' || value.usage.usageStatus === 'final')
 				&& (value.usage.reportedUsage === undefined || reportedUsage(value.usage.reportedUsage))
+				&& (value.usage.estimatedUsage === undefined || estimatedUsage(value.usage.estimatedUsage))
 				&& (value.usage.cost === undefined || duration(value.usage.cost));
 		case 'retry': {
 			const retry = value.retry;
@@ -297,6 +323,7 @@ export function isSubagentEntry(value: unknown): value is Extract<ConversationEn
 				&& (item.history === undefined || (Array.isArray(item.history) && item.history.every(message)))
 				&& (item.instructions === undefined || text(item.instructions))
 				&& (item.readOnly === undefined || typeof item.readOnly === 'boolean')
+				&& (item.planning === undefined || (item.planning === true && item.readOnly === true && item.history === undefined))
 				&& (item.allowProvider === undefined || typeof item.allowProvider === 'boolean')
 				&& (item.modelOrigin === undefined || identifier(item.modelOrigin)) && queueDestination(item.reportDestination);
 		}
@@ -437,6 +464,12 @@ export async function replayConversation(id: string, entries: AsyncIterable<Conv
 				run.step = item.step;
 				state.turn = item.step.turn;
 				break;
+			case 'plan-enter':
+				if (run.request.intent || run.request.approvedPlanTaskId || run.request.goalRound || run.request.target) {
+					throw new ConversationRecordError('无效的计划模式切换。');
+				}
+				run.request = { ...run.request, intent: 'plan' };
+				break;
 			case 'history-summary': {
 				const taskIds = [...runs.keys()];
 				const through = taskIds.indexOf(item.summary.throughTaskId);
@@ -444,6 +477,10 @@ export async function replayConversation(id: string, entries: AsyncIterable<Conv
 				run.historySummary = item.summary;
 				break;
 			}
+			case 'prompt-context':
+				if (item.checkpoint.after > state.messages.length) throw new ConversationRecordError('上下文检查点超出已保存的消息范围。');
+				(run.promptCheckpoints ??= []).push(item.checkpoint);
+				break;
 			case 'run-summary':
 				if (item.summary.throughMessage > state.messages.length || item.summary.throughMessage <= (run.runSummary?.throughMessage ?? 1)) {
 					throw new ConversationRecordError('任务交接摘要超出已保存的进度范围。');
@@ -480,7 +517,7 @@ export async function replayConversation(id: string, entries: AsyncIterable<Conv
 				(run.retries ??= []).push({ ...retry, beforeMessage: state.messages.length });
 				break;
 			}
-			case 'finish':
+			case 'finish': {
 				state.status = item.status;
 				state.turn = item.turn;
 				state.error = item.error;
@@ -489,7 +526,10 @@ export async function replayConversation(id: string, entries: AsyncIterable<Conv
 				run.partial = item.partial;
 				run.finalized = true;
 				finished.add(item.taskId);
+				const plan = run.request.approvedPlanTaskId ? runs.get(run.request.approvedPlanTaskId) : undefined;
+				if (plan?.request.intent === 'plan' && (item.status === 'done' || item.status === 'file-changes-done')) plan.planArchived = true;
 				break;
+			}
 		}
 	}
 	return { id, runs: [...runs.values()], ...(queue.size ? { queue: [...queue.values()] } : {}),

@@ -205,13 +205,15 @@ void test('macOS Bash restricts vault commands until a single escalation is appr
 	const config = join(ctx.cwd, 'plugin-config');
 	const data = scribeDataPaths(ctx.cwd);
 	const secret = join(denied, 'outside.txt');
-	await Promise.all([mkdir(config), mkdir(data.cache, { recursive: true }), mkdir(data.skills, { recursive: true })]);
+	await Promise.all([mkdir(config), mkdir(data.cache, { recursive: true }), mkdir(data.skills, { recursive: true }),
+		mkdir(data.memory, { recursive: true }), mkdir(join(ctx.cwd, 'drafts'))]);
 	await Promise.all([
 		writeFile(secret, 'private'),
 		writeFile(join(config, 'private.txt'), 'config'),
 		writeFile(join(ctx.cwd, 'lines.txt'), 'first\nsecond\n'),
 		writeFile(data.settings, '{}'),
 		writeFile(join(data.cache, 'private.txt'), 'cache'),
+		writeFile(join(data.memory, 'private.txt'), 'memory'),
 		writeFile(join(data.skills, 'example.md'), 'available skill'),
 	]);
 	ctx.task.request.refs.push({ path: 'lines.txt', lines: [1, 1] });
@@ -236,7 +238,8 @@ void test('macOS Bash restricts vault commands until a single escalation is appr
 	assert.equal((await execute(ctx, 'Bash', { command: write })).isError, true);
 	await assert.rejects(readFile(join(ctx.cwd, 'note.md')), { code: 'ENOENT' });
 	for (const command of ['cat link.txt', 'printf changed > link.txt', 'cat plugin-config/private.txt', 'cat lines.txt',
-		'cat .scribe-ai/settings.json', 'cat .scribe-ai/cache/private.txt', 'printf changed > .scribe-ai/state.json', connect]) {
+		'cat .scribe-ai/settings.json', 'cat .scribe-ai/cache/private.txt', 'cat .scribe-ai/memory/private.txt',
+		'printf changed > .scribe-ai/state.json', connect]) {
 		assert.equal((await execute(ctx, 'Bash', { command })).isError, true, command);
 	}
 	assert.match((await execute(ctx, 'Bash', { command: 'cat .scribe-ai/skills/example.md' })).content, /available skill/);
@@ -258,10 +261,12 @@ void test('macOS Bash restricts vault commands until a single escalation is appr
 	assert.equal(approvals[2]?.humanRequired, true);
 	assert.equal((await execute(ctx, 'Bash', { command: 'printf changed > AGENTS.md', vault_write: true })).isError, true);
 	await assert.rejects(readFile(join(ctx.cwd, 'AGENTS.md')), { code: 'ENOENT' });
+	assert.equal((await execute(ctx, 'Bash', { command: 'printf changed > drafts/AGENTS.md', vault_write: true })).isError, true);
+	await assert.rejects(readFile(join(ctx.cwd, 'drafts', 'AGENTS.md')), { code: 'ENOENT' });
 
 	ctx.permissions = { ...baseline, executionMode: 'full-access', canRead: () => true };
 	assert.equal((await execute(ctx, 'Bash', { command: connect, cwd: denied })).isError, false);
-	assert.equal(approvals.length, 4);
+	assert.equal(approvals.length, 5);
 });
 
 void test('Bash without a native vault boundary requires approval before running', {
@@ -361,6 +366,27 @@ void test('model tool results keep a 12,500-token preview and a full copy under 
 	assert.equal(boundToolResult('short', 'Bash'), 'short');
 	assert.equal(boundToolResult(text, 'read', location), text);
 	assert.equal(boundToolResult(text, 'Bash', { ...location, conversationId: '../outside' }), text);
+});
+
+void test('the executor saves the complete tool result even when a tool has a shorter preview limit', async (t) => {
+	const { ctx } = await fixture(t);
+	const cacheDirectory = scribeDataPaths(ctx.cwd).cache;
+	const text = '开头\n' + '长正文'.repeat(30_000) + '\n末尾';
+	const output = createToolExecutor(createToolRegistry([() => [{
+		name: 'Fixture', description: 'Fixture', inputSchema: {}, isReadOnly: true, maxResultSizeChars: 800,
+		prepare: () => ({ run: () => text }),
+	}]]), cacheDirectory);
+	const result = await output.execute({ name: 'Fixture', id: 'large', input: {} }, ctx);
+	assert.equal(result.isError, false);
+	assert.ok(result.content.length <= 800);
+	assert.match(result.content, /开头[\s\S]*末尾/);
+	const path = /完整结果：([^。]+)/.exec(result.content)?.[1];
+	assert.ok(path);
+	assert.equal(await readFile(path, 'utf8'), text);
+	const blocked = await output.execute({ name: 'Fixture', id: 'bad-cache', input: {} },
+		{ ...ctx, task: { ...ctx.task, request: { ...ctx.task.request, conversationId: '../invalid' } } });
+	assert.match(blocked.content, /完整输出未能保存/);
+	assert.ok(blocked.content.length <= 800);
 });
 
 void test('spill cleanup removes files older than the retention period and prunes empty roots', async (t) => {

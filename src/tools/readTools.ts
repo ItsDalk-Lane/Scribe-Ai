@@ -1,4 +1,4 @@
-import type { ToolModule } from '../types';
+import type { ToolDefinition, ToolModule } from '../types';
 import { cacheLineBatches } from './support/cacheLines';
 import { fileFingerprint, fileToolInput, readToolFile, requiredText, TEXT_LINE_BREAK } from './support/fileAccess';
 import { isImageFile, readCachedImage, readImageFile } from './support/imageData';
@@ -7,7 +7,7 @@ import { publicImageUrl, readRemoteImage } from './support/remoteImage';
 
 const MAX_READ_RESULT_CHARS = 100_000;
 
-export const readTools: ToolModule = () => [{
+export const readTool = {
 	name: 'Read',
 	description: 'Read a UTF-8 text file with line numbers, or view a PNG, JPEG, GIF or WebP file or direct public HTTP(S) image URL, including links returned by tools. Relative paths start in the vault. External files and URLs may require approval. Use offset and limit only for text. A Jupyter notebook is returned as JSON; cells without an ID can be addressed as cell-0, cell-1, and so on.',
 	inputSchema: {
@@ -22,7 +22,7 @@ export const readTools: ToolModule = () => [{
 	},
 	isReadOnly: true,
 	maxResultSizeChars: MAX_READ_RESULT_CHARS,
-	async prepare(input, ctx) {
+	async prepare(input, ctx, localReadOnly = false) {
 		const args = fileToolInput(input, ['file_path', 'offset', 'limit']);
 		const file = requiredText(args, 'file_path');
 		const offset = positiveInteger(args.offset, 'offset', 0) ?? 1;
@@ -47,9 +47,11 @@ export const readTools: ToolModule = () => [{
 				},
 			};
 		}
-		const target = await resolveToolPath(ctx, file, 'read', { requestApproval: true, readCache: true });
+		const target = await resolveToolPath(ctx, file, 'read', { requestApproval: !localReadOnly, readCache: !localReadOnly });
 		const image = isImageFile(file);
 		return {
+			parallelReadKey: localReadOnly && target.stat?.isFile() && target.stat.nlink === 1 && target.stat.ino > 0
+				&& target.vaultPath?.toLowerCase().endsWith('.md') ? `${target.stat.dev}/${target.stat.ino}` : undefined,
 			approval: target.requiresApproval ? {
 				kind: 'access', title: '读取库外文件', target: target.absolutePath,
 				reason: image ? '读取整张库外图片并将其交给当前模型。'
@@ -84,7 +86,9 @@ export const readTools: ToolModule = () => [{
 			},
 		};
 	},
-}];
+} satisfies ToolDefinition;
+
+export const readTools: ToolModule = () => [readTool];
 
 async function formatLines(path: string, batches: Iterable<string[]> | AsyncIterable<string[]>, start: number, end: number) {
 	const result: string[] = [];

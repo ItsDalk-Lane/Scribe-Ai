@@ -50,7 +50,9 @@ void test('ordinary chat passes combined native queries through in the active va
 	const { createRun, execute, layer, observed } = await fixture(t);
 	const request = await createContextBuilder(layer.registry).build(await createRun(), [], 100_000);
 	assert.ok(request.tools.some(({ name }) => name === obsidianSearchToolName));
-	assert.match(request.system ?? '', /用户用自然语言.*使用 ObsidianSearch/u);
+	const toolsPolicy = /<tools>([\s\S]*?)<\/tools>/u.exec(request.system ?? '')?.[1];
+	const nativeSearch = toolsPolicy?.split('。').find((line) => line.includes(obsidianSearchToolName));
+	assert.match(nativeSearch ?? '', /标签.*属性/u);
 
 	for (const query of [
 		'tag:#AI', '[/^scribe$/]', '[/./:/^acsd$/]',

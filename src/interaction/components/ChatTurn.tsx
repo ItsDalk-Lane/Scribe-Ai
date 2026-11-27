@@ -324,12 +324,12 @@ export default memo(function ChatTurn({
 				{showActivity && <WorkingRow key={state.taskId} state={state}
 					modelIntent={execution.modelIntent}
 					override={status === 'awaiting-approval' || modelRetry ? statusLabel : undefined} />}
-				{!running && (Boolean(copyText.trim()) || usage) && <div className="scribe-message-actions scribe-assistant-actions">
-					<Timestamp timestamp={messageTime(answerMessage) ?? answerMessage?.rawAssistant?.timestamp} />
-					{hasReply && !readOnly && <button type="button" className="scribe-message-action"
+				{(usage || !running && copyText.trim()) && <div className="scribe-message-actions scribe-assistant-actions">
+					{!running && <Timestamp timestamp={messageTime(answerMessage) ?? answerMessage?.rawAssistant?.timestamp} />}
+					{!running && hasReply && !readOnly && <button type="button" className="scribe-message-action"
 						disabled={!onFork} onClick={onFork}><ChatIcon name="git-branch" /><span>{text.chatForkReply}</span></button>}
 					{usage && <UsagePopover usage={usage} model={model} turn />}
-					{Boolean(copyText.trim()) && <button type="button" className="scribe-message-action scribe-reply-copy"
+					{!running && Boolean(copyText.trim()) && <button type="button" className="scribe-message-action scribe-reply-copy"
 						aria-label={text.chatCopyReply}
 						onClick={() => void copyReply(copyText)}><ChatIcon name="copy" /></button>}
 				</div>}

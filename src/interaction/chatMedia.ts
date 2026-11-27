@@ -46,9 +46,13 @@ function referenceLabel(value: string) {
 	return value.trim().replace(/\s+/gu, ' ').toLowerCase();
 }
 
+export function maskMarkdownLiterals(markdown: string): string {
+	return markdown.replace(verbatim, (part) => part.replace(/[^\r\n]/gu, (character) => ' '.repeat(character.length)));
+}
+
 // 在交给宿主渲染器前转成链接，避免渲染模型内容时自动访问媒体源站。
 export function deferChatMediaEmbeds(markdown: string): string {
-	const protectedMarkdown = markdown.replace(verbatim, (part) => part.replace(/[^\r\n]/gu, (character) => ' '.repeat(character.length)));
+	const protectedMarkdown = maskMarkdownLiterals(markdown);
 	const references = new Map<string, string>();
 	for (const [, label, angle, url] of protectedMarkdown.matchAll(definition)) {
 		const key = referenceLabel(label!);

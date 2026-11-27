@@ -4,6 +4,8 @@ import { isAbsolute, resolve } from 'node:path';
 import { MAX_REVIEW_MATERIAL_BYTES } from '../constants';
 import { readOnlySkillTools } from '../tools/skillTools';
 import { chatTaskToolNames } from '../tools/chatTaskTools';
+import { planDraftToolNames } from '../tools/planTools';
+import { subagentToolNames } from '../tools/subagentTools';
 import { isWithinPath } from '../tools/support/pathUtils';
 import { createPermissionPolicy } from './policies/permissions';
 import { createReadDelivery } from '../runtime/readDelivery';
@@ -47,7 +49,8 @@ export async function createRunContext(
 			...permissions,
 			canRead: (path) => intent === 'plan' && permissions.canRead(path),
 			canWrite: () => false,
-			canCallTool: (tool) => intent === 'plan' && (chatTaskToolNames.has(tool.name) || (tool.isReadOnly && sideChatTools.has(tool.name)))
+			canCallTool: (tool) => intent === 'plan' && (planDraftToolNames.has(tool.name) || chatTaskToolNames.has(tool.name)
+				|| (tool.isReadOnly && (sideChatTools.has(tool.name) || subagentToolNames.has(tool.name))))
 				&& permissions.canCallTool(tool),
 		} };
 	}

@@ -1,9 +1,10 @@
+import { systemXml } from './promptXml';
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 import { videoMime } from '../../communication/modelVideo';
-import type { AuxiliaryUsage, ModelRequest, ModelService, RunContext, RunObserver, SavedVideoItem, ScribeSettings, VideoSourceKind } from '../../types';
-import { meteredService } from '../meteredService';
+import type { ModelRequest, ModelService, RunContext, RunObserver, SavedVideoItem, ScribeSettings, VideoSourceKind } from '../../types';
+import { meteredService, type UsagePreview, type UsageRecord } from '../meteredService';
 import { isModelAvailable, videoModelFor } from '../settings/modelAvailability';
 import { guardModelConnection } from '../settings/modelConnection';
 import { prepareVideo, transcodableVideo } from './videoEncoding';
@@ -12,9 +13,9 @@ import { videoSourceKind, videoSources } from './videoAttachments';
 type VideoModels = Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin' | 'modelCapabilities'> & Partial<Pick<ModelService, 'modelConnection'>>;
 
 export function createVideoAnalysis(ctx: RunContext, settings: ScribeSettings, models: VideoModels,
-	record: (usage: AuxiliaryUsage) => Promise<void>, save: (content: string, kinds: VideoSourceKind[]) => Promise<void>,
+	record: UsageRecord, save: (content: string, kinds: VideoSourceKind[]) => Promise<void>,
 	items: { previous?: readonly SavedVideoItem[]; alreadySaved: boolean; save(item: SavedVideoItem): Promise<void> },
-	confirmResume?: RunObserver['confirmResume']): RunContext['videoAnalysis'] {
+	confirmResume?: RunObserver['confirmResume'], preview?: UsagePreview): RunContext['videoAnalysis'] {
 	const { task, observer, signal } = ctx;
 	const sources = videoSources(task.request, transcodableVideo).flatMap((source) => {
 		const kind = videoSourceKind(source);
@@ -36,7 +37,7 @@ export function createVideoAnalysis(ctx: RunContext, settings: ScribeSettings, m
 	});
 	if (!sources.length) return;
 	const kinds = [...new Set(sources.map(({ kind }) => kind))];
-	const videoModels = meteredService(models, 'video', record);
+	const videoModels = meteredService(models, 'video', record, preview);
 	const approved = new Set<string>();
 	const completed = new Map(items.previous?.map((item) => [item.key, item.content]));
 	const saved = new Set(items.alreadySaved ? completed.keys() : []);
@@ -76,7 +77,7 @@ export function createVideoAnalysis(ctx: RunContext, settings: ScribeSettings, m
 				};
 				const request: ModelRequest = {
 					...choice,
-					system: '你负责分析一个视频。按照用户问题提取有用的事实。每行以 [MM:SS] 或 [HH:MM:SS] 开头，描述对应时刻的画面、文字或声音。不要添加无时间戳的标题；无法确认的细节应明确标注。',
+					system: systemXml({ task: '你负责分析一个视频。按照用户问题提取有用的事实。每行以 [MM:SS] 或 [HH:MM:SS] 开头，描述对应时刻的画面、文字或声音。不要添加无时间戳的标题；无法确认的细节应明确标注。' }),
 					messages: [{ role: 'user', content: question || '概述这段视频的主要内容。' }],
 					tools: [], signal, maxTokens: 2_000, reasoning: null,
 					video: { messageIndex: 0, hasFiles: video.data !== undefined, load: (active) => {

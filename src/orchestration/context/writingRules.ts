@@ -1,7 +1,8 @@
 import { realpath, stat } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { posix, resolve } from 'node:path';
 import type { FileSystemAdapter, Vault } from 'obsidian';
-import { hasFileErrorCode, isWithinPath } from '../../tools/support/pathUtils';
+import { hasFileErrorCode, isWithinPath, normalizeVaultRelativePath } from '../../tools/support/pathUtils';
+import { scribeDataPaths } from '../storage/paths';
 import type { LegacyWritingRules } from '../../types';
 
 export const WRITING_RULE_FILENAME = 'AGENTS.md';
@@ -11,7 +12,8 @@ export class WritingRuleChangedError extends Error {}
 async function safeLocation(vault: Vault, path: string): Promise<string | undefined> {
 	const root = await realpath((vault.adapter as FileSystemAdapter).getBasePath());
 	const expected = resolve(root, path);
-	if (!isWithinPath(root, expected) || isWithinPath(resolve(root, vault.configDir), expected)) return;
+	if (!isWithinPath(root, expected) || isWithinPath(resolve(root, vault.configDir), expected)
+		|| isWithinPath(scribeDataPaths(root).root, expected)) return;
 	const actual = await realpath(expected).catch((error: unknown) => {
 		if (!hasFileErrorCode(error, 'ENOENT')) throw error;
 	});
@@ -19,19 +21,44 @@ async function safeLocation(vault: Vault, path: string): Promise<string | undefi
 	return actual === expected ? actual : undefined;
 }
 
-export async function readWritingRule(vault: Vault): Promise<string | undefined> {
-	const path = WRITING_RULE_FILENAME;
+export async function readWritingRule(vault: Vault, path = WRITING_RULE_FILENAME): Promise<string | undefined> {
+	if (normalizeVaultRelativePath(path) !== path || path.includes('\\') || posix.basename(path) !== WRITING_RULE_FILENAME) return;
 	const file = vault.getFileByPath(path);
 	if (!file) return;
 	try {
 		const actual = await safeLocation(vault, path);
-		if (!actual || (await stat(actual)).nlink !== 1) return;
+		if (!actual) return;
+		const info = await stat(actual);
+		if (!info.isFile() || info.nlink !== 1) return;
+		if (info.size > 32_768) throw new Error('AGENTS.md 超过 32 KiB，请精简后重试。');
 		return await vault.read(file);
 	} catch (error) {
 		if (!hasFileErrorCode(error, 'ENOENT')) throw error;
 		return undefined;
 	}
 }
+
+export function createDirectoryRules(vault: Vault, trusted: () => boolean) {
+	return {
+		trusted,
+		async forPath(vaultRelativePath: string, isDirectory = false) {
+			if (!trusted() || vaultRelativePath.includes('\\')) return [];
+			const path = normalizeVaultRelativePath(vaultRelativePath);
+			if (!path) return [];
+			const folders = (isDirectory ? path : posix.dirname(path)).split('/');
+			const results: { path: string; text: string }[] = [];
+			for (const [index, folder] of folders.entries()) {
+				if (folder === '.') continue;
+				const rulePath = posix.join(...folders.slice(0, index + 1), WRITING_RULE_FILENAME);
+				const text = (await readWritingRule(vault, rulePath))?.trim();
+				if (text) results.push({ path: rulePath, text });
+			}
+			return trusted() ? results : [];
+		},
+	};
+}
+
+export type DirectoryRules = ReturnType<typeof createDirectoryRules>;
 
 export async function saveWritingRule(vault: Vault, value: string, expected: string | undefined): Promise<string> {
 	const path = WRITING_RULE_FILENAME;
@@ -72,10 +99,5 @@ export async function migrateWritingRules(vault: Vault, rules: LegacyWritingRule
 }
 
 export async function buildWritingRulesPrompt(vault: Vault): Promise<string | undefined> {
-	const rule = (await readWritingRule(vault))?.trim();
-	if (!rule) return;
-	return [
-		'全库自定义指令来自笔记库根目录的 AGENTS.md，只用于写作风格、结构和格式。本次用户明确提出的要求优先，操作范围、资料授权和工具权限仍由原有规则决定。',
-		rule,
-	].join('\n\n');
+	return (await readWritingRule(vault))?.trim() || undefined;
 }

@@ -20,13 +20,16 @@ import { skillTools } from '../../tools/skillTools';
 import { subagentTools } from '../../tools/subagentTools';
 import { writeTools } from '../../tools/writeTools';
 import { createContextBuilder } from '../context/contextBuilder';
+import { promptText } from '../context/promptXml';
 import { createSkillRegistry } from '../context/skills';
 import { createSessionController } from '../sessionController';
 import { normalizeSettings } from '../settings/defaults';
 import { createConversationStore } from '../storage/conversationStore';
 import { createTask } from '../taskManager';
+import { fixtureToolIntents } from '../../runtime/tests/agentFixture';
 
 function respond(calls: ToolCall[] = [], beforeResult?: () => Promise<void>): ModelStream {
+	calls = fixtureToolIntents(calls);
 	const content = calls.length ? '' : '已完成核对。';
 	return {
 		async *[Symbol.asyncIterator]() { /* 此测试无需模拟逐字输出。 */ },
@@ -44,10 +47,13 @@ function respond(calls: ToolCall[] = [], beforeResult?: () => Promise<void>): Mo
 
 function reviewResults(request: ModelRequest): ToolCall[] {
 	const reviews: ToolCall[] = [];
-	const prompt = request.messages.find(({ content }) => content.startsWith('协作资料，'));
-	const notes = prompt ? JSON.parse(prompt.content.slice(prompt.content.indexOf('\n') + 1)) as Partial<SubagentNote>[] : [];
+	const processed = new Set(request.messages.filter(({ toolName, isError }) => toolName === 'review_subagent_result' && !isError)
+		.map(({ toolCallId }) => toolCallId));
+	const prompt = request.messages.flatMap(({ promptSections }) => promptSections ?? [])
+		.filter(({ tag, text }) => tag === 'collaboration-update' && text.startsWith('协作资料\n')).at(-1);
+	const notes = prompt ? JSON.parse(prompt.text.slice(prompt.text.indexOf('\n') + 1)) as Partial<SubagentNote>[] : [];
 	for (const note of notes) {
-		if (note.kind === 'result' && note.review?.status === 'pending' && note.id) {
+		if (note.kind === 'result' && note.review?.status === 'pending' && note.id && !processed.has('review-' + note.id)) {
 			const decision = note.status === 'done' ? { decision:'use' } : { decision:'blocked', reason:'分派未完成。' };
 			reviews.push({ id:'review-' + note.id, name:'review_subagent_result', input:{result_id:note.id, ...decision} });
 		}
@@ -154,7 +160,8 @@ const readExample = (id: string): ToolCall[] => [{id:'sample',name:'read_skill',
 
 void test('继承完整对话的子任务沿用手动压缩摘要', async (t) => {
 	const result = await delegate(t, { parent: '分工核对。', child: '查找资料。', forkCompacted: true, childCalls: () => [] });
-	const inherited = result.childRequests[0]!.messages.map(({ content }) => content).join('\n');
+	const inherited = result.childRequests[0]!.messages.map(promptText).join('\n');
+	assert.match(result.childRequests[0]?.system ?? '', /你是(?:独立)?子助手/u);
 	assert.match(inherited, /核对规则已确认/u);
 	assert.doesNotMatch(inherited, /压缩前的材料/u);
 });
@@ -173,8 +180,11 @@ void test('用户直接选择的子 Agent 立即使用角色模型和点选技�
 	assert.equal(result.agents.length, 1);
 	assert.equal(result.agents[0]?.role, 'proofreader');
 	assert.equal(result.childRequests[0]?.model, 'review-model');
-	assert.match(result.childRequests[0]?.system ?? '', /核对任务涉及的材料/);
-	assert.ok(result.childRequests[0]?.messages.some(({ content }) => content.includes('核稿时先检查来源')));
+	assert.ok(result.childRequests[0]?.messages.flatMap(({ promptSections }) => promptSections ?? [])
+		.some(({ tag, text }) => tag === 'subagent-assignment' && text === '核对任务涉及的材料。'));
+	assert.ok(result.parentRequests[0]?.messages.flatMap(({ promptSections }) => promptSections ?? [])
+		.some(({ tag, text }) => tag === 'subagent-state' && text.includes('用户选定的子助手 proofreader')));
+	assert.ok(result.childRequests[0]?.messages.some((message) => promptText(message).includes('核稿时先检查来源')));
 	assert.ok(result.parentRequests.some(({ messages }) => messages.some(({ toolName }) => toolName === 'review_subagent_result')));
 	assert.equal(result.state.status, 'done', result.state.error);
 });
@@ -193,7 +203,7 @@ void test('分派时 MCP 范围随任务交给可调用的子 Agent', {timeout:1
 for (const pick of [true,false]) {
 	void test((pick ? '菜单点选' : '直接键入') + '的手动技能可随分派继承并读取附件', {timeout:10000}, async (t) => {
 		const result = await delegate(t, {parent:'请用 $manual-guide 分派核稿。', child:'请核对这次指定技能的配套样本。', pick, childCalls:readExample});
-		assert.ok(result.parentRequests[0]?.messages.some((m) => m.content.includes('核稿时先检查来源')));
+		assert.ok(result.parentRequests[0]?.messages.some((message) => promptText(message).includes('核稿时先检查来源')));
 		assert.equal(result.state.status, 'done',result.state.error);
 		const sample = result.childRequests.flatMap((request) => request.messages).find((m) => m.toolCallId === 'sample');
 		assert.equal(sample?.isError, false, sample?.content);
@@ -220,7 +230,7 @@ void test('分派前原技能改名且出现同名来源时，子任务保留最
 	assert.equal(result.state.status,'done',result.state.error);
 	assert.ok(result.childRequests.length);
 	for (const request of result.childRequests) for (const message of request.messages) {
-		assert.doesNotMatch(message.content,/原位置的新指令|同名替代来源的指令/u);
+		assert.doesNotMatch(promptText(message),/原位置的新指令|同名替代来源的指令/u);
 	}
 });
 
