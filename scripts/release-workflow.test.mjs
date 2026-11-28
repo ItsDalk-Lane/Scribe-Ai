@@ -23,12 +23,15 @@ function run(step, github, env) {
 	return result;
 }
 
-test('the publish workflow requires a completed review and finds a successful build for exactly the reviewed tag and commit', useBash, () => {
+test('the publish workflow requires a completed review and finds a successful build for exactly the reviewed tag and commit', useBash, (t) => {
 	const step = steps.find(({ id }) => id === 'candidate');
 	assert.ok(step);
+	const directory = mkdtempSync(join(tmpdir(), 'scribe-release-workflow-'));
+	t.after(() => rmSync(directory, { recursive: true, force: true }));
+	const output = join(directory, 'output');
 	const github = `gh() { printf 'lookup: %s\n' "$*" >&2; printf '%s\n' "$MOCK_RUN_ID"; }`;
 	const base = { GITHUB_REF: 'refs/heads/main', DEFAULT_BRANCH: 'main', RELEASE_VERSION: '1.0.3',
-		REVIEW_PASSED: 'true', MOCK_RUN_ID: '99999', GITHUB_OUTPUT: '/dev/stdout' };
+		REVIEW_PASSED: 'true', MOCK_RUN_ID: '99999', GITHUB_OUTPUT: output };
 	for (const input of [{ REVIEW_PASSED: 'false' }, { GITHUB_REF: 'refs/heads/draft' },
 		{ REVIEWED_COMMIT: '1234567' }, { RELEASE_VERSION: 'v1.0.3' }]) {
 		const rejected = run(step, github, { ...base, ...input });
@@ -38,7 +41,7 @@ test('the publish workflow requires a completed review and finds a successful bu
 	assert.equal(run(step, github, { ...base, MOCK_RUN_ID: '' }).status, 1);
 	const accepted = run(step, github, base);
 	assert.equal(accepted.status, 0, accepted.stderr);
-	assert.equal(accepted.stdout, 'run_id=99999\n');
+	assert.equal(readFileSync(output, 'utf8'), 'run_id=99999\n');
 	assert.match(accepted.stderr, new RegExp(`--event push --status success --branch 1\\.0\\.3 --commit ${commit}`, 'u'));
 });
 
