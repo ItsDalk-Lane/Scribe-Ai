@@ -1,14 +1,15 @@
 {
 	"name": "scribe-ai",
-	"version": "1.0.3",
+	"version": "1.0.4",
 	"description": "Run AI agent tasks in Obsidian with your configured model: read, search and edit notes, run commands, and use skills, web search and MCP servers.",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
 		"build": "npm run build:release && node scripts/sync-vault.mjs",
-		"build:release": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-		"test": "node scripts/test-bundle.mjs",
+		"build:release": "npm run check:release && tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"check:release": "node scripts/check-release.mjs",
+		"test": "node --test scripts/*.test.mjs && node scripts/test-bundle.mjs",
 		"test:communication": "node scripts/test-bundle.mjs communication",
 		"test:agent": "node scripts/test-bundle.mjs agent",
 		"version": "node version-bump.mjs && git add manifest.json versions.json",

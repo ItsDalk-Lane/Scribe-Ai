@@ -1,0 +1,78 @@
+name: Publish release
+
+on:
+    workflow_dispatch:
+        inputs:
+            version:
+                description: Release tag in x.y.z format
+                required: true
+                type: string
+            reviewed_commit:
+                description: Full commit SHA from the completed Obsidian branch review
+                required: true
+                type: string
+            obsidian_review_passed:
+                description: The completed preview for this commit has zero Errors
+                required: true
+                type: boolean
+
+concurrency:
+    group: scribe-release-${{ inputs.version }}
+    cancel-in-progress: false
+
+jobs:
+    publish:
+        runs-on: ubuntu-latest
+        permissions:
+            actions: read
+            attestations: read
+            contents: write
+        env:
+            GH_REPO: ${{ github.repository }}
+            RELEASE_VERSION: ${{ inputs.version }}
+            REVIEWED_COMMIT: ${{ inputs.reviewed_commit }}
+        steps:
+            - name: Find the checked build for the reviewed commit
+              id: candidate
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+                  REVIEW_PASSED: ${{ inputs.obsidian_review_passed }}
+              run: |
+                  if [[ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" || "$REVIEW_PASSED" != true ||
+                        ! "$REVIEWED_COMMIT" =~ ^[a-f0-9]{40}$ ||
+                        ! "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+                      echo 'Use the default branch and confirm the completed Obsidian review for the full release commit SHA.' >&2
+                      exit 1
+                  fi
+                  run_id=$(gh run list --workflow release-artifacts.yml --event push --status success \
+                      --branch "$RELEASE_VERSION" --commit "$REVIEWED_COMMIT" --limit 1 \
+                      --json databaseId --jq '.[0].databaseId // empty')
+                  if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
+                      echo 'No successful release build matches the tag and reviewed commit.' >&2
+                      exit 1
+                  fi
+                  printf 'run_id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
+            - uses: actions/checkout@v6
+              with:
+                  persist-credentials: false
+            - uses: actions/setup-node@v6
+              with:
+                  node-version: '22.19.0'
+            - name: Verify the signed installer files
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  RUN_ID: ${{ steps.candidate.outputs.run_id }}
+              run: |
+                  staging="$RUNNER_TEMP/scribe-ai-release"
+                  gh run download "$RUN_ID" --name "scribe-ai-$RELEASE_VERSION-verified" --dir "$staging"
+                  node --input-type=module -e 'import { releaseAssetDigests } from "./scripts/check-release.mjs"; releaseAssetDigests(process.argv[1], process.argv[2]);' "$staging" "$RELEASE_VERSION"
+                  for file in main.js manifest.json styles.css; do
+                      gh attestation verify "$staging/$file" --repo "$GH_REPO" \
+                          --source-ref "refs/tags/$RELEASE_VERSION" --source-digest "$REVIEWED_COMMIT" \
+                          --signer-workflow "$GH_REPO/.github/workflows/release-artifacts.yml"
+                  done
+            - name: Publish the verified GitHub release
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: node scripts/publish-release.mjs "$RELEASE_VERSION" "$REVIEWED_COMMIT" "$RUNNER_TEMP/scribe-ai-release"

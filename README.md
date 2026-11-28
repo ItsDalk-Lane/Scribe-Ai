@@ -175,7 +175,7 @@ npm run lint
 npm test       # run all tests, including communication and cross-feature checks
 ```
 
-The same tests run on pushes and pull requests. New test files under `src/` are discovered automatically.
+The same tests run on pushes and pull requests. The test command also checks release metadata, rejected publication requests, and draft asset verification. New test files under `src/` are discovered automatically.
 
 Copy `main.js` and `manifest.json` (plus `styles.css` if present) into
 `<Vault>/.obsidian/plugins/scribe-ai/` and enable the plugin in
@@ -183,18 +183,12 @@ Copy `main.js` and `manifest.json` (plus `styles.css` if present) into
 
 ## Releasing
 
-Bump `minAppVersion` in `manifest.json` when the plugin needs a newer Obsidian
-version, then run `npm version patch|minor|major --no-git-tag-version`. This
-updates `package.json` and, through `version-bump.mjs`, `manifest.json` and
-`versions.json`. Keep `--no-git-tag-version` to prepare the four files without
-creating a tag automatically. Commit and push the files, then push a tag with
-the exact version number from `manifest.json`, such as `1.0.3`.
+1. Update `minAppVersion` if needed. Run `npm version patch --no-git-tag-version` to prepare the next patch, or replace `patch` with `minor` or `major` when needed. Run `npm run check:release` and push the release commit. It checks the plugin description and manifest, npm versions, and the minimum app version mapping.
+2. In Obsidian Community, select **Review branch** and enter the full SHA of that commit. Wait until the preview finishes with zero **Error** entries. If you make a fix, review the new commit before releasing it. [Obsidian review guide](https://docs.obsidian.md/community-directory/manage-entry#fix-a-failed-review)
+3. Push a Git tag equal to the manifest version on the reviewed commit. **Release artifacts** runs lint, tests, and the production build, compares the files with a second build, and signs all three files. Use the successful run that matches both the tag and SHA. [GitHub artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
+4. From the default branch in **Actions → Publish release**, enter the version and reviewed SHA and confirm the completed zero-error preview. The workflow verifies the signed files, checks the draft upload against the built files, and then makes the release public. An existing draft can provide release notes. Release files come from the verified tag build.
 
-Open the **Release artifacts** workflow run for the tag and download the
-`scribe-ai-<version>` artifact once the build and attestations pass. Create the
-GitHub release for that tag and attach `manifest.json`, `main.js`, and
-`styles.css` from the downloaded artifact. The build attestations verify the
-exact bytes of those files. [GitHub artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
+Use **Publish release** as the publishing entry point. A maintainer who publishes from the GitHub Releases page directly bypasses these workflow checks. Obsidian reviews the public release files after publication. [GitHub release permissions](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) · [Obsidian review guide](https://docs.obsidian.md/community-directory/manage-entry)
 
 ## Model communication (desktop)
 

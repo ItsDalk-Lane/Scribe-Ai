@@ -1,7 +1,7 @@
 {
 	"id": "scribe-ai",
 	"name": "Scribe Ai",
-	"version": "1.0.3",
+	"version": "1.0.4",
 	"minAppVersion": "1.11.4",
 	"isDesktopOnly": true,
 	"description": "Read, search, and edit notes with your configured AI model. Run commands and use skills, web search, and MCP tools.",

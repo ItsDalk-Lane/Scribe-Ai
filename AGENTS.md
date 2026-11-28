@@ -134,8 +134,9 @@ npm run build
 ## Versioning & releases
 
 - Bump `version` in `manifest.json` (SemVer) and update `versions.json` to map plugin version → minimum app version.
-- Create a GitHub release whose tag exactly matches `manifest.json`'s `version`. Do not use a leading `v`.
-- Attach `manifest.json`, `main.js`, and `styles.css` (if present) to the release as individual assets.
+- Use `npm run check:release` to verify the plugin manifest and matching package, lockfile, and Obsidian compatibility versions. The release tag uses `x.y.z` and points to the exact reviewed commit.
+- Run Obsidian **Review branch** on the full commit SHA and confirm the completed preview shows zero **Error** entries. The tag build runs lint, tests, and an independent comparison build before signing `manifest.json`, `main.js`, and `styles.css`.
+- Run **Publish release** from the default branch with the reviewed SHA and version. Verify GitHub's stored hashes and asset list against the signed build before making the draft public.
 - After the initial release, follow the process to add/update your plugin in the community catalog as required.
 
 ## Security, privacy, and compliance

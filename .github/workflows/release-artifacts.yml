@@ -20,31 +20,34 @@ jobs:
                   node-version: '22.19.0'
                   cache: npm
             - name: Verify release version
-              run: |
-                  node --input-type=module <<'NODE'
-                  import { readFileSync } from 'node:fs';
-                  const tag = process.env.GITHUB_REF_NAME;
-                  const manifest = JSON.parse(readFileSync('manifest.json', 'utf8'));
-                  const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
-                  if (!/^\d+\.\d+\.\d+$/.test(tag) || manifest.version !== tag || pkg.version !== tag) {
-                      throw new Error('The release tag must match the manifest and package versions.');
-                  }
-                  NODE
+              run: node scripts/check-release.mjs "$GITHUB_REF_NAME"
             - run: npm ci
+            - run: npm run lint
+            - run: npm test
             - run: npm run build:release
+            - name: Check installer files and rebuild for comparison
+              run: |
+                  staging="$RUNNER_TEMP/scribe-ai-release"
+                  mkdir -- "$staging"
+                  cp -P -- main.js manifest.json styles.css "$staging/"
+                  node --input-type=module -e 'import { releaseAssetDigests } from "./scripts/check-release.mjs"; releaseAssetDigests(process.argv[1], process.argv[2]);' "$staging" "$GITHUB_REF_NAME"
+                  node esbuild.config.mjs production
+                  for file in main.js manifest.json styles.css; do
+                      cmp -- "$file" "$staging/$file"
+                  done
             - name: Attest release files
               uses: actions/attest@v4
               with:
                   subject-path: |
-                      main.js
-                      manifest.json
-                      styles.css
+                      ${{ runner.temp }}/scribe-ai-release/main.js
+                      ${{ runner.temp }}/scribe-ai-release/manifest.json
+                      ${{ runner.temp }}/scribe-ai-release/styles.css
             - name: Package release files
               uses: actions/upload-artifact@v7
               with:
-                  name: scribe-ai-${{ github.ref_name }}
+                  name: scribe-ai-${{ github.ref_name }}-verified
                   path: |
-                      main.js
-                      manifest.json
-                      styles.css
+                      ${{ runner.temp }}/scribe-ai-release/main.js
+                      ${{ runner.temp }}/scribe-ai-release/manifest.json
+                      ${{ runner.temp }}/scribe-ai-release/styles.css
                   if-no-files-found: error
