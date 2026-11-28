@@ -501,6 +501,7 @@ export interface ResumeReview {
 export type ModelModality = 'text' | 'image';
 /** 配置中记录模型能力，当前 SDK 传输所用的 ModelModality 仍是文本和图像。 */
 export type ModelInputModality = ModelModality | 'audio' | 'video' | 'pdf';
+export type ConfiguredModelType = 'text' | 'image' | 'video' | 'speech-synthesis' | 'speech-recognition' | 'embedding' | 'rerank' | 'audio' | 'other';
 
 export interface CustomProviderSettings {
 	label: string;
@@ -535,6 +536,13 @@ export interface ProviderModelInfo {
 
 /** 单个模型的覆盖配置；缺省字段回落到服务商配置，再回落到目录元数据 */
 export interface ModelOverride {
+	type?: ConfiguredModelType;
+	mediaOptions?: Partial<Record<import('./communication/mediaApi').MediaOperation, import('./communication/mediaApi').MediaValues>>;
+	imageDefaults?: import('./orchestration/settings/mediaSettings').ImageOptions;
+	videoDefaults?: import('./orchestration/settings/mediaSettings').VideoOptions;
+	voice?: string;
+	speechSynthesis?: import('./orchestration/settings/mediaSettings').SpeechSynthesisOptions;
+	speechRecognition?: import('./orchestration/settings/mediaSettings').SpeechRecognitionOptions;
 	baseUrl?: string;
 	protocol?: string;
 	contextWindow?: number;
@@ -568,7 +576,11 @@ export interface ModelProviderInfo {
 	oauth?: { subscription: boolean };
 }
 
+export type ModelCatalogModelType = ConfiguredModelType;
+
 export interface ModelCatalogDetails {
+	/** 服务商目录明确标注的模型类型，缺失时不作推断 */
+	type?: ModelCatalogModelType;
 	connectionProtocol?: string;
 	contextWindow?: number;
 	maxTokens?: number;
@@ -1094,6 +1106,7 @@ export interface LegacyWritingRules {
 export interface ScribeSettings {
 	mcp?: McpSettings;
 	webSearch?: WebSearchSettings;
+	media?: import('./orchestration/settings/mediaSettings').MediaSettings;
 	videoModel?: Pick<ModelRequest, 'providerId' | 'model'>;
 	videoLinkModel?: ScribeSettings['videoModel'] | null;
 	skillSettings?: SkillSettings;

@@ -164,17 +164,21 @@ ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## MCP TypeScript SDK
+## MCP TypeScript SDK and network libraries
 
 The [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) provides MCP transports and authorization.
 [EventSource](https://github.com/EventSource/eventsource) reads event streams from legacy MCP servers.
 [@cfworker/json-schema](https://github.com/cfworker/cfworker/tree/main/packages/json-schema) validates structured MCP responses without generating executable code.
+[ws](https://github.com/websockets/ws) provides the authenticated WebSocket client for speech recognition.
 
 MIT License
 
 Copyright (c) 2024 Anthropic, PBC
 Copyright (c) EventSource GitHub organisation
 Copyright (c) 2020 Jeremy Danyow
+Copyright (c) 2011 Einar Otto Stangvik <einaros@gmail.com>
+Copyright (c) 2013 Arnout Kazemier and contributors
+Copyright (c) 2016 Luigi Pinca and contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

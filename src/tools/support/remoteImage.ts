@@ -71,8 +71,8 @@ export async function imageDownloadProxy(
 }
 const fetchMedia = createNodeFetch(imageDownloadProxy, { lookup: publicLookup });
 
-export async function openRemoteMedia(url: URL, signal: AbortSignal, media: 'image' | 'video', sameOriginOnly = false, fetcher: typeof fetch = fetchMedia) {
-	const label = media === 'image' ? '图片' : '视频';
+export async function openRemoteMedia(url: URL, signal: AbortSignal, media: 'image' | 'video' | 'audio', sameOriginOnly = false, fetcher: typeof fetch = fetchMedia) {
+	const label = media === 'image' ? '图片' : media === 'video' ? '视频' : '音频';
 	const origin = url.origin;
 	for (let redirects = 0; redirects <= 5; redirects++) {
 		url = publicMediaUrl(url.href, label);

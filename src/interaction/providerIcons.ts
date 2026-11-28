@@ -86,8 +86,12 @@ const BRAND_ICONS: Record<string, ProviderIcon> = {
 
 // CC Switch 的火山方舟和 OpenCode 图标分别用于同品牌的套餐。
 const SHARED_BRAND: Record<string, string> = {
+	'zai-payg': 'zai',
+	'zai-payg-cn': 'zai-coding-cn',
 	'opencode-go': 'opencode',
 	'volcengine-coding-plan': 'volcengine-agent-plan',
+	'minimax-m-plan': 'minimax',
+	'minimax-m-plan-cn': 'minimax-cn',
 };
 
 export function providerIcon(providerId: string): ProviderIcon | undefined {
