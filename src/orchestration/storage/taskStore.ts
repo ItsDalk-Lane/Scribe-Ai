@@ -8,7 +8,7 @@ import { assistantMessageId } from '../../runtime/runState';
 import { isThinkingLevel } from '../settings/thinking';
 import { createSubagentRecordIndex } from './subagentRecords';
 import { validNoteChange } from '../../tools/support/noteChange';
-import { isCachedImagePath } from './paths';
+import { isCachedImagePath, isGeneratedMediaRef, isGeneratedVideoJobId } from './paths';
 import { isChatTaskEvent } from './chatTasks';
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -146,6 +146,10 @@ function message(value: unknown): boolean {
 				: value.role === 'user' && (ref.kind === 'file' || ref.kind === 'url'
 					|| (ref.kind === 'pasted' && isCachedImagePath(ref.path))
 					|| (ref.kind === 'vault-link' && (ref.sourcePath === undefined || text(ref.sourcePath))))))))
+		&& (value.generatedMedia === undefined || (value.role === 'tool' && value.isError !== true && value.skipped === undefined
+			&& Array.isArray(value.generatedMedia) && value.generatedMedia.every(isGeneratedMediaRef)))
+		&& (value.generatedVideoJobId === undefined || (value.role === 'tool' && value.skipped === undefined
+			&& isGeneratedVideoJobId(value.generatedVideoJobId)))
 		&& (value.skipped === undefined || (value.role === 'tool' && value.skipped === true))
 		&& (value.truncated === undefined || (value.role === 'assistant' && value.truncated === true))
 		&& (value.metrics === undefined || (value.role === 'assistant' && modelMetrics(value.metrics)))

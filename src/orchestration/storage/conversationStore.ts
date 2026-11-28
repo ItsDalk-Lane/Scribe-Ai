@@ -25,6 +25,8 @@ import { sameQueuedDestination } from '../settings/modelConnection';
 import { ChatTaskBoard } from './chatTasks';
 import type { ChatTask } from './chatTasks';
 import { conversationPlanFilename, conversationPlanPrefix } from './paths';
+import { isSavedVideoJob, parseVideoJobs, VIDEO_JOBS_LIMIT, VIDEO_JOBS_SUFFIX } from './mediaVideoRecords';
+import type { SavedVideoJob } from './mediaVideoRecords';
 
 const idPattern = /^(?!(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$)[A-Z0-9][A-Z0-9-]{0,95}$/i;
 const titleLimit = 120;
@@ -376,6 +378,20 @@ export function createConversationStore(directory: string, recordMigrationChange
 	function writeShellJobs(id: string, jobs: SavedShellJob[]) {
 		return writeAtomically(shellJobsPath(id), JSON.stringify({ conversationId: id, jobs }));
 	}
+	const videoJobsPath = (id: string) => join(root, `${id}${VIDEO_JOBS_SUFFIX}`);
+	async function readVideoJobs(id: string) {
+		const opened = await openIfExists(videoJobsPath(id));
+		if (!opened) return [];
+		try {
+			if (opened.stat.size > VIDEO_JOBS_LIMIT) throw new Error('本对话的视频任务记录超出容量限制。');
+			return parseVideoJobs(await opened.file.readFile('utf8'), id);
+		} finally { await opened.file.close(); }
+	}
+	function writeVideoJobs(id: string, jobs: SavedVideoJob[]) {
+		const value = JSON.stringify({ conversationId: id, jobs });
+		if (Buffer.byteLength(value) > VIDEO_JOBS_LIMIT) throw new Error('本对话的视频任务记录已达到容量限制。');
+		return writeAtomically(videoJobsPath(id), value);
+	}
 	function write(id: string, update: (path: string) => Promise<ConversationEntry[]>) {
 		const path = logPath(id);
 		const key = path.toLowerCase();
@@ -519,6 +535,31 @@ export function createConversationStore(directory: string, recordMigrationChange
 					listeners.delete(listener);
 					if (!listeners.size) taskSubscribers.delete(path);
 				};
+			},
+		},
+		mediaVideoHistory: {
+			async list(id) {
+				const key = logPath(id).toLowerCase();
+				await writeQueue.get(key)?.catch(() => {});
+				return deletedLogs.has(key) ? [] : readVideoJobs(id);
+			},
+			async save(id, job) {
+				const path = logPath(id);
+				if (!isSavedVideoJob(job)) throw new Error('视频任务记录格式无效。');
+				await enqueue(path, async () => {
+					if (deletedLogs.has(path.toLowerCase())) throw new MissingConversationError('对话已删除。');
+					await requireConversation(id, path);
+					const jobs = (await readVideoJobs(id)).filter(({ id }) => id !== job.id);
+					await writeVideoJobs(id, [...jobs, job]);
+				});
+			},
+			async conversationIds() {
+				const files = await readdir(root, { withFileTypes: true }).catch((error: unknown) => {
+					if (isMissing(error)) return [];
+					throw error;
+				});
+				return files.filter((file) => file.isFile() && file.name.endsWith(VIDEO_JOBS_SUFFIX))
+					.map(({ name }) => name.slice(0, -VIDEO_JOBS_SUFFIX.length)).filter((id) => idPattern.test(id));
 			},
 		},
 		shellJobHistory: {
@@ -687,11 +728,18 @@ export function createConversationStore(directory: string, recordMigrationChange
 						copiedDrafts.push(run.state.taskId);
 						run.planDraft = draft;
 					}
+					const videoIds = new Set(branch.runs.flatMap(({ state }) => state.messages.map(({ generatedVideoJobId }) => generatedVideoJobId).filter(Boolean)));
+					if (videoIds.size) {
+						const jobs: SavedVideoJob[] = (await readVideoJobs(id)).filter((job) => videoIds.has(job.id)).map((job) =>
+							job.state === 'ready' || job.state === 'failed' ? job : { id: job.id, state: 'paused', error: '请在原聊天查看生成进度。' });
+						if (jobs.length) await writeVideoJobs(branchId, jobs);
+					}
 					await writeAtomically(logPath(branchId), serialize(entries));
 					for (const { state, runSummary } of branch.runs) if (runSummary && idPattern.test(state.taskId)) {
 						await writeAtomically(progressPath(branchId, state.taskId), JSON.stringify(runSummary, null, 2) + '\n').catch(() => {});
 					}
 				} catch (error) {
+					await unlinkIfExists(videoJobsPath(branchId)).catch(() => {});
 					for (const taskId of copiedDrafts) await unlinkIfExists(planPath(branchId, taskId)).catch(() => {});
 					if (branch.manualCompaction) await unlinkIfExists(compactionPath(branchId)).catch(() => {});
 					throw error;
@@ -756,6 +804,7 @@ export function createConversationStore(directory: string, recordMigrationChange
 				const selected = await readPointer(pointer);
 				await recordMigrationChange?.(id, null);
 				await unlinkIfExists(shellJobsPath(id));
+				await unlinkIfExists(videoJobsPath(id));
 				await unlinkIfExists(goalPath(id));
 				await unlinkIfExists(titlePath(id));
 				await unlinkIfExists(archivePath(id));

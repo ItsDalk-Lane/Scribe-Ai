@@ -1,6 +1,7 @@
 import { truncate } from './support/truncate';
 import { Buffer } from 'node:buffer';
-import { scribeDataPaths } from '../orchestration/storage/paths';
+import { isGeneratedMediaCachePath, isGeneratedVideoJobId, scribeDataPaths } from '../orchestration/storage/paths';
+import { resolveGeneratedMediaPath } from '../orchestration/storage/generatedMedia';
 import { MAX_IMAGES, MAX_REQUEST_IMAGE_BYTES, saveCachedImage } from './support/imageData';
 import { boundToolResult } from './support/resultSpill';
 import { isDirectMcpToolName, toolExecutionInput } from './support/toolInput';
@@ -23,7 +24,8 @@ export function createToolExecutor(registry: ToolRegistry, cacheDirectory?: stri
 				if (!tool || (ready && tool !== readTool)) return failure(`工具不可用：${call.name}`);
 				if (!permissions.canCallTool(tool)) return failure(`未授权使用工具：${call.name}`);
 				if (tool.mcp && !ctx.mcpRun?.canInvoke(tool)) return failure('MCP 工具尚未加载或定义已变化。');
-				const prepared = ready ?? await tool.prepare(isDirectMcpToolName(call.name) ? call.input : toolExecutionInput(call.input), ctx);
+				const prepared = ready ?? await tool.prepare(isDirectMcpToolName(call.name) ? call.input : toolExecutionInput(call.input),
+					{ ...ctx, toolCallId: call.id });
 				signal.throwIfAborted();
 				if (retryApproval && (!prepared.approval || prepared.approvalIdentity !== retryApproval.identity
 					|| JSON.stringify(prepared.approval) !== JSON.stringify(retryApproval.approval))) {
@@ -64,11 +66,26 @@ export function createToolExecutor(registry: ToolRegistry, cacheDirectory?: stri
 				if (typeof output !== 'string' && 'shellStatus' in output) {
 					return { callId: call.id, content, isError: output.shellStatus !== 'success', shellStatus: output.shellStatus };
 				}
+				const isError = typeof output !== 'string' && 'isError' in output && output.isError === true;
+				const generatedMedia = !isError && typeof output !== 'string' && 'generatedMedia' in output ? output.generatedMedia : undefined;
+				if (generatedMedia?.length) {
+					for (const media of generatedMedia) {
+						await resolveGeneratedMediaPath(ctx.cwd, ctx.app.vault.configDir, media);
+						if (isGeneratedMediaCachePath(media.path)
+							&& !isGeneratedMediaCachePath(media.path, ctx.task.request.conversationId, ctx.subagentId)) {
+								throw new Error('生成文件不属于当前任务。');
+						}
+					}
+					signal.throwIfAborted();
+				}
+				const jobId = typeof output !== 'string' && 'generatedVideoJobId' in output ? output.generatedVideoJobId : undefined;
 				return {
-					callId: call.id, content, isError: typeof output !== 'string' && 'isError' in output && output.isError === true,
+					callId: call.id, content, isError,
 					fileRead: typeof output !== 'string' && 'fileRead' in output && content === text ? output.fileRead : undefined,
 					...(typeof output !== 'string' && 'noteChange' in output && { noteChange: output.noteChange }),
 					...(imageRefs.length && { imageRefs }),
+					...(generatedMedia?.length && { generatedMedia }),
+					...(isGeneratedVideoJobId(jobId) && { generatedVideoJobId: jobId }),
 				};
 			} catch (error) {
 				return failure(signal.aborted ? '任务已停止。' : truncate(error instanceof Error ? error.message : String(error), 2_000));

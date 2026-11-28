@@ -5,11 +5,13 @@ import { chatModelKey } from '../orchestration/settings/thinking';
 import type { VideoSourceKind } from '../types';
 import { DEFAULT_SUMMARY_LIMIT, isWebSearchProvider, normalizeWebSearchSettings, WEB_SEARCH_PROVIDERS, type WebSearchSettings } from '../tools/external/webSearchSettings';
 import { renderCredentialLink } from './credentialLink';
+import { renderMediaSettings } from './mediaSettingsUi';
 import { mcpSegments } from './mcpSettingsControls';
 import { errorText, tr } from './skills/dialog';
 import { uiText } from './uiText';
 
 export function renderServiceSettings(panel: HTMLElement, plugin: ScribeAiPlugin): () => void {
+	renderMediaSettings(panel, plugin);
 	const videoGroup = panel.createDiv({ cls: 'scribe-settings-group' });
 	videoGroup.createDiv({ cls: 'scribe-settings-group-title', text: tr('视频解析', 'Video analysis') });
 	const pdfGroup = panel.createDiv({ cls: 'scribe-settings-group' });

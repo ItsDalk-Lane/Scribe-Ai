@@ -20,6 +20,8 @@ function turnAtScroll(column: HTMLDivElement | null, top: number) {
 	if (!rows?.length) return undefined;
 	let lo = 0;
 	let hi = rows.length;
+	while (hi && !rows.item(hi - 1)?.hasAttribute('data-task-id')) hi--;
+	if (!hi) return undefined;
 	while (lo + 1 < hi) {
 		const mid = Math.floor((lo + hi) / 2);
 		if ((rows.item(mid) as HTMLElement).offsetTop <= top) lo = mid;
@@ -31,7 +33,7 @@ function turnAtScroll(column: HTMLDivElement | null, top: number) {
 export default function ExecutionView({
 	app, localState, skills, execution, history, reports, loading, conversationId, liveRequest, liveModel, editingId, onEdit, onFork,
 	onQuoteSelection, onSideChatSelection, temporary = false, automaticReview = false, renderActivity,
-	submissions, inspectSubagent, subagentNames,
+	submissions, inspectSubagent, subagentNames, trailingActivity,
 }: {
 	app: App; skills: SkillRegistry; execution: ChatExecution; history: DisplayedRun[]; loading: boolean; conversationId: string | null;
 	localState?: LocalState;
@@ -41,6 +43,7 @@ export default function ExecutionView({
 	onQuoteSelection?: (quote: string) => void; onSideChatSelection?: (quote: string) => void; temporary?: boolean;
 	automaticReview?: boolean; renderActivity?: (taskId: string) => ReactNode;
 	submissions?: SubagentSnapshot['submissions']; inspectSubagent?: InspectSubagent; subagentNames?: ReadonlyMap<string, string>;
+	trailingActivity?: ReactNode;
 }) {
 	const text = uiText();
 	const scroll = useRef<HTMLDivElement>(null);
@@ -139,6 +142,7 @@ export default function ExecutionView({
 			>
 				<div className="scribe-chat-column" ref={content}>
 					{loading ? <p className="scribe-chat-loading" role="status">{text.chatLoadingHistory}</p> : turns}
+					{!loading && trailingActivity}
 				</div>
 			</div>
 			{!loading && (onQuoteSelection || onSideChatSelection) && <TranscriptSelection key={conversationId} scroll={scroll}

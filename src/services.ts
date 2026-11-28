@@ -6,12 +6,15 @@ import { scribeDataPaths } from './orchestration/storage/paths';
 import { createCredentialStore } from './communication/credentials';
 import { createModelService } from './communication/providers';
 import { createTransport } from './communication/transport';
+import { createNodeFetch } from './communication/nodeFetch';
 import { createContextBuilder } from './orchestration/context/contextBuilder';
 import type { SkillReviewActions } from './orchestration/context/skills';
 import { createSkillRegistry } from './orchestration/context/skills';
 import { createSessionController } from './orchestration/sessionController';
 import { isTextModel, reconcileDefaultModel } from './orchestration/settings/modelAvailability';
 import { createRuntimeModelCatalog } from './orchestration/settings/runtimeModelCatalog';
+import { createMediaVideoJobs } from './orchestration/mediaVideoJobs';
+import { mediaConnection } from './orchestration/settings/mediaConnection';
 import type { LocalState } from './orchestration/storage/localState';
 import { createModelCatalogStore } from './orchestration/storage/modelCatalogStore';
 import { createAgentLoop } from './runtime/agentLoop';
@@ -24,6 +27,7 @@ import { createMcpManager } from './tools/external/mcp';
 import { normalizeMcpSettings } from './tools/external/mcpConfig';
 import type { McpSettings } from './tools/external/mcpConfig';
 import { createWebSearchService } from './tools/external/webTools';
+import { arkPlanConnection, createMediaTools } from './tools/external/mediaTools';
 import type {
 	CommunicationLayer,
 	ConversationStore,
@@ -60,7 +64,15 @@ export function createServices(app: App, settings: ScribeSettings, manifest: Plu
 		},
 	});
 	const webSearch = createWebSearchService(settings, app.secretStorage, cwd, { name: manifest.id, version: manifest.version });
-	const tools = createToolLayer(conversations.shellJobHistory, mcp, cacheDirectory, webSearch.tools, app);
+	const mediaFetch = createNodeFetch(undefined, { timeouts: { firstByteMs: 150_000 } });
+	const mediaVideos = conversations.mediaVideoHistory && createMediaVideoJobs({
+		history: conversations.mediaVideoHistory, fetcher: mediaFetch, cwd, configDir: app.vault.configDir,
+		connection: () => arkPlanConnection(settings, app.secretStorage),
+		externalConnection: (route) => mediaConnection(settings, app.secretStorage, route),
+	});
+	const media = createMediaTools({ settings, secrets: app.secretStorage, fetcher: mediaFetch, videos: mediaVideos, conversations,
+		refreshRadiusLogin: (signal) => baseModels.refreshRadiusMediaLogin(signal) });
+	const tools = createToolLayer(conversations.shellJobHistory, mcp, cacheDirectory, webSearch.tools, app, media);
 
 	// 第五层：通信层（仅负责模型服务接入）
 	const credentials = createCredentialStore(app, settings.communication);
@@ -118,7 +130,7 @@ export function createServices(app: App, settings: ScribeSettings, manifest: Plu
 	const skills = createSkillRegistry(app, settings, saveSettings, skillReview, mcp.isConnected);
 	const orchestration: OrchestrationLayer = {
 		sessions: createSessionController(
-			app, settings, runtime, conversations, communication.models.thinkingOptions, communication.models, tools.shellJobs, skills, onConversationDeleted, localState,
+			app, settings, runtime, conversations, communication.models.thinkingOptions, communication.models, tools.shellJobs, skills, onConversationDeleted, localState, mediaVideos,
 		),
 		context,
 		skills,
@@ -126,5 +138,5 @@ export function createServices(app: App, settings: ScribeSettings, manifest: Plu
 	};
 
 	return { app, settings, paths: { data: paths.root, logs: paths.logs, cache: paths.cache }, logs,
-		localState, communication, tools, webSearch, orchestration, runtime };
+		localState, communication, tools, webSearch, mediaVideos, orchestration, runtime };
 }

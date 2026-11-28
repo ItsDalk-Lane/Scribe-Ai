@@ -6,6 +6,7 @@ import { renderDataDirectorySettings } from './dataDirectorySettings';
 import { renderModelSettings } from './ModelSettings';
 import { renderMcpSettings } from './McpSettings';
 import { renderServiceSettings } from './ServiceSettings';
+import { renderMediaDirectorySettings } from './mediaSettingsUi';
 import { renderSubagentSettings } from './SubagentSettings';
 import { CustomInstructionsEditor, renderWritingRulesSettings } from './WritingRulesSettings';
 import { renderContextPreferences } from './ContextPreferences';
@@ -51,6 +52,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 				text.personalizationTab, text.customInstructions, tr('长期记忆', 'Long-term memory'),
 				text.modelsTab, text.models, tr('模型服务商', 'Model providers'),
 				tr('服务', 'Services'), tr('视频解析', 'Video analysis'), tr('PDF 解析', 'PDF analysis'), tr('网页搜索', 'Web search'), tr('上下文压缩', 'Context compression'),
+				tr('媒体生成与语音', 'Media generation and speech'), tr('媒体文件保存位置', 'Media output folders'),
 				tr('技能', 'Skills'), subagents.tab, subagents.roles, 'MCP',
 				text.advancedTab, text.proxyUrl, text.fullAccessApprovalSetting, text.dataDirectory, text.clearCache,
 				tr('当前插件版本', 'Current plugin version'),
@@ -239,6 +241,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 
 			const data = panel.createDiv({ cls: 'scribe-settings-group' });
 			renderDataDirectorySettings(data, this.plugin);
+			renderMediaDirectorySettings(panel, this.plugin);
 			new Setting(data)
 				.setName(tr('当前插件版本', 'Current plugin version'))
 				.controlEl.createSpan({ text: this.plugin.manifest.version });

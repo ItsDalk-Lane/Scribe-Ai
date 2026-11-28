@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { SUBAGENT_VIEW_TYPE } from '../constants';
 import type ScribeAiPlugin from '../main';
 import { MetricPopoverProvider } from './components/MetricPopover';
+import { GeneratedVideoJobsProvider } from './components/GeneratedVideoJobs';
 import { chatStatusBarSpace } from './components/chatStatusBarSpace';
 import { SubagentDetail } from './components/SubagentsPanel';
 import { subagentUiText } from './subagentUiText';
@@ -66,9 +67,11 @@ export class SubagentView extends ItemView {
 			const names = new Map(snapshot.agents.map(({ id, name }) => [id, name]));
 			root.render(<MetricPopoverProvider>
 				<div ref={chatStatusBarSpace} className="scribe-app scribe-subagent-sidebar" data-layout="conversation">
-					<SubagentDetail key={agent.id} agent={agent} app={this.app} skills={skills} submissions={snapshot.submissions}
-						subagentNames={names} inspectSubagent={(id) => this.plugin.openSubagent(conversationId, id)}
-						onCloseTab={() => this.leaf.detach()} />
+					<GeneratedVideoJobsProvider service={this.plugin.services.mediaVideos} conversationId={conversationId}>
+						<SubagentDetail key={agent.id} agent={agent} app={this.app} skills={skills} submissions={snapshot.submissions}
+							subagentNames={names} inspectSubagent={(id) => this.plugin.openSubagent(conversationId, id)}
+							onCloseTab={() => this.leaf.detach()} />
+					</GeneratedVideoJobsProvider>
 				</div>
 			</MetricPopoverProvider>);
 		};

@@ -2249,6 +2249,36 @@ button.scribe-chat-tab-select {
 	cursor: zoom-in;
 }
 
+.scribe-generated-media {
+	display: grid;
+	gap: var(--scribe-space-card);
+	min-width: 0;
+}
+
+.scribe-generated-video-job {
+	display: grid;
+	gap: var(--scribe-space-card);
+	min-width: 0;
+	justify-items: start;
+}
+
+button.scribe-generated-image-preview {
+	display: block;
+	width: fit-content;
+	max-width: 100%;
+	height: auto;
+	padding: 0;
+	background: transparent;
+	box-shadow: none;
+	cursor: zoom-in;
+}
+
+.scribe-generated-image-preview img {
+	display: block;
+	max-height: 65vh;
+	object-fit: contain;
+}
+
 .scribe-chat-player {
 	display: block;
 	max-width: 100%;

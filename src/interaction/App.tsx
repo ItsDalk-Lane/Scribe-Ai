@@ -25,6 +25,7 @@ import { ActivityMetric, ContextMetric, UsagePopover, useChatMetrics } from './c
 import ChatNavigation, { ConversationList } from './components/ChatNavigation';
 import type { HistoryTrigger } from './components/ChatNavigation';
 import ExecutionView from './components/ExecutionView';
+import { GeneratedVideoJobsProvider, UnlinkedGeneratedVideoJobs } from './components/GeneratedVideoJobs';
 import { MetricPopoverProvider } from './components/MetricPopover';
 import QueuedMessages from './components/QueuedMessages';
 import SubagentRequests from './components/SubagentRequests';
@@ -1171,7 +1172,8 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 					<path fill="currentColor" d="M72 10a8 8 0 0 1 11.3 0l6.7 6.7a8 8 0 0 1 0 11.3L39 79 17 84l5-22L72 10zm-3 14L29 64l-2 10 10-2 40-40-8-8zM13 90h74v6H13z" />
 				</svg>
 				{text.chatEmptyHeading}
-			</h1> : <ExecutionView key={conversationId} app={services.app} localState={services.localState} skills={services.orchestration.skills}
+			</h1> : <GeneratedVideoJobsProvider service={services.mediaVideos} conversationId={conversationId}>
+				<ExecutionView key={conversationId} app={services.app} localState={services.localState} skills={services.orchestration.skills}
 				execution={shownExecution} liveRequest={liveRequest} liveModel={liveModel}
 				history={shownHistory} reports={agentSnapshot.reports} loading={loading} conversationId={conversationId} editingId={editing?.taskId}
 				automaticReview={active.current?.executionMode === 'auto-review'}
@@ -1179,7 +1181,11 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				renderActivity={(taskId) => renderSubagentsActivity({ taskId, agents: agentSnapshot.agents, onSelect: openAgent, received: receivedSubmissions })}
 				onQuoteSelection={loading || managingHistory ? undefined : addQuote}
 				onSideChatSelection={loading || managingHistory ? undefined : (quote) => void askSideChatQuote(quote)}
-				onEdit={busy || loading || hasActiveAgents ? undefined : editTurn} onFork={busy || loading ? undefined : (id) => void forkTurn(id)} />}
+				trailingActivity={<UnlinkedGeneratedVideoJobs app={services.app} linkedJobIds={new Set([
+					...shownHistory.flatMap(({ state }) => state.messages), ...(shownExecution.state?.messages ?? []),
+				].flatMap(({ generatedVideoJobId }) => generatedVideoJobId ? [generatedVideoJobId] : []))} />}
+				onEdit={busy || loading || hasActiveAgents ? undefined : editTurn} onFork={busy || loading ? undefined : (id) => void forkTurn(id)} />
+			</GeneratedVideoJobsProvider>}
 			<SubagentRequests app={services.app} prompt={displayedPrompt} selected={selected} onInspect={openAgent} />
 			<div className="scribe-composer-capsules" key={`${conversationId}:capsules`}>
 				{selected && open && <ChatTaskProgress store={services.orchestration.conversations.chatTasks} conversationId={conversationId} />}

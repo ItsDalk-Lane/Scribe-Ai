@@ -18,6 +18,8 @@ import AnswerContent from './AnswerContent';
 import ChatIcon from './ChatIcon';
 import ChatMarkdown from './ChatMarkdown';
 import CollaborationActivity from './CollaborationActivity';
+import GeneratedMedia from './GeneratedMedia';
+import { GeneratedVideoJobCard } from './GeneratedVideoJobs';
 import { chatDuration, UsagePopover } from './ChatMetrics';
 import type { InspectSubagent } from './SubagentsPanel';
 import { SkillActivityRow } from './SkillActivityRow';
@@ -222,6 +224,10 @@ export default memo(function ChatTurn({
 	const rows = useMemo(() => collaborationRows(content.rows, submissions, childChat ? parentAgentId : undefined),
 		[childChat, content.rows, submissions, parentAgentId]);
 	const messages = useMemo(() => completedMessages(state?.messages ?? []), [state?.messages]);
+	const generatedMedia = useMemo(() => [...new Map((state?.messages ?? [])
+		.flatMap((message) => message.generatedMedia ?? []).map((media) => [media.path, media])).values()], [state?.messages]);
+	const videoJobs = useMemo(() => [...new Set((state?.messages ?? [])
+		.flatMap(({ generatedVideoJobId }) => generatedVideoJobId ? [generatedVideoJobId] : []))], [state?.messages]);
 	const usage = useMemo(() => state ? runUsage(state) : undefined, [state]);
 	const status = state?.status ?? 'idle';
 	const running = status === 'running' || status === 'awaiting-approval';
@@ -320,11 +326,13 @@ export default memo(function ChatTurn({
 		<article className="scribe-chat-run" data-task-id={state?.taskId} tabIndex={-1}>
 			{(request?.instruction || user) && <UserMessage app={app} request={request} content={request?.instruction || user}
 				timestamp={state?.createdAt} editing={editing} onEdit={onEdit} readOnly={readOnly || Boolean(request?.selection)} />}
-			{!editing && (hasProcess || hasReply || showActivity || usage) && <div className="scribe-assistant-turn" role="group" aria-label={text.chatAssistant}>
+			{!editing && (hasProcess || hasReply || showActivity || usage || Boolean(generatedMedia.length || videoJobs.length)) && <div className="scribe-assistant-turn" role="group" aria-label={text.chatAssistant}>
 				{hasProcess && (foldProcess
 					? <TurnProcess key={running ? 'live' : 'finished'} summary={summary} initiallyOpen={running} render={renderTimeline} />
 					: renderTimeline())}
 				{hasReply && <AnswerContent app={app} content={answer} />}
+				{Boolean(generatedMedia.length) && <GeneratedMedia app={app} media={generatedMedia} />}
+				{videoJobs.map((id) => <GeneratedVideoJobCard key={id} app={app} id={id} />)}
 				{showActivity && <WorkingRow key={state.taskId} state={state}
 					modelIntent={execution.modelIntent}
 					override={status === 'awaiting-approval' || modelRetry ? statusLabel : undefined} />}

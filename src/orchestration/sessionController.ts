@@ -405,6 +405,7 @@ export function createSessionController(
 	skills?: SkillRegistry,
 	onConversationDeleted?: (id: string) => Promise<void>,
 	localState?: LocalState,
+	mediaVideos?: Pick<import('./mediaVideoJobs').MediaVideoJobs, 'forget' | 'restore' | 'dispose'>,
 ): SessionController {
 	const active = new Map<string, { conversationId: string; controller: AbortController; steering: Steering }>();
 	const deleting = new Set<string>();
@@ -509,7 +510,9 @@ export function createSessionController(
 			deleting.add(key);
 			try {
 				await shellJobs?.stopConversation(id);
-				await conversations.delete(id);
+				mediaVideos?.forget(id);
+				try { await conversations.delete(id); }
+				catch (error) { mediaVideos?.restore(id); throw error; }
 				subagents.forget(id);
 				shellJobs?.forgetConversation(id);
 				await onConversationDeleted?.(id);
@@ -698,6 +701,7 @@ export function createSessionController(
 			closeSideChats.forEach((close) => close());
 			subagents.dispose();
 			void shellJobs?.dispose();
+			mediaVideos?.dispose();
 		},
 	};
 }

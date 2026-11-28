@@ -1,7 +1,7 @@
 import { lstatSync, readdirSync, rmdirSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, sep } from 'node:path';
-import { IMAGE_CACHE_PREFIX, VIDEO_CACHE_PREFIX, isCachedImagePath, scribeCacheScope } from '../../orchestration/storage/paths';
+import { GENERATED_MEDIA_CACHE_PREFIX, IMAGE_CACHE_PREFIX, VIDEO_CACHE_PREFIX, isCachedImagePath, isGeneratedMediaCachePath, scribeCacheScope } from '../../orchestration/storage/paths';
 import { ownedPrivateDirectory, SHELL_SPILL_PREFIX, TOOL_SPILL_PREFIX } from './resultSpill';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -80,8 +80,10 @@ async function cleanCache(cache: string, cutoff: number, retained?: RetainedImag
 	if (!lstatSync(cache, { throwIfNoEntry: false })) return;
 	if (!ownedPrivateDirectory(dirname(cache)) || !ownedPrivateDirectory(cache)) throw new Error('缓存目录位置已变化。');
 	const vault = dirname(dirname(cache));
-	const images = new Map<string, string>();
+	const media = new Map<string, string>();
 	const directories: string[] = [];
+	// 工具返回后，文件引用还需要随消息或后台视频记录落盘。
+	const generatedBefore = Date.now() - 60_000;
 	const owners = deletion && new Set([deletion.id, ...Array.from(deletion.shared, (path) => path.split('/')[2]!)]);
 	const chats = owners ? [...owners].filter((id) => scribeCacheScope(cache, id)).map((id) => join(cache, id)).filter(ownedPrivateDirectory)
 		: cacheChildren(cache);
@@ -91,7 +93,8 @@ async function cleanCache(cache: string, cutoff: number, retained?: RetainedImag
 		for (const owner of cacheChildren(chat)) {
 			for (const dir of cacheChildren(owner)) {
 				const prefix = basename(dir);
-				if (![...ROOT_PREFIXES, IMAGE_CACHE_PREFIX, VIDEO_CACHE_PREFIX].some((value) => prefix.startsWith(value))) continue;
+				if (![...ROOT_PREFIXES, IMAGE_CACHE_PREFIX, VIDEO_CACHE_PREFIX, GENERATED_MEDIA_CACHE_PREFIX]
+					.some((value) => prefix.startsWith(value))) continue;
 				for (const entry of readdirSync(dir, { withFileTypes: true })) {
 					if (!entry.isFile()) continue;
 					const file = join(dir, entry.name);
@@ -99,7 +102,8 @@ async function cleanCache(cache: string, cutoff: number, retained?: RetainedImag
 					if (deletion && id !== deletion.id && !deletion.shared.has(path)) continue;
 					const mtime = removableFile(file);
 					if (mtime === undefined || mtime >= cutoff) continue;
-					if (isCachedImagePath(path)) images.set(path, file);
+					if (!deletion && prefix.startsWith(GENERATED_MEDIA_CACHE_PREFIX) && mtime >= generatedBefore) continue;
+					if (isCachedImagePath(path) || isGeneratedMediaCachePath(path)) media.set(path, file);
 					else unlinkSync(file);
 				}
 				directories.push(dir);
@@ -108,9 +112,9 @@ async function cleanCache(cache: string, cutoff: number, retained?: RetainedImag
 		}
 		directories.push(chat);
 	}
-	if (images.size && retained) {
+	if (media.size && retained) {
 		const keep = await retained();
-		for (const [path, file] of images) {
+		for (const [path, file] of media) {
 			if (keep.has(path)) continue;
 			if (!checkedCacheDirectory(cache, dirname(file))) throw new Error('缓存目录位置已变化。');
 			if (removableFile(file) !== undefined) unlinkSync(file);

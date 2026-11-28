@@ -400,6 +400,8 @@ export function createAgentLoop(models: ModelCoordinator, tools: ToolCoordinator
 							...(result.approvalReview && { approvalReview: result.approvalReview }),
 							...(result.noteChange && !skipped && !result.isError && { noteChange: result.noteChange }),
 							...(result.imageRefs?.length && !skipped && !result.isError && { imageRefs: result.imageRefs }),
+							...(result.generatedMedia?.length && !skipped && !result.isError && { generatedMedia: result.generatedMedia }),
+							...(result.generatedVideoJobId && !skipped && { generatedVideoJobId: result.generatedVideoJobId }),
 						};
 						if (result.fileRead) ctx.readDelivery.remember(message, result.fileRead);
 						if (call.name === 'Read' && !result.isError && ctx.promptContext && ctx.directoryRules?.trusted()) {

@@ -4,13 +4,14 @@ Run AI tasks in Obsidian with your configured model.
 
 ## Network access, data and permissions
 
-Scribe Ai is a free desktop plugin licensed under AGPL-3.0. Cloud model, web search, and MCP services you choose may require your own account or API key and may charge fees or consume a quota. Their terms and rates apply to your requests, including extra model calls for features such as summaries, automatic approval reviews, and video analysis. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
+Scribe Ai is a free desktop plugin licensed under AGPL-3.0. Cloud model, media generation, speech, web search, and MCP services you choose may require your own account or API key and may charge fees or consume a quota. Their terms and rates apply to your requests, including extra model calls for features such as summaries, automatic approval reviews, and video analysis. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
 
 ### Network connections and data sent
 
 - **Models.** The model endpoint you select can receive your task, relevant chat history, note paths and contents, attachments, vault rules, skills, enabled memory, and tool results used in the task. Summaries, goal verification, and delegated tasks can make additional model requests using the relevant context. Automatic tool approval can send your task and the proposed operation for review. For edits to existing notes, the preview sent for review contains the changed lines and their positions. A separately configured video model receives the current question and the selected video or its URL.
 - **Model catalogs.** **Fetch models** queries the connection in the provider editor, its official catalog, and compatible public sources. When a task needs model metadata, Scribe can look up that task's selected connection. Account credentials are scoped to the configured provider's catalog. Catalog requests carry no chat or note content.
 - **Web search and media.** Obsidian's note search runs locally. With web search enabled, the chosen service receives the query. Its results can go to your chat model. Opening remote media or attaching a supported remote image can contact its host. The configured model can receive media you attach or obtain through an authorized tool.
+- **Media generation, editing and speech.** The selected service receives the prompt or speech text, the model parameters, and any approved source file or source link for that operation. Video status requests use the original connection. Scribe may contact a download host returned by the service to retrieve the output. It sends that host no linked key. The chat model receives tool results such as the saved file path or transcript. In **Approve for me**, the selected chat model also receives the proposed operation, including prompt or speech text and any listed asset paths or links.
 - **MCP and skills.** Enabled MCP servers can connect at startup. Tool arguments, which may include note content or file paths, go to the configured remote server or local program. Results can be saved in the chat and sent to the model. Scribe contacts GitHub when you request the public skill catalog or fetch a skill from a public repository for review and import.
 
 Chat history, usage and diagnostic records, and optional long-term memory are saved locally in the vault's `.scribe-ai` directory. Linked credentials and a randomly generated local profile identifier are stored in Obsidian Secret Storage. Scribe does not use the computer name or username to identify the profile.
@@ -106,6 +107,18 @@ Open **Settings → Scribe Ai → Services**, choose a search provider, and turn
 Zhipu Coding Plan uses the plan's search quota. DeepSeek uses its standalone Search API, which bills successful searches with results. Both can reuse the corresponding official model provider's linked key or use a key selected in Obsidian Secret Storage. Unlinking applies to search only and keeps the key in Obsidian Secret Storage. Exa offers public search subject to rate limits. Tavily requires its own API key and can use the free quota for basic searches. **Test search** sends one public query and may use provider quota.
 
 Each search sends the query to the selected provider. The chat model receives the resulting titles, links, and excerpts, which may also be saved in chat history.
+
+## Media generation and speech
+
+Open **Settings → Scribe Ai → Models**, link each provider's own API key or supported sign-in, and add the image, video, or speech models you want. Choose a model separately for image generation, image editing, video generation, video editing, speech synthesis, and speech recognition in **Services → Media generation and speech**. The available choices follow the added models and their supported operations. Each model's editor shows the controls accepted by its provider and operation. Access and charging follow the selected provider, region, and plan.
+
+Attach the original image, video, or audio to the current message when an operation needs it. Some video providers require a public HTTPS link. Include that link directly in your message when the selected model uses URL input. Edit operations save and preview a new file. An asynchronous video job retains its original provider connection and remote job ID so reopening the chat can resume checking it.
+
+For example, Agent Plan Seedream offers image size, PNG or JPEG, and supported background controls. OpenAI image models expose render quality and, on supported editions, input fidelity. Agent Plan speech exposes sample rate, speaking rate, volume, and transcription formatting. Other speech models may offer codec, language, or speaker separation. [Ark visual models](https://console.volcengine.com/ark/region:cn-beijing/docs/agent-plan-personal-visual-models) · [Ark speech models](https://console.volcengine.com/ark/region:cn-beijing/docs/agent-plan-personal-voice-model) · [OpenAI images](https://developers.openai.com/api/docs/guides/image-generation)
+
+Scribe saves defaults separately for each media model and operation. A model you have not configured uses the service defaults. **Ask for approval** shows the destination, operation details, and selected files before sending. **Approve for me** submits the preview to the selected chat model for automatic approval. **Full access** can send an available tool request directly within the task's permissions. Plan mode, side chats, and read-only roles keep their existing restrictions.
+
+Open **Settings → Scribe Ai → Advanced → Media output folders** to set **Image output folder**, **Video output folder**, and **Generated speech output folder** independently. Use a path relative to the current vault, such as `Assets/Speech`. Leave a setting blank to keep its generated files in the original chat's private cache.
 
 ## MCP
 

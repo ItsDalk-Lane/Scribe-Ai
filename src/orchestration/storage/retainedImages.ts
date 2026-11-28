@@ -1,5 +1,5 @@
 import type { ConversationStore, Message, NoteRef } from '../../types';
-import { isCachedImagePath } from './paths';
+import { isCachedImagePath, isGeneratedMediaCachePath } from './paths';
 
 const draftImages = new Set<{ store: Pick<ConversationStore, 'list'>; owner: string; refs: NoteRef[] }>();
 
@@ -20,14 +20,21 @@ function addRefs(found: Set<string>, refs?: NoteRef[]) {
 }
 
 function addMessages(found: Set<string>, messages: Message[], keepTool: boolean) {
-	for (const { imageRefs } of messages) for (const ref of imageRefs ?? []) {
-		if ((ref.kind === 'pasted' || (keepTool && ref.kind === 'tool')) && isCachedImagePath(ref.path)) found.add(ref.path);
+	for (const { imageRefs, generatedMedia } of messages) {
+		for (const ref of imageRefs ?? []) {
+			if ((ref.kind === 'pasted' || (keepTool && ref.kind === 'tool')) && isCachedImagePath(ref.path)) found.add(ref.path);
+		}
+		for (const { path } of generatedMedia ?? []) if (isGeneratedMediaCachePath(path)) found.add(path);
 	}
 }
 
-export async function savedImagePaths(store: Pick<ConversationStore, 'load' | 'loadGoal'>, id: string): Promise<Set<string>> {
+export async function savedImagePaths(store: Pick<ConversationStore, 'load' | 'loadGoal' | 'mediaVideoHistory'>, id: string): Promise<Set<string>> {
 	const found = new Set<string>();
-	const [saved, goal] = await Promise.all([store.load(id), store.loadGoal(id)]);
+	const [saved, goal, videoJobs] = await Promise.all([store.load(id), store.loadGoal(id), store.mediaVideoHistory?.list(id)]);
+	for (const { media, pendingMedia } of videoJobs ?? []) {
+		const path = (media ?? pendingMedia)?.path;
+		if (path && isGeneratedMediaCachePath(path)) found.add(path);
+	}
 	addRefs(found, goal?.refs);
 	for (const { request } of saved.queue ?? []) addRefs(found, request.refs);
 	for (const run of saved.runs) {
@@ -44,7 +51,7 @@ export async function savedImagePaths(store: Pick<ConversationStore, 'load' | 'l
 	return found;
 }
 
-export async function retainedImagePaths(store: Pick<ConversationStore, 'list' | 'load' | 'loadGoal'>, deleting?: string) {
+export async function retainedImagePaths(store: Pick<ConversationStore, 'list' | 'load' | 'loadGoal' | 'mediaVideoHistory'>, deleting?: string) {
 	const found = new Set<string>();
 	for (const { id } of await store.list()) {
 		if (id.toLowerCase() === deleting?.toLowerCase()) continue;

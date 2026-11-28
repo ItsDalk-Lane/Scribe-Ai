@@ -10,6 +10,7 @@ import { ConversationViews } from './interaction/conversationViews';
 import { ScribeAiSettingTab } from './interaction/SettingsTab';
 import { uiText } from './interaction/uiText';
 import { isModelAvailable, isPdfAnalysisModelAvailable, reconcileDefaultModel, setProviderEnabled } from './orchestration/settings/modelAvailability';
+import { normalizeMediaSettings, type MediaSettings } from './orchestration/settings/mediaSettings';
 import { updateChatThinking } from './orchestration/settings/thinking';
 import { initializePluginStorage } from './orchestration/storage/pluginStorage';
 import { storeProxyCredentials } from './communication/proxy';
@@ -58,6 +59,7 @@ export default class ScribeAiPlugin extends Plugin {
 			});
 		});
 		const catalog = this.services.communication.modelCatalog;
+		this.app.workspace.onLayoutReady(() => { void this.services?.mediaVideos?.recoverAll().catch(() => {}); });
 		this.register(() => catalog.dispose());
 		queueMicrotask(() => { void sweepRetainedFiles(this); });
 
@@ -238,6 +240,22 @@ export default class ScribeAiPlugin extends Plugin {
 			}
 			await this.writeSettings({ ...settings, pdfModel });
 			settings.pdfModel = pdfModel;
+		});
+	}
+
+	async saveMediaSettings(update: (current: MediaSettings) => MediaSettings): Promise<void> {
+		await this.enqueueSettingsSave(async () => {
+			const { settings } = this.services;
+			const media = normalizeMediaSettings(update(settings.media ?? {}), true);
+			const config = this.app.vault.configDir.toLowerCase();
+			if ([media.imageDirectory, media.videoDirectory, media.speechDirectory].some((path) => {
+				const target = path?.toLowerCase();
+				return target === config || target?.startsWith(`${config}/`);
+			})) {
+				throw new Error('媒体保存目录不能位于 Obsidian 配置文件夹内。');
+			}
+			await this.writeSettings({ ...settings, media });
+			settings.media = media;
 		});
 	}
 

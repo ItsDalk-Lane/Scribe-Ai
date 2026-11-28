@@ -78,6 +78,8 @@ export interface Message {
 	/** 原始内容各段的长度，用于在发送时区分指令、所选资料与聊天引文。 */
 	taskPrompt?: { instruction: number; references: number; quotes: number; assignment?: true; approvedPlan?: [number, number] };
 	imageRefs?: ImageReference[];
+	generatedMedia?: GeneratedMediaRef[];
+	generatedVideoJobId?: string;
 	skillInputLength?: number;
 	skillMentions?: SkillMention[];
 	skillScope?: string[];
@@ -265,6 +267,15 @@ export interface ToolResult {
 	approvalReview?: ToolReviewStatus;
 	noteChange?: NoteChange;
 	imageRefs?: ImageReference[];
+	generatedMedia?: GeneratedMediaRef[];
+	generatedVideoJobId?: string;
+}
+
+export interface GeneratedMediaRef {
+	kind: 'image' | 'video' | 'audio';
+	path: string;
+	/** 原始 PCM 文件本身不包含采样率。 */
+	sampleRate?: number;
 }
 
 export type ShellStatus = 'success' | 'failed' | 'timed-out' | 'stopped' | 'start-failed';
@@ -305,6 +316,7 @@ export interface ToolContext {
 	skillRun?: SkillRun;
 	subagents?: SubagentToolAccess;
 	subagentId?: string;
+	toolCallId?: string;
 	task: Task;
 	app: App;
 	signal: AbortSignal;
@@ -323,7 +335,7 @@ export interface ToolApproval {
 	intent?: string;
 	before?: string;
 	after?: string;
-	kind?: 'shell' | 'vault-shell' | 'access' | 'mcp' | 'web-search' | 'web-image';
+	kind?: 'shell' | 'vault-shell' | 'access' | 'mcp' | 'web-search' | 'web-image' | 'media';
 	reason?: string;
 	background?: true;
 	humanRequired?: true;
@@ -333,6 +345,8 @@ export interface ImageToolOutput {
 	content: string;
 	isError?: boolean;
 	images?: ImageContent[];
+	generatedMedia?: GeneratedMediaRef[];
+	generatedVideoJobId?: string;
 }
 
 export interface PreparedTool {
@@ -718,6 +732,7 @@ export interface ToolLayer {
 export class MissingConversationError extends Error {}
 
 export interface ConversationStore {
+	mediaVideoHistory?: import('./orchestration/storage/mediaVideoRecords').VideoJobHistory;
 	saveRunProgress(id: string, taskId: string, summary: RunSummary): Promise<void>;
 	chatTasks: ChatTaskStore;
 	readPlanDraft(id: string, taskId: string): Promise<import('./interaction/chatPlan').PlanDraft | undefined>;
@@ -1156,6 +1171,7 @@ export interface ScribeSettings {
 }
 
 export interface ScribeServices {
+	mediaVideos?: import('./orchestration/mediaVideoJobs').MediaVideoJobs;
 	app: App;
 	settings: ScribeSettings;
 	/** 插件自己的数据目录，供设置界面展示与清理。 */

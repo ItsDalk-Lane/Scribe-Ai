@@ -3,6 +3,7 @@ import { registerHooks } from 'node:module';
 import test from 'node:test';
 import type { App, Setting } from 'obsidian';
 import type ScribeAiPlugin from '../../main';
+import type { MediaSettings } from '../../orchestration/settings/mediaSettings';
 import { normalizeSettings } from '../../orchestration/settings/defaults';
 import { chatModelKey } from '../../orchestration/settings/thinking';
 import { normalizeWebSearchSettings } from '../../tools/external/webSearchSettings';
@@ -86,6 +87,7 @@ void test('native settings search and legacy settings open the same tabs and use
 	const { Setting: SettingStub } = await import('obsidian');
 	const settings = normalizeSettings({
 		webSearch: normalizeWebSearchSettings({ provider: 'exa' }),
+		media: { imageDirectory: 'Assets/Images', videoDirectory: 'Assets/Videos', speechDirectory: 'Assets/Speech' },
 	});
 	settings.communication.providerNames.pc = 'Provider';
 	let saved = 0;
@@ -96,6 +98,10 @@ void test('native settings search and legacy settings open the same tabs and use
 	const plugin = {
 		register() {},
 		saveSettings() { saved++; },
+		saveMediaSettings(update: (current: MediaSettings) => MediaSettings) {
+			settings.media = update(settings.media ?? {});
+			return Promise.resolve();
+		},
 		async savePdfModel(pdfModel: ScribeSettings['pdfModel']) {
 			if (rejectPdfSave) throw new Error('Save failed');
 			settings.pdfModel = normalizeSettings({ pdfModel }).pdfModel;
@@ -128,6 +134,7 @@ void test('native settings search and legacy settings open the same tabs and use
 			assert.ok(definition.aliases?.includes('Proxy URL'));
 			assert.ok(definition.aliases?.includes('Web search'));
 			assert.ok(definition.aliases?.includes('PDF analysis'));
+			assert.ok(definition.aliases?.includes('Media output folders'));
 			assert.ok(definition.aliases?.includes('Require approval for elevated actions in full access'));
 			const shell = new SettingStub(tab.containerEl);
 			cleanup = definition.render(shell, {} as Parameters<typeof definition.render>[1]);
@@ -182,6 +189,7 @@ void test('native settings search and legacy settings open the same tabs and use
 		const advanced = Array.from(container.children).find((node) => (node as typeof tabs).attrs.id === 'scribe-ai-settings-advanced');
 		const rows = Array.from(advanced!.children).flatMap((group) => Array.from(group.children)) as (HTMLElement & {
 			name?: string; value?: boolean; disabled?: boolean; change: (value: boolean) => Promise<void>;
+			textField?: { getValue(): string; setValue(value: string): void; inputEl: { listeners: { change(): void } } };
 		})[];
 		const approval = rows.find((row) => row.name === 'Require approval for elevated actions in full access');
 		assert.ok(approval);
@@ -190,6 +198,16 @@ void test('native settings search and legacy settings open the same tabs and use
 		assert.equal(settings.confirmFullAccessExternalActions, native);
 		assert.equal(approval.value, native);
 		assert.ok(rows.some((row) => row.name === 'Current plugin version'));
+		for (const [label, key] of [['Image output folder', 'imageDirectory'], ['Video output folder', 'videoDirectory'],
+			['Generated speech output folder', 'speechDirectory']] as const) {
+			const field = rows.find((row) => row.name === label)?.textField;
+			assert.ok(field);
+			assert.equal(field.getValue(), settings.media?.[key]);
+			const updated = `${settings.media?.[key]}/New`;
+			field.setValue(updated);
+			field.inputEl.listeners.change();
+			assert.equal(settings.media?.[key], updated);
+		}
 		if (native) {
 			rejectPermissionSave = true;
 			await approval.change(false);

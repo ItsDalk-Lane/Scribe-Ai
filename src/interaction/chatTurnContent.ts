@@ -95,6 +95,8 @@ export function recordedTimeline(state: RunState, step?: RunStep, retries?: Save
 					callId: call.id, content: result.content, isError: result.isError ?? false,
 					...(result.shellStatus && { shellStatus: result.shellStatus }),
 					...(result.approvalReview && { approvalReview: result.approvalReview }),
+					...(result.generatedMedia?.length && { generatedMedia: result.generatedMedia }),
+					...(result.generatedVideoJobId && { generatedVideoJobId: result.generatedVideoJobId }),
 				};
 				if (result.skipped) item.skipped = true;
 			}

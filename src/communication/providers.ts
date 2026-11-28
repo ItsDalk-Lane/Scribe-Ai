@@ -369,7 +369,7 @@ export function createModelService(
 	credentials: CredentialStore,
 	transport: Transport,
 	serviceOptions: ModelServiceOptions = {},
-): ModelService {
+): ModelService & { refreshRadiusMediaLogin: (signal: AbortSignal) => Promise<void> } {
 	registerLazyOAuthFlows();
 	const models: MutableModels = builtinModels({ credentials, authContext: {
 		env: async () => undefined,
@@ -840,6 +840,11 @@ export function createModelService(
 			});
 		},
 		login: (providerId, interaction, options) => models.login(providerId, 'oauth', interaction, options),
+		refreshRadiusMediaLogin: async (signal) => {
+			if ((await credentials.read('radius', { signal }))?.type === 'oauth') {
+				await models.getAuth('radius', { signal, minOAuthValidityMs: 0 });
+			}
+		},
 		listProviderModels: async (providerId, signal) => {
 			signal?.throwIfAborted();
 			syncCustomProviders();
