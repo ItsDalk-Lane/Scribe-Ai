@@ -568,7 +568,14 @@ void test('subagent shell jobs have isolated access and stop scopes, including s
 	const store = createConversationStore(directory);
 	await store.append(conversationId, [{ type: 'start', task: ctx.task, model: { providerId: 'test', model: 'test' } }]);
 	const permissions = await createPermissionPolicy(ctx.cwd, ctx.app.vault.configDir, [], () => true, 'full-access');
-	const main = { ...ctx, permissions };
+	const main: ToolContext = {
+		...ctx, permissions,
+		async approve(operation) {
+			assert.equal(operation.humanRequired, true);
+			assert.equal(operation.background, true);
+			return true;
+		},
+	};
 	const first = { ...main, subagentId: 'worker-one' };
 	const second = { ...main, subagentId: 'worker-two' };
 	const layer = createToolLayer(store.shellJobHistory);
