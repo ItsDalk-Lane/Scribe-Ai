@@ -2,11 +2,12 @@ import { guardModelConnection, queuedModelDestination } from '../orchestration/s
 import { realpath } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 import { Notice } from 'obsidian';
-import type { FileSystemAdapter } from 'obsidian';
+import type { FileSystemAdapter, TFile } from 'obsidian';
 import { MAX_REVIEW_MATERIAL_BYTES } from '../constants';
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { canResumeRun, ResumeThinkingUnavailable } from '../orchestration/runResume';
 import { composerShortcut } from './composerKeyboard';
+import { vaultSuggestions } from './vaultSuggestions';
 import { manualConversationSummary } from '../orchestration/context/manualConversationSummary';
 import { confirmAction } from './ConfirmModal';
 import { logScope } from '../communication/diagnostics';
@@ -17,6 +18,7 @@ import BackgroundShellJobs from './components/BackgroundShellJobs';
 import ChatGoalStatus from './components/ChatGoalStatus';
 import ChatPlanCard from './components/ChatPlanCard';
 import ChatTaskProgress from './components/ChatTaskProgress';
+import { chatStatusBarSpace } from './components/chatStatusBarSpace';
 import { ActivityMetric, ContextMetric, UsagePopover, useChatMetrics } from './components/ChatMetrics';
 import ChatNavigation, { ConversationList } from './components/ChatNavigation';
 import type { HistoryTrigger } from './components/ChatNavigation';
@@ -308,12 +310,18 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 			onModeChange(next);
 			return;
 		}
+		const needsApproval = () => services.settings.confirmFullAccessExternalActions !== false;
+		const disclosedApproval = needsApproval();
 		confirmAction(services.app, {
-			title: text.chatModeFullAccessConfirm,
-			message: text.chatModeFullAccessDisclosure,
+			title: text.chatModeFullAccessWarning,
+			message: disclosedApproval ? text.chatModeFullAccessDisclosure : text.chatModeFullAccessUnrestrictedDisclosure,
 			confirmText: text.chatModeFullAccessConfirm,
 			cancelText: text.cancel,
-			onConfirm: () => { if (available()) onModeChange(next); },
+			onConfirm: () => {
+				if (!available()) return;
+				if (needsApproval() !== disclosedApproval) new Notice(text.chatModeFullAccessPolicyChanged);
+				else onModeChange(next);
+			},
 			onClose: () => trigger.ownerDocument.defaultView?.requestAnimationFrame(() => {
 				if (available()) trigger.focus({ preventScroll: true });
 			}),
@@ -916,7 +924,8 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				: await controls.ui.choose(tr('选择要检查的内容', 'Choose what to review'), targets, ({ label }) => label);
 		if (!target) return false;
 		const file = target.kind === 'file' ? target.file : target.kind === 'pick' ? await controls.ui.choose(target.label,
-			app.vault.getMarkdownFiles().filter(({ path }) => reviewablePath(path)), ({ path }) => path) : undefined;
+			(query) => vaultSuggestions(app, query, (item): item is TFile => 'extension' in item && item.extension === 'md'
+				&& reviewablePath(item.path)), ({ path }) => path, true) : undefined;
 		if (target.kind !== 'changes' && !file) return false;
 		if (file) {
 			const root = await realpath((app.vault.adapter as FileSystemAdapter).getBasePath());
@@ -1106,7 +1115,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		onSelect={(id) => void switchConversation(id)} onRefresh={refreshConversations} />;
 
 	return <MetricPopoverProvider>
-		<div className="scribe-app" data-layout={landing ? 'landing' : 'conversation'} onKeyDown={(event) => {
+		<div ref={chatStatusBarSpace} className="scribe-app" data-layout={landing ? 'landing' : 'conversation'} onKeyDown={(event) => {
 			if (!busy || event.defaultPrevented || composerShortcut(event.nativeEvent) !== 'escape'
 				|| !(event.target instanceof Element) || !event.currentTarget.contains(event.target)
 				|| event.target.closest('select, [role="dialog"], .scribe-subagents-panel')) return;

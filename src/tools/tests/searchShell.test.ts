@@ -181,7 +181,8 @@ void test('Bash uses the vault by default and runs the exact approved command in
 	assert.equal(await readFile(join(ctx.cwd, 'marker.txt'), 'utf8'), 'scribe verified');
 	assert.equal((await execute(ctx, 'Bash', { command, cwd: outside })).isError, false);
 	assert.equal(await readFile(join(outside, 'marker.txt'), 'utf8'), 'scribe verified');
-	assert.deepEqual(approvals[2], { title: 'Bash', kind: 'shell', target: outside, after: command });
+	assert.deepEqual(approvals[2], { title: 'Bash', kind: 'shell', target: outside, after: command, humanRequired: true,
+		reason: '此命令申请访问库外资料或联网。' });
 	assert.equal((await execute(ctx, 'Bash', { command, cwd: denied })).isError, true);
 	assert.equal((await execute(ctx, 'Bash', { command: 'echo text\u202E' })).isError, true);
 	assert.equal(approvals.length, 3);
@@ -198,7 +199,7 @@ void test('配置受限终端前会重新核对插件私有目录和技能目录
 	await assert.rejects(macShellSandboxArgs(ctx), /数据目录位置已变化/u);
 });
 
-void test('macOS Bash restricts vault commands until a single escalation is approved or full access is selected', {
+void test('macOS Bash restricts vault commands until a single escalation is approved in every mode', {
 	skip: !available('Bash') || !hasMacShellSandbox(),
 }, async (t) => {
 	const { ctx, denied } = await fixture(t);
@@ -265,15 +266,43 @@ void test('macOS Bash restricts vault commands until a single escalation is appr
 	await assert.rejects(readFile(join(ctx.cwd, 'drafts', 'AGENTS.md')), { code: 'ENOENT' });
 
 	ctx.permissions = { ...baseline, executionMode: 'full-access', canRead: () => true };
+	approved = false;
+	assert.equal((await execute(ctx, 'Bash', { command: 'printf blocked > never.txt', cwd: denied })).isError, true);
+	await assert.rejects(readFile(join(denied, 'never.txt')), { code: 'ENOENT' });
+	assert.equal(approvals.at(-1)?.humanRequired, true);
+	approved = true;
 	assert.equal((await execute(ctx, 'Bash', { command: connect, cwd: denied })).isError, false);
-	assert.equal(approvals.length, 5);
+	assert.equal(approvals.length, 7);
+});
+
+void test('full access can waive approval for commands beyond the read-only sandbox and can revoke a prepared command', {
+	skip: !available('Bash'),
+}, async (t) => {
+	const { ctx, outside } = await fixture(t);
+	let confirm = false;
+	ctx.permissions = await createPermissionPolicy(ctx.cwd, ctx.app.vault.configDir, [], undefined, 'full-access', true, () => confirm);
+	ctx.approve = async () => assert.fail('an explicitly waived approval should not be requested');
+	const command = { command: 'printf allowed > direct.txt', cwd: outside, elevated: true };
+	assert.equal((await execute(ctx, 'Bash', command)).isError, false);
+	assert.equal(await readFile(join(outside, 'direct.txt'), 'utf8'), 'allowed');
+	if (hasMacShellSandbox()) {
+		const write = { command: 'printf local > sandbox.txt' };
+		assert.equal((await execute(ctx, 'Bash', write)).isError, true);
+		assert.equal((await execute(ctx, 'Bash', { ...write, vault_write: true })).isError, false);
+		assert.equal(await readFile(join(ctx.cwd, 'sandbox.txt'), 'utf8'), 'local');
+	}
+	const pending = await registry.find('Bash')!.prepare({ ...command, command: 'printf blocked > revoked.txt' }, ctx);
+	assert.equal(pending.approval, undefined);
+	confirm = true;
+	await assert.rejects(async () => pending.run(), /审批设置已变化/u);
+	await assert.rejects(readFile(join(outside, 'revoked.txt')), { code: 'ENOENT' });
 });
 
 void test('Bash without a native vault boundary requires approval before running', {
 	skip: !available('Bash') || hasMacShellSandbox(),
 }, async (t) => {
 	const { ctx } = await fixture(t);
-	ctx.permissions = { ...ctx.permissions, executionMode: 'ask' };
+	ctx.permissions = { ...ctx.permissions, executionMode: 'full-access' };
 	const approvals: ToolApproval[] = [];
 	ctx.approve = async (approval) => {
 		approvals.push(approval);
@@ -282,6 +311,7 @@ void test('Bash without a native vault boundary requires approval before running
 	const result = await execute(ctx, 'Bash', { command: 'printf work > note.md' });
 	assert.equal(result.isError, true);
 	assert.match(approvals[0]?.reason ?? '', /无法限制/);
+	assert.equal(approvals[0]?.humanRequired, true);
 	await assert.rejects(readFile(join(ctx.cwd, 'note.md')), { code: 'ENOENT' });
 });
 

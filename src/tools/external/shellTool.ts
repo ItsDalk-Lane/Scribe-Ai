@@ -48,12 +48,13 @@ function executable(name: ShellName): string | undefined {
 	});
 }
 
-function shellEnvironment(): NodeJS.ProcessEnv {
-	const keep = new Set([
-		'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'TMPDIR', 'TMP', 'TEMP', 'TERM', 'SYSTEMROOT', 'WINDIR',
-		'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'COMSPEC', 'PATHEXT', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432',
-	]);
-	const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => keep.has(key.toUpperCase()) || key.startsWith('LC_')));
+function shellEnvironment(restricted = false): NodeJS.ProcessEnv {
+	if (restricted) return { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: process.env.LANG, LC_ALL: process.env.LC_ALL };
+	const keep = [
+		'PATH', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TMPDIR', 'TMP', 'TEMP', 'TERM', 'SystemRoot', 'windir',
+		'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'COMSPEC', 'PATHEXT', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432',
+	];
+	const env = Object.fromEntries(keep.flatMap((key) => process.env[key] === undefined ? [] : [[key, process.env[key]]]));
 	if (!windows) {
 		env.PATH = [...(env.PATH ?? '/usr/bin:/bin').split(delimiter), '/usr/local/bin', '/opt/homebrew/bin'].join(delimiter);
 	}
@@ -104,8 +105,7 @@ function runShell(
 ): ShellExecution {
 	signal.throwIfAborted();
 	const commandArgs = shellArgs(name, command);
-	const env = shellEnvironment();
-	if (sandboxArgs) env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
+	const env = shellEnvironment(Boolean(sandboxArgs));
 	let child: ChildProcessByStdio<null, Readable, Readable>;
 	try {
 		child = spawn(sandboxArgs ? macSandboxExecutable : binary, sandboxArgs ? [...sandboxArgs, binary, ...commandArgs] : commandArgs, {
@@ -206,8 +206,8 @@ function shellTool(name: ShellName, jobs?: ShellJobs): ToolDefinition {
 			properties: {
 				command: { type: 'string', description: '要执行的完整命令。' },
 				cwd: { type: 'string', description: '工作目录。省略或留空时使用当前笔记库。' },
-				vault_write: { type: 'boolean', description: '需要在离线沙箱内用命令写入普通笔记库文件时设为 true，由用户确认。' },
-				elevated: { type: 'boolean', description: '仅在命令需要访问库外文件或联网时设为 true，以申请本次命令的额外权限。' },
+				vault_write: { type: 'boolean', description: '需要在离线沙箱内用命令写入普通笔记库文件时设为 true，默认由用户确认。' },
+				elevated: { type: 'boolean', description: '仅在命令需要访问库外文件或联网时设为 true，默认由用户确认。' },
 				timeout: {
 					type: 'integer', minimum: 1, maximum: MAX_TIMEOUT,
 					description: `前台等待上限毫秒数，默认 ${DEFAULT_TIMEOUT}，最长 ${MAX_TIMEOUT}。显式后台运行不使用这个时限。`,
@@ -253,17 +253,18 @@ function shellTool(name: ShellName, jobs?: ShellJobs): ToolDefinition {
 			const cwd = await resolveToolPath(cwdContext, requestedCwd, 'read');
 			if (!cwd.stat?.isDirectory()) throw new Error('命令工作目录必须是文件夹。');
 			const inVault = cwd.vaultPath !== undefined && permissions.canRead(cwd.requestedPath) && permissions.canRead(cwd.absolutePath);
-			const restricted = limited && inVault && !args.elevated && name === 'Bash' && hasMacShellSandbox();
+			const restricted = Boolean(mode) && inVault && !args.elevated && name === 'Bash' && hasMacShellSandbox();
 			const vaultWrite = args.vault_write === true;
-			if (vaultWrite && limited && !restricted) throw new Error('当前命令无法限制在笔记库内。请使用文件编辑工具，或另行申请解除限制。');
+			if (vaultWrite && !restricted) throw new Error('当前命令无法限制在笔记库内。请使用文件编辑工具，或另行申请解除限制。');
 			const reason = restricted && vaultWrite ? '此命令可修改或删除库内笔记。执行范围限于当前笔记库，网络仍关闭。'
-				: limited && (!inVault || args.elevated
+				: (!inVault || args.elevated
 					? '此命令申请访问库外资料或联网。'
 					: '此系统或命令环境无法限制在笔记库内，运行前需要确认。');
-			const permission: Pick<PreparedTool, 'approval' | 'independent'> = (restricted && !vaultWrite) || mode === 'full-access'
+			const beyondReadOnly = !restricted || vaultWrite;
+			const permission: Pick<PreparedTool, 'approval' | 'independent'> = !beyondReadOnly || permissions.canSkipFullAccessApproval?.()
 				? { independent: true }
 				: { approval: { title: name, target: cwd.absolutePath, after: command, kind: restricted ? 'vault-shell' : 'shell',
-					...(limited && { humanRequired: true }), ...(background && { background: true }), ...(reason ? { reason } : {}),
+					humanRequired: true, ...(background && { background: true }), reason,
 				} };
 			return {
 				...permission,
@@ -276,6 +277,9 @@ function shellTool(name: ShellName, jobs?: ShellJobs): ToolDefinition {
 					}
 					const sandboxArgs = restricted ? await macShellSandboxArgs(ctx, vaultWrite) : undefined;
 					ctx.signal.throwIfAborted();
+					if (beyondReadOnly && permission.independent && !permissions.canSkipFullAccessApproval?.()) {
+						throw new Error('完全访问的审批设置已变化，请重新请求执行命令。');
+					}
 					const output = captureShellOutput(background ? undefined : ctx.onShellOutput);
 					const run = (signal: AbortSignal, deadline?: number) =>
 						runShell(name, binary, command, signal, current.absolutePath, deadline, output, sandboxArgs);

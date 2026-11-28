@@ -1,4 +1,5 @@
 import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
+import type { SettingDefinitionItem, SettingDefinitionRender } from 'obsidian';
 import type ScribeAiPlugin from '../main';
 import type { ChatLocation } from '../types';
 import { renderDataDirectorySettings } from './dataDirectorySettings';
@@ -35,15 +36,39 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		plugin.register(() => this.instructionsEditor?.dispose());
 	}
 
-	display(): void {
-		const { containerEl } = this;
-		this.skillPage?.dispose();
-		this.skillPage = undefined;
-		this.mcpDispose?.();
-		this.mcpDispose = undefined;
-		this.servicesDispose?.();
-		this.servicesDispose = undefined;
-		this.settingDescriptionsDispose?.();
+	override getSettingDefinitions(): SettingDefinitionItem[] {
+		const text = uiText();
+		const subagents = subagentSettingsText();
+		const settingsPage: SettingDefinitionRender = {
+			name: this.plugin.manifest.name,
+			aliases: [
+				text.generalTab, text.chatLocation, text.confirmChatRemoval,
+				text.personalizationTab, text.customInstructions, tr('长期记忆', 'Long-term memory'),
+				text.modelsTab, text.models, tr('模型服务商', 'Model providers'),
+				tr('服务', 'Services'), tr('视频解析', 'Video analysis'), tr('网页搜索', 'Web search'), tr('上下文压缩', 'Context compression'),
+				tr('技能', 'Skills'), subagents.tab, subagents.roles, 'MCP',
+				text.advancedTab, text.proxyUrl, text.fullAccessApprovalSetting, text.dataDirectory, text.clearCache,
+				tr('当前插件版本', 'Current plugin version'),
+			],
+			render: ({ settingEl, controlEl }) => {
+				settingEl.addClass('scribe-settings-host');
+				const content = controlEl.createDiv();
+				this.renderSettings(content);
+				return () => {
+					this.disposeSettings();
+					content.remove();
+				};
+			},
+		};
+		return [{ type: 'group', cls: 'scribe-settings-native', items: [settingsPage] }];
+	}
+
+	override display(): void {
+		this.renderSettings(this.containerEl);
+	}
+
+	private renderSettings(containerEl: HTMLElement): void {
+		this.disposeSettings();
 		containerEl.empty();
 		this.settingDescriptionsDispose = watchSettingDescriptions(containerEl);
 
@@ -75,7 +100,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 				attr: { role: 'tabpanel', id: 'scribe-ai-settings-services', 'aria-labelledby': 'scribe-ai-settings-tab-services' },
 			}),
 			skills: containerEl.createDiv({
-				cls: 'scribe-settings-panel',
+				cls: 'scribe-settings-panel scribe-settings-skills-panel',
 				attr: { role: 'tabpanel', id: 'scribe-ai-settings-skills' },
 			}),
 			subagents: containerEl.createDiv({
@@ -193,6 +218,17 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 				.addButton((button) => button.setButtonText(tr('保存代理', 'Save proxy')).onClick(() => saveProxy()))
 				.addButton((button) => button.setButtonText(tr('解除代理认证关联', 'Unlink proxy credentials')).onClick(() => saveProxy(true)));
 
+			const permissions = panel.createDiv({ cls: 'scribe-settings-group' });
+			new Setting(permissions)
+				.setName(text.fullAccessApprovalSetting)
+				.setDesc(text.fullAccessApprovalSettingDescription)
+				.addToggle((toggle) => toggle.setValue(settings.confirmFullAccessExternalActions !== false).onChange(async (value) => {
+					toggle.setDisabled(true);
+					try { await this.plugin.saveFullAccessExternalActions(value); }
+					catch { new Notice(text.saveFailed); }
+					finally { toggle.setValue(settings.confirmFullAccessExternalActions !== false).setDisabled(false); }
+				}));
+
 			const data = panel.createDiv({ cls: 'scribe-settings-group' });
 			renderDataDirectorySettings(data, this.plugin);
 			new Setting(data)
@@ -266,7 +302,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		activate(this.activeSection);
 	}
 
-	hide(): void {
+	private disposeSettings(): void {
 		this.skillPage?.dispose();
 		this.skillPage = undefined;
 		this.mcpDispose?.();
@@ -275,6 +311,10 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		this.servicesDispose = undefined;
 		this.settingDescriptionsDispose?.();
 		this.settingDescriptionsDispose = undefined;
+	}
+
+	override hide(): void {
+		this.disposeSettings();
 		super.hide();
 	}
 }

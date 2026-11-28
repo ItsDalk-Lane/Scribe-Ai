@@ -9,6 +9,7 @@ import { initializeLocalState, executionModeKey } from '../../orchestration/stor
 import type { ChatGoal } from '../chatGoal';
 import { replaceActiveTabPane } from '../chatTabWorkspace';
 import { readSubagentTabState, ConversationViews } from '../conversationViews';
+import { testSecretStorage } from '../../orchestration/tests/testSecretStorage';
 
 void test('同一子聊天重复打开时复用右栏标签，不同会话独立，删除仅关闭对应会话', async () => {
 	const right = {};
@@ -96,7 +97,7 @@ void test('本机状态和旧目标迁移后可重开，验证之前保留旧副
 		['scribe-ai:chat-goal:older', goal],
 		['scribe-ai:chat-goal:unavailable', goal],
 	]);
-	const app = { loadLocalStorage: (key: string) => entries.get(key), saveLocalStorage: (key: string) => { entries.delete(key); } };
+	const app = { secretStorage: testSecretStorage(), loadLocalStorage: (key: string) => entries.get(key), saveLocalStorage: (key: string) => { entries.delete(key); } };
 	const goals = new Map<string, ChatGoal | null>();
 	const store = {
 		loadGoal: (id: string) => Promise.resolve(goals.get(id)),
@@ -135,7 +136,7 @@ void test('权限写入失败后，排队的界面更新不会重新保存失败
 	const directory = await mkdtemp(join(tmpdir(), 'scribe-state-test-'));
 	t.after(() => rm(directory, { force: true, recursive: true }));
 	const path = join(directory, 'state.json');
-	const app = { loadLocalStorage: () => undefined, saveLocalStorage: () => {} };
+	const app = { secretStorage: testSecretStorage(), loadLocalStorage: () => undefined, saveLocalStorage: () => {} };
 	const state = await initializeLocalState(path, app, []);
 	t.mock.method(fs, 'rename', () => { throw new Error('磁盘写入失败'); }, { times: 1 });
 	const mode = state.saveExecutionMode('full-access', 'test-chat');

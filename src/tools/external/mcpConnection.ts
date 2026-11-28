@@ -4,15 +4,16 @@ import { delimiter, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { extractWWWAuthenticateParams, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
-import { SseError, SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { ErrorCode, McpError, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { CfWorkerJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/cfworker';
 import { createNodeFetch } from '../../communication/nodeFetch';
 import { isSecureServiceUrl } from '../../communication/serviceAddress';
 import type { ImageToolOutput } from '../../types';
 import { decodeToolImage, MAX_IMAGES, MAX_REQUEST_IMAGE_BYTES } from '../support/imageData';
+import { LegacyMcpStream } from './legacyMcpStream';
 import { mcpArgumentSecretValues, restoreMcpArgumentSecrets } from './mcpArgumentSecrets';
 import type { McpServerDraft } from './mcpConfig';
 import { loginMcpOAuth, McpAuthRequiredError, oauthSecretValues, oauthTargetAllowed, oauthURLAllowed, savedOAuthProvider } from './mcpOAuth';
@@ -162,7 +163,7 @@ function toolImages() {
 
 function authFailure(error: unknown): boolean {
 	return error instanceof McpAuthRequiredError || error instanceof UnauthorizedError
-		|| ((error instanceof StreamableHTTPError || error instanceof SseError) && error.code === 401);
+		|| (error instanceof StreamableHTTPError && error.code === 401);
 }
 
 export function createMcpConnection(options: ConnectionOptions): McpConnection {
@@ -249,7 +250,7 @@ export function createMcpConnection(options: ConnectionOptions): McpConnection {
 			return response;
 		};
 		// 旧版 Scribe 已保存的 SSE 配置仍需使用同一连接方式。
-		return server.type === 'sse' ? new SSEClientTransport(url, { fetch: fetchMcp, authProvider: provider })
+		return server.type === 'sse' ? new LegacyMcpStream(url, fetchMcp, provider)
 			: new StreamableHTTPClientTransport(url, { fetch: fetchMcp, authProvider: provider });
 	}
 
@@ -289,7 +290,7 @@ export function createMcpConnection(options: ConnectionOptions): McpConnection {
 
 	async function connect(onChallenge?: (challenge: McpOAuthChallenge) => void): Promise<Catalog> {
 		lifetime.throwIfAborted();
-		const candidate = new Client(clientInfo, { capabilities: {} });
+		const candidate = new Client(clientInfo, { capabilities: {}, jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
 		let lastError: Error | undefined;
 		client = candidate;
 		candidate.onclose = () => {
@@ -302,7 +303,6 @@ export function createMcpConnection(options: ConnectionOptions): McpConnection {
 		};
 		candidate.onerror = (error) => {
 			lastError = safeError(error);
-			if (error instanceof SseError && live === candidate) void candidate.close().catch(() => {});
 		};
 		candidate.setNotificationHandler(ToolListChangedNotificationSchema, () => {
 			if (live === candidate) onToolsChanged();

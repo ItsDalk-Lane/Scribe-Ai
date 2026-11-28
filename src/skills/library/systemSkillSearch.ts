@@ -1,4 +1,3 @@
-import * as childProcess from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -28,7 +27,6 @@ export const SYSTEM_SKILL_SOURCE_VERSION = 1;
 export const SYSTEM_SKILL_SEARCH_MAX_DIRECTORIES = 10000;
 const MAX_DEPTH = 10;
 const ROOT_HIDDEN_ALLOWLIST = new Set([".agents", ".claude", ".gemini"]);
-const ENVIRONMENT_KEYS = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME"] as const;
 
 export function resolveSystemSkillRoots(
   homeDirectory: string,
@@ -70,56 +68,6 @@ export function resolveSystemSkillRoots(
   ];
 }
 
-export function parseLoginSkillEnvironment(output: string): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = {};
-  for (const part of output.split("\0").flatMap((line) => line.split(/\r?\n/))) {
-    const separator = part.indexOf("=");
-    const key = part.slice(0, separator);
-    if (ENVIRONMENT_KEYS.some((allowed) => allowed === key))
-      environment[key] = part.slice(separator + 1);
-  }
-  return environment;
-}
-
-async function readLoginSkillEnvironment(signal?: AbortSignal): Promise<NodeJS.ProcessEnv> {
-  let shell = process.env.SHELL;
-  if (!shell && process.platform !== "win32") {
-    try {
-      shell = os.userInfo().shell ?? undefined;
-    } catch {
-      shell = undefined;
-    }
-  }
-  const windows = process.platform === "win32";
-  const command = windows ? "powershell.exe" : shell || "/bin/sh";
-  const args = windows
-    ? [
-        "-NoLogo",
-        "-NonInteractive",
-        "-Command",
-        "Get-ChildItem Env:CLAUDE_CONFIG_DIR,Env:CODEX_HOME,Env:XDG_CONFIG_HOME -ErrorAction SilentlyContinue | ForEach-Object { [Console]::Write($_.Name + '=' + $_.Value + [char]0) }",
-      ]
-    : ["-ilc", "/usr/bin/env -0"];
-  try {
-    const output = await new Promise<string>((resolve, reject) => {
-      childProcess.execFile(
-        command,
-        args,
-        { timeout: 5000, maxBuffer: 1024 * 1024, windowsHide: true, signal },
-        (error, stdout) => {
-          if (error) reject(new Error(error.message));
-          else resolve(stdout);
-        }
-      );
-    });
-    signal?.throwIfAborted();
-    return { ...process.env, ...parseLoginSkillEnvironment(output) };
-  } catch {
-    signal?.throwIfAborted();
-    return { ...process.env };
-  }
-}
-
 // 扫描完整性契约：部分失败显式标记，结果仅含已确认候选且可重试。
 // https://github.com/ItsDalk-Lane/Scribe/issues/49
 export interface SystemSkillSearchFailure {
@@ -141,18 +89,12 @@ export async function searchSystemSkills(
   signal?.throwIfAborted();
   const home = os.homedir();
   if (!home || !path.isAbsolute(home)) throw new Error(t("Could not determine your home folder."));
-  let loginEnvironmentFailed = false;
-  const environment = await readLoginSkillEnvironment(signal).catch(() => {
-    loginEnvironmentFailed = true;
-    return { ...process.env };
+  const roots = resolveSystemSkillRoots(home, {
+    CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+    CODEX_HOME: process.env.CODEX_HOME,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
   });
-  const roots = resolveSystemSkillRoots(home, environment);
   const failures: SystemSkillSearchFailure[] = [];
-  if (loginEnvironmentFailed)
-    failures.push({
-      root: t("Login shell environment"),
-      reason: t("Could not read the login shell environment; inherited environment was used."),
-    });
   const library = await fs.promises
     .realpath(options.skillsDirectory)
     .catch(() => path.resolve(options.skillsDirectory));

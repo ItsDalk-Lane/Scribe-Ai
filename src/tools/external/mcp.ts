@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { hostname } from 'node:os';
 import { isSecureServiceUrl } from '../../communication/serviceAddress';
 import { extractMcpArgumentSecrets, restoreMcpArgumentSecrets, validateMcpArgumentRefs } from './mcpArgumentSecrets';
 import { createMcpConnection, McpAuthRequiredError } from './mcpConnection';
@@ -130,7 +129,8 @@ export function createMcpManager(options: ManagerOptions) {
 		return { ...validated, secrets: { ...validated.secrets, args: secrets.args } };
 	}
 
-	const localGrantKey = (id: string) => 'scribe-ai-mcp-grant-' + mcpDigest([hostname(), options.cwd, id]);
+	// The vault's secret store is local to this Obsidian profile.
+	const localGrantKey = (id: string) => 'scribe-ai-mcp-local-grant-' + mcpDigest([options.cwd, id]);
 	const localGrant = (server: McpServerDraft) => mcpDigest([server.command, server.cwd,
 		restoreMcpArgumentSecrets(server.args, server.secrets?.args), server.envVars, server.secretRefs, server.secrets?.env]);
 	function localApproved(server: McpServer): boolean {

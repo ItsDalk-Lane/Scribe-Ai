@@ -79,7 +79,7 @@ class AuthPromptModal extends Modal {
 export function createOAuthInteraction(app: App, text: UiText, signal: AbortSignal): OAuthInteraction {
 	const notices = new Set<Notice>();
 	let progress: Notice | null = null;
-	const notify = (message: string, persistent = false): void => {
+	const notify = (message: string | DocumentFragment, persistent = false): void => {
 		if (persistent) {
 			const notice = new Notice(message, 0);
 			notices.add(notice);
@@ -102,9 +102,16 @@ export function createOAuthInteraction(app: App, text: UiText, signal: AbortSign
 				window.open(event.url);
 				notify(`${event.instructions ?? text.oauthOpenPage}\n${event.url}`, true);
 			} else if (event.type === 'device_code') {
-				window.open(event.verificationUri);
-				void navigator.clipboard.writeText(event.userCode).catch(() => {});
-				notify(`${text.oauthDeviceCode}: ${event.userCode}\n${event.verificationUri}`, true);
+				const win = app.workspace.containerEl.ownerDocument.defaultView ?? window;
+				win.open(event.verificationUri);
+				const notice = win.createFragment();
+				const label = notice.createEl('label', { text: text.oauthDeviceCode });
+				const code = label.createEl('input', { type: 'text', value: event.userCode });
+				code.readOnly = true;
+				code.addEventListener('focus', () => code.select());
+				label.addEventListener('click', (event) => event.stopPropagation());
+				notice.createEl('p', { text: event.verificationUri });
+				notify(notice, true);
 			} else {
 				notify(event.message);
 			}

@@ -214,19 +214,37 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:msg.id,result})+'\\n'); })
 		assert.equal(request.url, '/messages');
 		const { id, method } = JSON.parse(await readBody(request)) as RPC;
 		response.writeHead(202).end();
-		if (id === undefined) return;
+		if (id === undefined || method === 'tools/call') return;
+		if (method === 'tools/list') assert.equal(request.headers['mcp-protocol-version'], initialize.protocolVersion);
 		const result = method === 'initialize' ? initialize : { tools };
 		stream?.write(`data: ${JSON.stringify(reply(id, result))}\n\n`);
 	});
 	const { connection: sse } = connect(t, { type: 'sse', url: `${url}/sse`, secrets: { headers: { 'x-fixture': 'same-origin' } } });
 	assert.equal((await sse.start()).tools[0]?.name, 'echo');
+	await assert.rejects(sse.callTool('echo', {}, AbortSignal.timeout(50)), /aborted|timeout|取消|timed out/i);
+	assert.equal((await sse.listTools())[0]?.name, 'echo');
 });
 
-void test('OAuth waits for explicit login, verifies state and PKCE, and stores credentials for reconnect', { timeout: 8_000 }, async (t) => {
+void test('legacy SSE rejects a message endpoint on another origin before sending headers or a request', { timeout: 5_000 }, async (t) => {
+	let outsideRequests = 0;
+	const other = await listen(t, (_request, response) => { outsideRequests++; response.writeHead(202).end(); });
+	const url = await listen(t, (_request, response) => {
+		response.writeHead(200, { 'Content-Type': 'text/event-stream' }).write(`event: endpoint\ndata: ${other}/messages\n\n`);
+	});
+	const { connection } = connect(t, { type: 'sse', url, secrets: { bearerToken: 'fixture-only' } });
+	await assert.rejects(connection.start(), /share the origin/);
+	assert.equal(outsideRequests, 0);
+});
+
+for (const type of ['http', 'sse'] as const) void test(`OAuth over ${type} waits for explicit login, verifies state and PKCE, and stores credentials for reconnect`, { timeout: 8_000 }, async (t) => {
 	const token = 'oauth-fixture-token';
+	const replacementToken = 'oauth-fixture-replacement';
+	let requiredToken = token;
+	let refreshes = 0;
 	let url: string;
 	let expectedChallenge: string | null = null;
 	let browser: Promise<void> | undefined;
+	let stream: ServerResponse | undefined;
 	url = await listen(t, async (request, response) => {
 		if (request.url?.startsWith('/.well-known/oauth-protected-resource')) return json(response, { resource: `${url}/mcp`, authorization_servers: [url] });
 		if (request.url === '/.well-known/oauth-authorization-server') {
@@ -236,20 +254,35 @@ void test('OAuth waits for explicit login, verifies state and PKCE, and stores c
 		if (request.url === '/token') {
 			assert.equal(request.headers['x-fixture'], undefined);
 			const body = new URLSearchParams(await readBody(request));
+			if (body.get('grant_type') === 'refresh_token') {
+				assert.equal(body.get('refresh_token'), 'oauth-fixture-refresh');
+				refreshes++;
+				return json(response, { access_token: replacementToken, token_type: 'Bearer' });
+			}
 			assert.equal(body.get('code'), 'code-123');
 			assert.equal(createHash('sha256').update(body.get('code_verifier') ?? '').digest('base64url'), expectedChallenge);
 			return json(response, { access_token: token, token_type: 'Bearer', refresh_token: 'oauth-fixture-refresh' });
 		}
-		if (request.headers.authorization !== `Bearer ${token}`) {
+		if (request.headers.authorization !== `Bearer ${requiredToken}`) {
 			response.writeHead(401, { 'WWW-Authenticate': `Bearer resource_metadata="${url}/.well-known/oauth-protected-resource"` }).end();
 			return;
 		}
-		if (request.method === 'GET') { response.writeHead(405).end(); return; }
+		if (request.method === 'GET') {
+			if (type === 'http') { response.writeHead(405).end(); return; }
+			stream = response;
+			response.writeHead(200, { 'Content-Type': 'text/event-stream' }).write('event: endpoint\ndata: /messages\n\n');
+			return;
+		}
 		const { id, method } = JSON.parse(await readBody(request)) as RPC;
-		if (id === undefined) { response.writeHead(202).end(); return; }
-		json(response, reply(id, method === 'initialize' ? initialize : { tools }));
+		const result = reply(id, method === 'initialize' ? initialize : { tools });
+		if (id === undefined || type === 'sse') {
+			response.writeHead(202).end();
+			if (id !== undefined) stream?.write(`data: ${JSON.stringify(result)}\n\n`);
+			return;
+		}
+		json(response, result);
 	});
-	const { connection, oauth } = connect(t, { type: 'http', url: `${url}/mcp`, oauthClientId: 'fixture-client',
+	const { connection, oauth } = connect(t, { type, url: `${url}/mcp`, oauthClientId: 'fixture-client',
 		oauthScopes: ['test:read'], secrets: { headers: { 'x-fixture': 'same-origin-only' } } }, {
 		openBrowser(address) {
 			browser = (async () => {
@@ -278,4 +311,29 @@ void test('OAuth waits for explicit login, verifies state and PKCE, and stores c
 	await browser;
 	assert.match(oauth.read() ?? '', /oauth-fixture-token/);
 	assert.equal(connection.redact(token), '[已隐藏]');
+	requiredToken = replacementToken;
+	assert.equal((await connection.listTools())[0]?.name, 'echo');
+	assert.equal(refreshes, 1);
+	assert.equal(connection.redact(replacementToken), '[已隐藏]');
+});
+
+void test('MCP structured results still enforce declared JSON Schema and referenced formats', { timeout: 5_000 }, async (t) => {
+	const outputSchema = {
+		type: 'object', required: ['link'], additionalProperties: false,
+		properties: { link: { $ref: '#/definitions/link' } }, definitions: { link: { type: 'string', format: 'uri' } },
+	};
+	const url = await listen(t, async (request, response) => {
+		if (request.method === 'GET') { response.writeHead(405).end(); return; }
+		const { id, method, params } = JSON.parse(await readBody(request)) as RPC;
+		if (id === undefined) { response.writeHead(202).end(); return; }
+		const result = method === 'initialize' ? initialize : method === 'tools/list' ? { tools: [{ ...tools[0], outputSchema }] }
+			: { content: [], structuredContent: params?.arguments };
+		json(response, reply(id, result));
+	});
+	const { connection } = connect(t, { type: 'http', url });
+	await connection.start();
+	const signal = new AbortController().signal;
+	assert.equal((await connection.callTool('echo', { link: 'https://example.com/' }, signal)).isError, false);
+	await assert.rejects(connection.callTool('echo', { link: 'relative' }, signal), /does not match the tool's output schema/i);
+	await assert.rejects(connection.callTool('echo', {}, signal), /does not match the tool's output schema/i);
 });

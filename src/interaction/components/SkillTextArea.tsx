@@ -1,5 +1,5 @@
 import { getLanguage } from 'obsidian';
-import { useEffect, useId, useImperativeHandle, useRef, useState } from 'react';
+import { useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import type { RefObject, TextareaHTMLAttributes } from 'react';
 import type { NoteRef, SkillInfo, SkillRegistry, TaskTarget } from '../../types';
 import type { SkillScanIssue } from '../../skills/discovery';
@@ -30,6 +30,7 @@ interface Props extends Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'onCha
 	references?: ReferenceSuggestionOptions;
 	referenceLauncher?: ReferenceLauncher;
 	panelUiRef?: { current: SlashUi | null };
+	onSuggestionsChange?: (visible: boolean) => void;
 	onDraftChange: (draft: SkillDraft) => void;
 }
 
@@ -61,7 +62,7 @@ export function SkillMenuRow({ item, text, id, selected, toggle, choosing, onCho
 }
 
 export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registry, refs, scope, slash, slashLauncher,
-	references, referenceLauncher, panelUiRef, draft, target, onRemoveTarget, onDraftChange, readOnly, onKeyDown, ...input }: Props) {
+	references, referenceLauncher, panelUiRef, draft, target, onRemoveTarget, onDraftChange, onSuggestionsChange, readOnly, onKeyDown, ...input }: Props) {
 	const text = skillMenuText();
 	const id = useId();
 	const [caret, setCaret] = useState<number | null>(null);
@@ -124,6 +125,8 @@ export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registr
 	if (panelUiRef) panelUiRef.current = commands.ui;
 	const query = commands.id ? undefined : mentionQuery;
 	const visible = !readOnly && Boolean(manage || query);
+	const parts = chipped ? skillMentionParts(draft.instruction, draft.skillMentions) : [];
+	const hasChips = chipped && (Boolean(target) || parts.some((part) => typeof part !== 'string'));
 	const term = (manage ? search : query?.query ?? '').toLowerCase();
 	const matches = items?.filter((item) => (manage || (item.enabled && item.manual))
 		&& [item.name, item.displayName, item.description, item.sourceLabel].some((part) => part?.toLowerCase().includes(term))) ?? [];
@@ -151,6 +154,11 @@ export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registr
 	useEffect(() => {
 		if (manage) filter.current?.focus();
 	}, [manage]);
+	useLayoutEffect(() => {
+		if (!visible || !onSuggestionsChange) return;
+		onSuggestionsChange(true);
+		return () => onSuggestionsChange(false);
+	}, [visible, onSuggestionsChange]);
 	useEffect(() => {
 		if (!manage && active >= 0) options.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
 	}, [active, manage]);
@@ -197,7 +205,7 @@ export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registr
 		finally { setChanging(false); }
 	}
 
-	return <div className="scribe-composer-skill-field" data-target={target?.kind} onBlur={(event) => {
+	return <div className="scribe-composer-skill-field" data-target={target?.kind} data-has-chips={hasChips || undefined} onBlur={(event) => {
 		if (!event.currentTarget.contains(event.relatedTarget) && !context.keepOnBlur()) close(false);
 	}} onKeyDown={(event) => {
 		if (context.onKeyDown(event)) return;
@@ -210,10 +218,10 @@ export default function SkillTextArea({ inputRef, menuRef, closeMenuRef, registr
 		} else close(true);
 	}}>
 		{chipped && <div ref={layer} className="scribe-skill-mention-layer" aria-hidden="true">
-			{target && <><span className="scribe-skill-mention-chip scribe-target-mention-chip">
-				<ChatIcon name={target.kind === 'mcp' ? 'plug' : 'bot'} />{target.label}
-			</span>{prefix.slice(target.label.length)}</>}
-			{skillMentionParts(draft.instruction, draft.skillMentions).map((part, index) => typeof part === 'string' ? part
+			{target && <><span className="scribe-skill-mention-chip scribe-target-mention-chip">{target.label}</span>
+				<span className="scribe-target-mention-icon"><ChatIcon name={target.kind === 'mcp' ? 'plug' : 'bot'} /></span>
+				{prefix.slice(target.label.length)}</>}
+			{parts.map((part, index) => typeof part === 'string' ? part
 				: <span key={index} className="scribe-skill-mention-chip">{part.text}</span>)}{'\u200b'}
 		</div>}
 		<textarea {...input} ref={inputRef} value={prefix + draft.instruction} readOnly={readOnly} spellCheck={false}

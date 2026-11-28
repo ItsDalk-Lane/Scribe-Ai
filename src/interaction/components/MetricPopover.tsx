@@ -12,8 +12,8 @@ export function MetricPopoverProvider({ children }: { children: ReactNode }) {
 	return <ActiveMetric.Provider value={useState<ActiveMetric>(null)}>{children}</ActiveMetric.Provider>;
 }
 
-export default function MetricPopover({ label, icon, heading, value, children, wrapValues = false, hover = false }: {
-	label: ReactNode; icon: string | ReactNode; heading: string; value?: string; children: ReactNode; wrapValues?: boolean; hover?: boolean;
+export default function MetricPopover({ label, icon, heading, value, children, wrapValues = false, hover = false, showHeading = true }: {
+	label: ReactNode; icon: string | ReactNode; heading: string; value?: string; children: ReactNode; wrapValues?: boolean; hover?: boolean; showHeading?: boolean;
 }) {
 	const id = useId();
 	const [active, setActive] = useContext(ActiveMetric);
@@ -133,10 +133,10 @@ export default function MetricPopover({ label, icon, heading, value, children, w
 			{typeof icon === 'string' ? <ChatIcon name={icon} /> : icon}
 			<span ref={labelElement}>{label}</span>
 		</button>
-		{host && createPortal(<section id={id} ref={panel} className="scribe-metric-panel" data-wrap-values={wrapValues || undefined}
+		{host && createPortal(<section id={id} ref={panel} className="scribe-metric-panel" data-wrap-values={wrapValues || undefined} data-hide-heading={!showHeading || undefined}
 			role="dialog" aria-label={heading} tabIndex={-1}
 			onPointerDownCapture={() => { if (!pinned) pin(); }} onFocusCapture={() => { if (!pinned) pin(); }}>
-			<header><strong>{typeof icon === 'string' && <ChatIcon name={icon} />}{heading}</strong>{value && <span>{value}</span>}</header>
+			{showHeading && <header><strong>{typeof icon === 'string' && <ChatIcon name={icon} />}{heading}</strong>{value && <span>{value}</span>}</header>}
 			{children}
 		</section>, host)}
 	</div>;

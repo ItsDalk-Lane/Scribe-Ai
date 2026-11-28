@@ -10,6 +10,7 @@ import { initializePluginStorage } from '../storage/pluginStorage';
 import { executionModeKey } from '../storage/localState';
 import { readStoredJson, storageStat, writeStoredJson } from '../storage/jsonFile';
 import { openVaultStorage, STORAGE_VERSION } from '../storage/vaultStorage';
+import { testSecretStorage } from './testSecretStorage';
 
 void test('服务商启停单独保存，旧设置与新设置重开都保留配置', async (t) => {
 	const root = await realpath(await mkdtemp(join(tmpdir(), 'scribe-provider-settings-')));
@@ -21,6 +22,7 @@ void test('服务商启停单独保存，旧设置与新设置重开都保留配
 		} };
 	const plugin = {
 		app: {
+			secretStorage: testSecretStorage(),
 			vault: { configDir: 'vault-config', adapter: { getBasePath: () => root } },
 			loadLocalStorage: () => null,
 			saveLocalStorage: (_key: string, value: unknown) => assert.equal(value, null),
@@ -31,6 +33,7 @@ void test('服务商启停单独保存，旧设置与新设置重开都保留配
 	} as unknown as Plugin;
 	const first = await initializePluginStorage(plugin);
 	assert.deepEqual(first.settings.disabledProviderIds, []);
+	assert.equal(first.settings.confirmFullAccessExternalActions, true);
 	assert.equal(first.settings.videoModel, undefined);
 	assert.equal(first.settings.videoLinkModel, null);
 	await first.complete();
@@ -40,12 +43,14 @@ void test('服务商启停单独保存，旧设置与新设置重开都保留配
 	await migrated.writeSettings({ ...migrated.settings, videoModel: previousVideo, videoLinkModel: undefined });
 	assert.deepEqual((await initializePluginStorage(plugin)).settings.videoLinkModel, previousVideo);
 	setProviderEnabled(migrated.settings, 'first', false);
+	migrated.settings.confirmFullAccessExternalActions = false;
 	migrated.settings.videoModel = previousVideo;
 	migrated.settings.videoLinkModel = { providerId: 'second', model: 'two' };
 	await migrated.writeSettings(migrated.settings);
 	const reopened = await initializePluginStorage(plugin);
 	assert.deepEqual(legacy, { storageVersion: STORAGE_VERSION });
 	assert.deepEqual(reopened.settings.disabledProviderIds, ['first']);
+	assert.equal(reopened.settings.confirmFullAccessExternalActions, false);
 	assert.deepEqual(reopened.settings.providerModels, { first: ['one'], second: ['two'] });
 	assert.deepEqual(reopened.settings.videoModel, { providerId: 'first', model: 'one' });
 	assert.deepEqual(reopened.settings.videoLinkModel, { providerId: 'second', model: 'two' });
@@ -68,6 +73,7 @@ void test('仅有旧本机设置时，重开确认后才清理，中断后继续
 	let canClear = false;
 	const plugin = {
 		app: {
+			secretStorage: testSecretStorage(),
 			vault: { configDir, adapter: { getBasePath: () => root } },
 			loadLocalStorage: (key: string) => local.get(key),
 			saveLocalStorage: (key: string, value: unknown) => {

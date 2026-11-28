@@ -32,7 +32,7 @@ export default function ChatTaskProgress({ conversationId, store }: { conversati
 	const heading = tr('任务清单', 'Task list');
 	const label = <span aria-live="polite"><span className="scribe-working-announcement">{heading} · </span>
 		{statusLabel(status)} <span className="scribe-chat-task-count">{completed}/{batch.tasks.length}</span></span>;
-	return <MetricPopover label={label} icon={<TaskMark status={status} />} heading={heading}>
+	return <MetricPopover label={label} icon={<TaskMark status={status} />} heading={heading} showHeading={false}>
 		<ul className="scribe-chat-task-list">
 			{batch.tasks.map((task) => <li key={task.id} data-status={task.status}>
 				<TaskMark status={task.status} />

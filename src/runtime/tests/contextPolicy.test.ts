@@ -11,6 +11,7 @@ import { memoryTools } from '../../tools/memoryTools';
 import { writeTools } from '../../tools/writeTools';
 import type { ModelRequest, ModelResponse, ModelStream } from '../../types';
 import { emptyModelResponse, fakeStream, fixture, sessionsFor } from './agentFixture';
+import { testSecretStorage } from '../../orchestration/tests/testSecretStorage';
 
 function model(respond: (request: ModelRequest) => ModelResponse | Promise<ModelResponse>) {
 	return {
@@ -31,7 +32,7 @@ function model(respond: (request: ModelRequest) => ModelResponse | Promise<Model
 async function preferences(cwd: string) {
 	const paths = scribeDataPaths(cwd);
 	await mkdir(paths.root);
-	return initializeLocalState(paths.state, { loadLocalStorage: () => null, saveLocalStorage: () => {} }, []);
+	return initializeLocalState(paths.state, { secretStorage: testSecretStorage(), loadLocalStorage: () => null, saveLocalStorage: () => {} }, []);
 }
 
 void test('real conversation sends opted-in memory references and resolves just the requested body', async (t) => {

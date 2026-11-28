@@ -16,29 +16,29 @@
 /* 下面每条规则都写两种形态：元素自带 scribe- 类（按钮本身），以及处于 scribe- 容器内部。 */
 :where([class^="scribe-"], [class*=" scribe-"]):is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]),
 :where([class^="scribe-"], [class*=" scribe-"]) :is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]) {
-	transition: background-color 120ms ease, color 120ms ease;
+	transition: background-color var(--scribe-control-motion, 120ms ease), color var(--scribe-control-motion, 120ms ease);
 }
 
 /* 普通控件：悬停浅染，按下加深 */
-:where([class^="scribe-"], [class*=" scribe-"]):is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta):not(.mod-warning):hover,
-:where([class^="scribe-"], [class*=" scribe-"]) :is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta):not(.mod-warning):hover {
-	background-color: var(--scribe-hover) !important;
+:is([class^="scribe-"], [class*=" scribe-"]):is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta, .mod-warning, .scribe-settings-tab, :disabled):hover,
+:is([class^="scribe-"], [class*=" scribe-"]) :is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta, .mod-warning, .scribe-settings-tab, :disabled):hover {
+	background-color: var(--scribe-hover);
 }
 
-:where([class^="scribe-"], [class*=" scribe-"]):is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta):not(.mod-warning):active,
-:where([class^="scribe-"], [class*=" scribe-"]) :is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta):not(.mod-warning):active {
-	background-color: var(--scribe-active) !important;
+:is([class^="scribe-"], [class*=" scribe-"]):is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta, .mod-warning, .scribe-settings-tab, :disabled):active,
+:is([class^="scribe-"], [class*=" scribe-"]) :is(button, .clickable-icon, [role="button"], [role="tab"], [tabindex="0"]):not(.mod-cta, .mod-warning, .scribe-settings-tab, :disabled):active {
+	background-color: var(--scribe-active);
 }
 
 /* 主按钮：强调色朝文字色混合，明暗主题下都比常态更"实" */
-:where([class^="scribe-"], [class*=" scribe-"]):is(button, [role="button"]):is(.mod-cta, .mod-warning):hover,
-:where([class^="scribe-"], [class*=" scribe-"]) :is(button, [role="button"]):is(.mod-cta, .mod-warning):hover {
-	background-color: var(--scribe-accent-hover) !important;
+:is([class^="scribe-"], [class*=" scribe-"]):is(button, [role="button"]):is(.mod-cta, .mod-warning):not(:disabled):hover,
+:is([class^="scribe-"], [class*=" scribe-"]) :is(button, [role="button"]):is(.mod-cta, .mod-warning):not(:disabled):hover {
+	background-color: var(--scribe-accent-hover);
 }
 
-:where([class^="scribe-"], [class*=" scribe-"]):is(button, [role="button"]):is(.mod-cta, .mod-warning):active,
-:where([class^="scribe-"], [class*=" scribe-"]) :is(button, [role="button"]):is(.mod-cta, .mod-warning):active {
-	background-color: var(--scribe-accent-active) !important;
+:is([class^="scribe-"], [class*=" scribe-"]):is(button, [role="button"]):is(.mod-cta, .mod-warning):not(:disabled):active,
+:is([class^="scribe-"], [class*=" scribe-"]) :is(button, [role="button"]):is(.mod-cta, .mod-warning):not(:disabled):active {
+	background-color: var(--scribe-accent-active);
 }
 
 /* 键盘焦点：任何主题下都看得见的环 */
@@ -382,11 +382,13 @@ button.scribe-chat-tab-select {
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.scribe-app, .scribe-app *, .scribe-app *::before, .scribe-app *::after,
-	.scribe-resume-modal, .scribe-resume-modal * {
-		animation: none !important;
-		transition: none !important;
-		scroll-behavior: auto !important;
+	.scribe-app, .scribe-resume-modal {
+		--scribe-control-motion: 0s;
+		--scribe-motion: 0s;
+		--scribe-timeline-motion: 0s;
+		--scribe-timeline-chevron-motion: 0s;
+		--scribe-chat-spin: none;
+		--scribe-job-pulse: none;
 	}
 }
 
@@ -431,20 +433,16 @@ button.scribe-chat-tab-select {
 
 .scribe-chat-task-mark[data-status="in_progress"] {
 	color: var(--scribe-accent);
-	animation: scribe-chat-spin 1s linear infinite;
+	animation: var(--scribe-chat-spin, scribe-chat-spin) 1s linear infinite;
 }
 
 .scribe-chat-task-mark[data-status="stopped"] .scribe-chat-icon svg {
 	fill: currentColor;
 }
 
-.scribe-metric-panel:has(> .scribe-chat-task-list) {
+.scribe-metric-panel[data-hide-heading] {
 	padding: 8px 12px;
 	border-radius: 12px;
-}
-
-.scribe-metric-panel:has(> .scribe-chat-task-list) > header {
-	display: none;
 }
 
 .scribe-chat-task-list {
@@ -669,7 +667,7 @@ button.scribe-chat-tab-select {
 }
 
 /* 为底部状态栏留出间距。 */
-body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
+.scribe-app[data-status-bar-visible] {
 	--scribe-chat-bottom-space: calc(var(--size-4-7, 28px) / 2);
 }
 
@@ -1447,7 +1445,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	height: 20px;
 }
 
-.scribe-context-chip:has(> .scribe-pasted-image-button) {
+.scribe-context-chip.has-thumbnail {
 	position: relative;
 	padding: 0;
 	overflow: hidden;
@@ -1474,7 +1472,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	object-fit: cover;
 }
 
-.scribe-app .scribe-context-chip:has(> .scribe-pasted-image-button) > .scribe-context-chip-remove {
+.scribe-app .scribe-context-chip.has-thumbnail > .scribe-context-chip-remove {
 	position: absolute;
 	inset-block-start: 3px;
 	inset-inline-end: 3px;
@@ -1486,7 +1484,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	color: white;
 }
 
-.scribe-app .scribe-context-chip:has(> .scribe-pasted-image-button) > .scribe-context-chip-remove:not(:disabled):hover {
+.scribe-app .scribe-context-chip.has-thumbnail > .scribe-context-chip-remove:not(:disabled):hover {
 	background: rgb(0 0 0 / 90%);
 	color: white;
 }
@@ -1500,7 +1498,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	min-width: 0;
 }
 
-.scribe-context-chip:has(.scribe-selection-preview[open]) {
+.scribe-context-chip.is-open {
 	width: 100%;
 }
 
@@ -1682,18 +1680,15 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 			opacity: 1;
 		}
 
-		.scribe-turn-navigator:hover .scribe-turn-nav-items > li:is(:hover, [data-previewed]) + li,
-		.scribe-turn-navigator:hover .scribe-turn-nav-items > li:has(+ li:is(:hover, [data-previewed])) {
+		.scribe-turn-navigator:hover .scribe-turn-nav-items > li[data-preview-distance="1"] {
 			--scribe-turn-tick-scale: .6;
 		}
 
-		.scribe-turn-navigator:hover .scribe-turn-nav-items > li:is(:hover, [data-previewed]) + li + li,
-		.scribe-turn-navigator:hover .scribe-turn-nav-items > li:has(+ li + li:is(:hover, [data-previewed])) {
+		.scribe-turn-navigator:hover .scribe-turn-nav-items > li[data-preview-distance="2"] {
 			--scribe-turn-tick-scale: .4;
 		}
 
-		.scribe-turn-navigator:hover .scribe-turn-nav-items > li:is(:hover, [data-previewed]) + li + li + li,
-		.scribe-turn-navigator:hover .scribe-turn-nav-items > li:has(+ li + li + li:is(:hover, [data-previewed])) {
+		.scribe-turn-navigator:hover .scribe-turn-nav-items > li[data-preview-distance="3"] {
 			--scribe-turn-tick-scale: .2;
 		}
 	}
@@ -1865,7 +1860,7 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	max-width: 100%;
 }
 
-.scribe-message-context li:has(details[open]) {
+.scribe-message-context li.is-open {
 	flex-basis: 100%;
 }
 
@@ -2192,19 +2187,20 @@ body:has(.status-bar:not([hidden])) .scribe-app[data-layout="conversation"] {
 	font-weight: bold;
 }
 
-.scribe-working-announcement {
+.scribe-working-announcement,
+.scribe-mcp-announcement {
 	position: absolute;
-	width: 1px;
-	height: 1px;
+	inline-size: 1px;
+	block-size: 1px;
+	margin: -1px;
 	overflow: hidden;
-	clip-path: inset(50%);
 	white-space: nowrap;
 }
 
 .scribe-timeline-activity .scribe-chat-icon {
 	width: var(--scribe-timeline-small-icon);
 	height: var(--scribe-timeline-small-icon);
-	animation: scribe-chat-spin 1s linear infinite;
+	animation: var(--scribe-chat-spin, scribe-chat-spin) 1s linear infinite;
 }
 
 .scribe-timeline-notice {
@@ -2434,7 +2430,7 @@ video.scribe-chat-player {
 
 .scribe-tool-card[data-state="running"] .scribe-tool-status {
 	color: var(--scribe-accent);
-	animation: scribe-chat-spin 1s linear infinite;
+	animation: var(--scribe-chat-spin, scribe-chat-spin) 1s linear infinite;
 }
 
 @keyframes scribe-chat-spin {
@@ -2581,7 +2577,7 @@ video.scribe-chat-player {
 	inset: 3px;
 	border-radius: 50%;
 	background: var(--interactive-accent);
-	animation: scribe-job-pulse 1.2s ease-in-out infinite;
+	animation: var(--scribe-job-pulse, scribe-job-pulse) 1.2s ease-in-out infinite;
 }
 
 .scribe-job-trigger[data-live] .scribe-job-activity > .scribe-chat-icon {
@@ -2677,7 +2673,7 @@ video.scribe-chat-player {
 	height: 12px;
 	color: var(--text-faint, var(--text-muted));
 	transform: rotate(-90deg);
-	transition: transform 120ms ease;
+	transition: transform var(--scribe-control-motion, 120ms ease);
 }
 
 .scribe-job-section-chevron.is-open {
@@ -2762,7 +2758,7 @@ video.scribe-chat-player {
 
 .scribe-job-dot[data-state="running"] {
 	background: var(--interactive-accent);
-	animation: scribe-job-pulse 1.2s ease-in-out infinite;
+	animation: var(--scribe-job-pulse, scribe-job-pulse) 1.2s ease-in-out infinite;
 }
 
 .scribe-job-dot[data-state="done"] {
@@ -3109,6 +3105,30 @@ video.scribe-chat-player {
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
+.setting-group.scribe-settings-native {
+	--setting-items-background: transparent;
+	--setting-items-border-width: 0px;
+	--setting-items-divider-width: 0px;
+	--setting-items-padding-x: 0px;
+	--setting-items-padding-y: 0px;
+	max-width: none;
+}
+
+.setting-group.scribe-settings-native .setting-item.scribe-settings-host {
+	display: block;
+	padding: 0;
+	border: 0;
+}
+
+.setting-item.scribe-settings-host > .setting-item-info {
+	display: none;
+}
+
+.setting-item.scribe-settings-host > .setting-item-control {
+	display: block;
+	text-align: start;
+}
+
 .scribe-settings-tab,
 .scribe-settings-tab:hover,
 .scribe-settings-tab:active,
@@ -3117,7 +3137,7 @@ video.scribe-chat-player {
 	border: 0;
 	border-bottom: 2px solid transparent;
 	border-radius: 0;
-	background: transparent !important;
+	background: transparent;
 	box-shadow: none;
 	color: var(--text-muted);
 	font-size: var(--font-ui-smaller);
@@ -3518,7 +3538,7 @@ video.scribe-chat-player {
 .scribe-provider-category,
 .scribe-add-provider-card {
 	cursor: pointer;
-	transition: background-color 120ms ease, color 120ms ease;
+	transition: background-color var(--scribe-control-motion, 120ms ease), color var(--scribe-control-motion, 120ms ease);
 }
 
 /* 图标按钮保持"幽灵"外观，但悬停/按下/聚焦必须各有可见反馈 */
@@ -3530,7 +3550,7 @@ video.scribe-chat-player {
 	height: 28px;
 	padding: 0;
 	border-radius: var(--radius-s);
-	background: transparent !important;
+	background: transparent;
 	box-shadow: none;
 	color: var(--text-muted);
 }
@@ -3744,8 +3764,8 @@ video.scribe-chat-player {
 	vertical-align: middle;
 }
 
-.scribe-hidden {
-	display: none !important;
+:is(.scribe-dialog-content, .scribe-settings-panel) .scribe-hidden[class] {
+	display: none;
 }
 
 .scribe-field-note.is-warn {
@@ -4739,11 +4759,11 @@ video.scribe-chat-player {
 	white-space: nowrap;
 }
 
-.scribe-subagent-entry:has(.scribe-subagent-more) .scribe-subagent-row-name {
+.scribe-subagent-entry .scribe-subagent-row-name {
 	padding-inline-end: 24px;
 }
 
-.scribe-subagent-entry:has(.scribe-subagent-stop) .scribe-subagent-status {
+.scribe-subagent-entry[data-can-stop] .scribe-subagent-status {
 	padding-inline-end: 64px;
 }
 
@@ -4901,7 +4921,7 @@ video.scribe-chat-player {
 	min-width: 0;
 }
 
-.scribe-composer-skill-field:has(.scribe-skill-mention-chip) {
+.scribe-composer-skill-field[data-has-chips] {
 	--scribe-compose-line-height: 24px;
 }
 
@@ -4910,19 +4930,6 @@ video.scribe-chat-player {
 	--scribe-target-icon-width: 12px;
 	--scribe-target-icon-gap: 4px;
 }
-
-.scribe-app .scribe-composer-skill-field[data-target] > textarea.scribe-input {
-	text-indent: calc(var(--scribe-target-icon-width) + var(--scribe-target-icon-gap));
-}
-
-.scribe-target-mention-chip > .scribe-chat-icon {
-	width: var(--scribe-target-icon-width);
-	height: var(--scribe-target-icon-width);
-	margin-inline-end: var(--scribe-target-icon-gap);
-	vertical-align: -1px;
-	color: var(--text-normal);
-}
-
 
 .scribe-skill-mention-layer {
 	position: absolute;
@@ -4957,6 +4964,28 @@ video.scribe-chat-player {
 		0 3px 5px rgb(0 0 0 / 34%);
 }
 
+.scribe-app .scribe-composer-skill-field[data-target] > textarea.scribe-input,
+.scribe-composer-skill-field[data-target] > .scribe-skill-mention-layer {
+	padding-inline-start: calc(8px + var(--scribe-target-icon-width) + var(--scribe-target-icon-gap));
+}
+
+.scribe-target-mention-chip {
+	padding-inline-start: calc(.23em + var(--scribe-target-icon-width) + var(--scribe-target-icon-gap));
+	margin-inline-start: calc(-.23em - var(--scribe-target-icon-width) - var(--scribe-target-icon-gap));
+}
+
+.scribe-target-mention-icon {
+	position: absolute;
+	inset-block-start: calc((var(--scribe-compose-line-height, 20px) - var(--scribe-target-icon-width)) / 2);
+	inset-inline-start: 8px;
+	color: var(--text-normal);
+}
+
+.scribe-target-mention-icon > .scribe-chat-icon {
+	width: var(--scribe-target-icon-width);
+	height: var(--scribe-target-icon-width);
+}
+
 .scribe-queue-row > .scribe-composer-skill-field {
 	flex: 1 1 0;
 }
@@ -4965,7 +4994,7 @@ video.scribe-chat-player {
 	width: 100%;
 }
 
-.scribe-queue-list:has(.scribe-skill-suggestions) {
+.scribe-queue-list[data-suggesting] {
 	overflow: visible;
 }
 
@@ -5026,7 +5055,7 @@ video.scribe-chat-player {
 /* 技能设置页与管理弹窗 */
 .scribe-skill-page, .scribe-skill-dialog-body { display: flex; flex-direction: column; gap: var(--size-4-4); min-width: 0; }
 .scribe-skill-page { gap: 8px; }
-.scribe-skill-preferences { display: contents; }
+.scribe-skill-preferences { display: flex; flex-direction: column; gap: 8px; }
 .scribe-skill-library { display: flex; flex-direction: column; gap: var(--size-4-2); }
 .scribe-skill-library > .scribe-skill-toolbar { padding-block: 4px; border-bottom: 1px solid var(--background-modifier-border); }
 .scribe-skill-page p, .scribe-skill-dialog-body p { margin: .3em 0; overflow-wrap: anywhere; }
@@ -5134,7 +5163,6 @@ video.scribe-chat-player {
 .scribe-skill-modal .scribe-skill-draft .scribe-skill-draft-editor { padding: 12px; resize: vertical; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 .scribe-skill-document .scribe-skill-file-editor, .scribe-skill-modal .scribe-skill-draft-editor { display: block; width: 100%; min-height: 20rem; font-family: var(--font-monospace); font-size: var(--font-ui-small); }
 .scribe-skill-document .scribe-skill-file-editor { resize: vertical; border: 0; background: transparent; padding: .8rem; }
-.scribe-skill-preview .markdown-rendered h1 { display: block !important; }
 .scribe-skill-preview .markdown-rendered { min-width: 0; overflow-wrap: anywhere; }
 .scribe-skill-preview { margin: 0; min-height: 20rem; padding: 16px; overflow-wrap: anywhere; }
 pre.scribe-skill-preview { white-space: pre-wrap; }
@@ -5142,7 +5170,7 @@ pre.scribe-skill-preview { white-space: pre-wrap; }
 .scribe-skill-dependency .is-ready { background: var(--text-success); }
 .scribe-skill-dependency .is-missing, .scribe-settings-tab.has-skill-warning::after { background: var(--text-warning); }
 .scribe-settings-tab.has-skill-warning::after { content: ''; display: inline-block; width: .42em; height: .42em; border-radius: 100%; margin-inline-start: .4em; vertical-align: middle; }
-.scribe-settings-panel:has(.scribe-skill-page) { container-type: inline-size; }
+.scribe-settings-skills-panel { container-type: inline-size; }
 @container (max-width: 639px) {
 	.scribe-skill-search { width: 100%; }
 }
@@ -5589,11 +5617,10 @@ pre.scribe-skill-preview { white-space: pre-wrap; }
 .scribe-mcp-row button[role="switch"][aria-checked="true"], .scribe-mcp-modal button[role="switch"][aria-checked="true"] { background: var(--interactive-accent); }
 .scribe-mcp-row button[role="switch"][aria-checked="true"]::after, .scribe-mcp-modal button[role="switch"][aria-checked="true"]::after { inset-inline-start: 16px; }
 .scribe-mcp-panel button:focus-visible, .scribe-mcp-modal button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 1px; }
-.scribe-mcp-panel [hidden], .scribe-mcp-modal [hidden] { display: none !important; }
+.scribe-mcp-panel [hidden], .scribe-mcp-modal [hidden] { display: none; }
 
-.scribe-mcp-threshold { display: inline-flex; align-items: center; gap: 6px; }
+.scribe-mcp-threshold:not([hidden]) { display: inline-flex; align-items: center; gap: 6px; }
 .scribe-mcp-threshold input { width: 5.5rem; }
-.scribe-mcp-announcement { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 
 .scribe-mcp-modal .modal-content {
 	max-height: 73vh;

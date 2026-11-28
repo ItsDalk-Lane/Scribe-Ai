@@ -48,9 +48,10 @@ void test('the preset menu offers a clear first action and reopens saved presets
 	const selections = ['新建预设', '2 · 总结笔记', '运行'];
 	const ui: Parameters<typeof showSlashPresets>[1] = {
 		choose: async (_title, items, label) => {
-			menus.push(items.map(label));
+			const rows = typeof items === 'function' ? items('') : items;
+			menus.push(rows.map(label));
 			const selection = selections.shift();
-			return items.find((item) => label(item) === selection);
+			return rows.find((item) => label(item) === selection);
 		},
 		prompt: async (_title, _initial, multiline) => {
 			if (multiline) return '请总结这篇笔记。';

@@ -213,7 +213,8 @@ async function runTask(
 					rejectSteering: (ids: string[], reason?: string) => rejectSteering(steering, ids, reason),
 				} : {}),
 				...(intent !== 'review' && conversationHistory(modelHistory)),
-			}, app.vault.configDir, () => toolsEnabledAtStart && toolsEnabled(), Boolean(sideSnapshot), executionMode);
+			}, app.vault.configDir, () => toolsEnabledAtStart && toolsEnabled(), Boolean(sideSnapshot), executionMode,
+				() => settings.confirmFullAccessExternalActions !== false);
 			if (task.request.goalRound && goal) {
 				if (goal.status === 'active' && !child && !sideSnapshot && !intent) {
 					const criterionCount = goal.criteria?.length ?? 1;

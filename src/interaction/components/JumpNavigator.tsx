@@ -29,6 +29,7 @@ export default function JumpNavigator<Entry extends JumpEntry>({
 	const [anchor, setAnchor] = useState<string>();
 	const showing = !compact && anchor !== undefined;
 	const preview = showing ? entries.find(({ id }) => id === anchor) ?? entries[0] : undefined;
+	const previewIndex = preview && entries.indexOf(preview);
 	const expanded = compact && open;
 
 	function close() {
@@ -125,14 +126,18 @@ export default function JumpNavigator<Entry extends JumpEntry>({
 			aria-label={label} aria-expanded={expanded} aria-controls={expanded ? listId : undefined}
 			onClick={() => setOpen(!expanded)}><ChatIcon name="list" /></button>}
 		{(!compact || expanded) && <ol className="scribe-turn-nav-items" id={listId} ref={list}>
-			{entries.map((entry) => <li key={entry.id} data-previewed={preview?.id === entry.id || undefined}>
-				<button type="button" className="scribe-turn-marker"
-					aria-current={current === entry.id ? 'location' : undefined} aria-label={entry.label}
-					onMouseEnter={() => reveal(entry.id)} onFocus={() => reveal(entry.id)} onClick={() => jump(entry.id)}>
-					<span className="scribe-turn-tick" aria-hidden="true" />
-					{compact && <span className="scribe-turn-nav-label" aria-hidden="true">{renderListLabel(entry)}</span>}
-				</button>
-			</li>)}
+			{entries.map((entry, index) => {
+				const distance = previewIndex === undefined ? 0 : Math.abs(previewIndex - index);
+				return <li key={entry.id} data-previewed={preview?.id === entry.id || undefined}
+					data-preview-distance={distance > 0 && distance <= 3 ? distance : undefined}>
+					<button type="button" className="scribe-turn-marker"
+						aria-current={current === entry.id ? 'location' : undefined} aria-label={entry.label}
+						onMouseEnter={() => reveal(entry.id)} onFocus={() => reveal(entry.id)} onClick={() => jump(entry.id)}>
+						<span className="scribe-turn-tick" aria-hidden="true" />
+						{compact && <span className="scribe-turn-nav-label" aria-hidden="true">{renderListLabel(entry)}</span>}
+					</button>
+				</li>;
+			})}
 		</ol>}
 		{preview && <div className="scribe-turn-preview" ref={card}>
 			{renderPreview(preview, () => jump(preview.id))}

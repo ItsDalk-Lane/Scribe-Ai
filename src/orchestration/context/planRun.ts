@@ -13,6 +13,7 @@ export function connectPlanRun(ctx: RunContext, store: ConversationStore, config
 	const policy = () => restricted ?? baseline;
 	ctx.permissions = {
 		get executionMode() { return policy().executionMode; },
+		canSkipFullAccessApproval: () => policy().canSkipFullAccessApproval?.() === true,
 		canRead: (path) => policy().canRead(path),
 		readLines: (path) => policy().readLines?.(path),
 		canWrite: (path) => policy().canWrite(path),

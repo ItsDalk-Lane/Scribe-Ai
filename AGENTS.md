@@ -8,19 +8,19 @@
 
 ## 新功能如何接入现有规则
 
-所有贡献者和编码智能体共用这份约定。开始改功能前，先从用户实际使用的入口追到执行和保存的位置，并用下面的表找出受影响的其他入口。遇到说明与现有行为冲突、两种选择都会改变用户体验时，先确认产品决定。
+所有贡献者和编码智能体共用这份约定。开始改功能前，先从用户实际使用的入口追到执行和保存的位置，并用下面的表找出受影响的其他入口。聊天资料选择和笔记审查先显示近期及顶层项目，用户输入查询后按文件名或目录查找，并排除配置和私有存储。遇到说明与现有行为冲突、两种选择都会改变用户体验时，先确认产品决定。
 
 | 改动涉及 | 复用的入口 | 需要对照的场景 |
 | --- | --- | --- |
 | 聊天任务清单 | [任务工具](src/tools/index.ts)、[会话执行](src/orchestration/sessionController.ts)、[清单存储](src/orchestration/storage/chatTasks.ts) | 测试同一聊天主助手与子助手并发认领、依赖、停止释放、重开、分支与编辑。计划中只编排待办，按此执行只解锁已确认计划及其修订链的条目。关闭工具、只读角色和侧聊遵循各自范围。输入框上方的只读清单展示最近一批，按实际认领、完成或停止更新。 |
-| 模型可以调用的工具，包括网页搜索、MCP、技能工具、后台命令 | [工具注册与执行](src/tools/index.ts)、[任务权限](src/orchestration/runContext.ts)、[审批结果](src/runtime/toolCoordinator.ts) | 对照三档权限、模型关闭工具、角色与计划模式的只读限制；网页搜索审批展示查询内容和接收方，发送前复核所选服务。本地 MCP 的启动许可绑定设备和配置，变更后重新确认。受限 Bash 默认库内只读，命令写入和放开沙箱须人工批准。用户或自动审核拒绝后，核对真实副作用、界面和自动续跑。 技能目录查询按有无技能标识返回配套文件名或可用技能清单，重放新旧目录结果时复核当前授权。Obsidian 结构搜索使用核心搜索语法，返回的笔记须通过当前任务的路径和读取范围校验。核心搜索入口不可用时隐藏该工具。 同批独立且已授权的库内 Markdown 读取允许有限并发，按原顺序记录和回填。混合操作、需要审批、恢复及协作阻塞时核对串行行为、取消和重开后的配对。 |
+| 模型可以调用的工具，包括网页搜索、MCP、技能工具、后台命令 | [工具注册与执行](src/tools/index.ts)、[任务权限](src/orchestration/runContext.ts)、[审批结果](src/runtime/toolCoordinator.ts) | 对照三档权限、模型关闭工具、角色与计划模式的只读限制；网页搜索审批展示查询内容和接收方，发送前复核所选服务。本地 MCP 的启动许可绑定设备和配置，变更后重新确认。各模式下 Bash 的库内离线沙箱默认只读。库外文件写入和超出只读沙箱的命令默认须人工批准。高级设置可单独在完全访问模式关闭这两类审批，选择该模式时弹窗说明当前行为。待批准命令应列出实际命令与目录，文件目标、命令目录及放行状态在副作用前重新核对。用户或自动审核拒绝后，核对真实副作用、界面和自动续跑。 技能目录查询按有无技能标识返回配套文件名或可用技能清单，重放新旧目录结果时复核当前授权。Obsidian 结构搜索使用核心搜索语法，返回的笔记须通过当前任务的路径和读取范围校验。核心搜索入口不可用时隐藏该工具。 同批独立且已授权的库内 Markdown 读取允许有限并发，按原顺序记录和回填。混合操作、需要审批、恢复及协作阻塞时核对串行行为、取消和重开后的配对。 |
 | 对话、队列、侧聊、目标、计划、子助手 | [任务入口](src/orchestration/sessionController.ts)、[续做判断](src/orchestration/runResume.ts)、[子助手](src/orchestration/subagents/controller.ts)、[关联窗口](src/interaction/conversationViews.ts) | 比较新建、转交、编辑、重新打开和停止，核对模型、资料授权、技能范围和历史摘要。排队消息以原接收方为准，换接收方须独立发送并确认，插话与转侧聊复核原接收方。任务和目标按完成、实际进展、错误或用户停止收尾。合并子助手工具时按具体操作校验答疑、续做和向上级提问的权限，保留旧记录的协作动态。删除主聊天时验证提醒、关联窗口和草稿，并验证另一段聊天不受影响。 明确插话在下一项未启动工具前让行，保存原调用的跳过原因。超范围插话留在队列。已交付的新指令可重新请求相同工具；恢复子助手时，用已保存的用户指令补齐送达回执，每条只投递一次。目标按新增证据和验收项判断进展，核对本轮笔记标题、链接与实际内容。 |
 | 模型请求、自动审核或摘要 | [模型服务](src/communication/providers.ts)、[辅助请求用量](src/orchestration/meteredService.ts) | 核对实际目的地、模型设置、取消、用量归属。额外请求和已经发出但未完成的请求也要计数，复用已存结果时不新增用量。失败与重试按实际发送的请求分别计次。请求发出时，按本次实际出站的上下文估算提示词 token 总数。服务商回执按字段覆盖同次请求对应的估算或较早读数，未提及的字段保留最近已知值。未收到最终输出计数时，从最近的累计输出数起，只估算随后收到的模型输出。没有累计输出数时，从本次请求收到的首段输出开始估算。缓存读写数取自服务商回执，命中率只汇总能从回执同时确定提示词数和缓存读取数的请求。核对仅有输入估算、先报 0 再输出、重试、重开和服务商明确返回最终 0。本轮和整个聊天的用量面板只显示已有指标及数值。文件编辑自动审核只发送实际变动，测试用本地替身。结构化输出和原生搜索逐字段使用当前连接的本地资料和显式覆盖。JSON Schema 只作用于指定请求，原生搜索只随有资格的普通聊天请求发送。原生视频只读取本轮明确选择且仍有权访问的附件，按已接通的协议发送。图片能力按当前连接及显式覆盖解析。只发送当前任务明确附加的图片和可用的工具图片，工具发起的网络图片读取遵循现有审批。剪贴板和工具图片保存到当前库的缓存，历史记录仅保存引用。 目标准备完成时，语义验收只向原工作模型的实际地址发送相关条件和必要证据；核对资料仍授权、无工具、额外用量、失败暂停及停止后迟到结果。 |
-| 聊天媒体展示 | [输入框附件](src/interaction/components/TaskInput.tsx)、[消息 Markdown](src/interaction/components/ChatMarkdown.tsx) | 对照主聊天、侧聊和历史。粘贴图片沿用当前库缓存引用。包括 Markdown 图片在内的远程媒体先显示为链接，经用户点击后才访问源站。复制、导出和模型请求继续读取原文。 |
+| 聊天媒体展示 | [输入框附件](src/interaction/components/TaskInput.tsx)、[消息 Markdown](src/interaction/components/ChatMarkdown.tsx) | 对照主聊天、侧聊和历史。粘贴图片沿用当前库缓存引用。剪贴板只随粘贴与主动复制访问，设备登录码仅在通知中显示。包括 Markdown 图片在内的远程媒体先显示为链接，经用户点击后才访问源站。复制、导出和模型请求继续读取原文。 |
 | 模型连接协议和地址 | [连接解析](src/communication/modelConnection.ts)、[模型服务](src/communication/providers.ts)、[模型资料](src/orchestration/storage/modelCatalogStore.ts) | 模型设置、测试连接和实际请求使用同一解析结果。模型覆盖优先于服务商覆盖，换协议时只继承匹配的地址。固定 JSON Schema 和视频输入分别按模型和接口读取本地能力资料。区分模型目录、兼容连接、手动配置与未确认，信息不足时禁止发送。OpenCode 只自动使用当前套餐的官方地址。运行中目录改变实际连接时，在下一次发送前拦截。 |
 | 独立视频解析 | [任务入口](src/orchestration/sessionController.ts)、[视频解析](src/orchestration/context/videoAnalysis.ts)、[辅助请求用量](src/orchestration/meteredService.ts) | 本地文件和公开直链分别选择已启用的连接，发送前复核接收地址。只接受链接的连接直接接收 HTTPS 视频地址，允许文件的连接按已验证的规格转码。逐个视频收到服务端输入回执后才交付带时间戳的结果。缺少回执、转码或解析失败时停止主模型请求并说明原因。收到每个视频的有效回执后保存该项结果。续做复用已存结果、发送方和来源范围，避免重复发送和计费。 |
 | 服务商启停和默认模型 | [模型可用范围](src/orchestration/settings/modelAvailability.ts)、[聊天模型列表](src/interaction/useChatModel.ts)、[任务入口](src/orchestration/sessionController.ts) | 多个服务商可同时启用，聊天默认模型独立选择。停用不删除配置，影响新请求和续做，已经运行的任务继续使用原模型。默认模型不可选时从其余可用模型中选择。 |
-| 新设置、历史记录、技能依赖、模型资料或临时输出 | [存储约定](#插件数据存储)、[技能目录](src/orchestration/context/skills.ts)、[MCP 服务状态](src/tools/external/mcp.ts) | 核对谁写、谁读、其他入口何时看到变更，以及停用、清理和重开后的行为。旧记录缺少新字段时须能安全恢复。模型资料在启动和手动更新时刷新，获取模型只读本地资料。 |
+| 新设置、历史记录、技能依赖、模型资料或临时输出 | [存储约定](#插件数据存储)、[技能目录](src/orchestration/context/skills.ts)、[MCP 服务状态](src/tools/external/mcp.ts) | 核对谁写、谁读、其他入口何时看到变更，以及停用、清理和重开后的行为。旧记录缺少新字段时须能安全恢复。当前库的本机授权使用 Obsidian 密钥库的随机标识，换环境需重新授权。迁移旧版长期记忆需要用户在设置中主动导入。模型资料在启动和手动更新时刷新，获取模型只读本地资料。 |
 | 长期记忆、历史检索与目录规则 | [本机状态](src/orchestration/storage/localState.ts)、[记忆](src/orchestration/context/longTermMemory.ts)、[目录规则](src/orchestration/context/writingRules.ts) | 首次使用前由用户在个性化设置开启。记忆只关联当前用户、设备和库。索引有长度上限，正文和历史摘录按需读取；跨聊天须额外授权。长期记忆的改动须显示给用户确认。续做、压缩及停用后按当前权限核对内容和回执。可信目录规则按路径加载，写工具首次执行前核对规则已送达。 |
 | 模型上下文和计划恢复 | [请求组装](src/orchestration/context/contextBuilder.ts)、[会话日志](src/orchestration/storage/taskStore.ts)、[计划交互](src/interaction/chatPlan.ts) | 系统提示词使用固定 XML。检查项目与会话快照、带来源的运行提醒、同一聊天追加变化、工具配对和媒体索引。目录规则、技能、记忆和 MCP 发送前重新校验。各协议的发送入口须携带本次确认状态，覆盖 Electron 异步边界上确认、检查点和拒绝外发。自动摘要保留原始消息索引，重开和分支恢复有效计划、清单和进度。批准时核对草案版本，原上下文与干净起点均保持现有权限。 |
 
@@ -143,7 +143,7 @@ Follow Obsidian's **Developer Policies** and **Plugin Guidelines**. In particula
 - Default to local/offline operation. Only make network requests when essential to the feature.
 - No hidden telemetry. If you collect optional analytics or call third-party services, require explicit opt-in and document clearly in `README.md` and in settings.
 - Never execute remote code, fetch and eval scripts, or auto-update plugin code outside of normal releases.
-- Minimize scope: read/write only what's necessary inside the vault. Do not access files outside the vault.
+- Minimize scope. Use the Vault API for ordinary notes. Use the existing authorization flow for actions that need external files or commands. External writes and commands beyond the read-only sandbox need direct approval unless the user disables those approvals for Full access in Advanced settings.
 - Clearly disclose any external services used, data sent, and risks.
 - Respect user privacy. Do not collect vault contents, filenames, or personal information unless absolutely necessary and explicitly consented.
 - Avoid deceptive patterns, ads, or spammy notifications.

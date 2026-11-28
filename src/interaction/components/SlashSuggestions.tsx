@@ -55,7 +55,7 @@ interface PanelBase {
 }
 
 type Panel =
-	| PanelBase & { kind: 'choose'; items: readonly unknown[]; label: (item: unknown) => string; search: boolean }
+	| PanelBase & { kind: 'choose'; items: (query: string) => readonly unknown[]; label: (item: unknown) => string; search: boolean }
 	| PanelBase & { kind: 'prompt'; initial: string; multiline: boolean }
 	| PanelBase & { kind: 'confirm'; message: string; confirmText?: string }
 	| PanelBase & { kind: 'info'; lines: readonly string[] }
@@ -213,7 +213,7 @@ function SlashPanelView({ panel, settle, text }: {
 			{panel.search && <input ref={filterField} className="scribe-slash-panel-field" type="search" value={filter}
 				aria-label={panel.title} placeholder={panel.title} onChange={(event) => setFilter(event.currentTarget.value)} />}
 			<div className="scribe-slash-panel-list">
-				{panel.items.filter((item) => !filter || panel.label(item).toLowerCase().includes(filter.toLowerCase()))
+				{panel.items(filter)
 					.map((item, index) => <button key={index} type="button" className="scribe-slash-row"
 						onClick={() => settle(item, false)}>
 						<span className="scribe-slash-name">{panel.label(item)}</span>
@@ -314,9 +314,12 @@ export function useSlashSuggestions({
 	}
 
 	const ui: SlashUi = {
-		choose: <T,>(title: string, items: readonly T[], label: (item: T) => string, search = false) => new Promise<T | undefined>((resolve) => {
+		choose: <T,>(title: string, items: readonly T[] | ((query: string) => readonly T[]), label: (item: T) => string,
+			search = typeof items === 'function') => new Promise<T | undefined>((resolve) => {
 			pushPanel({
-				kind: 'choose', title, items, label: (item) => label(item as T), search,
+				kind: 'choose', title, label: (item) => label(item as T), search,
+				items: typeof items === 'function' ? items : (filter) => items.filter((item) =>
+					!filter || label(item).toLowerCase().includes(filter.toLowerCase())),
 				backValue: undefined, closeValue: undefined, resolve: (value) => resolve(value as T | undefined),
 			});
 		}),

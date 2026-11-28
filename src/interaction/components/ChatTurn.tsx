@@ -1,7 +1,7 @@
 import { Notice } from 'obsidian';
 import type { App } from 'obsidian';
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { ReactNode, ToggleEvent } from 'react';
 import type { RunStep, SavedRun, SkillRegistry, SubagentSnapshot, TaskRequest } from '../../types';
 import type { SkillReadReceipt } from '../../skills/readReceipt';
 import { abbreviatedNumber, completedMessages, messageTime, runUsage } from '../chatMetrics';
@@ -25,6 +25,10 @@ import { ToolActivityGroup, ToolActivityRow } from './ToolActivityRow';
 import WorkingRow from './WorkingRow';
 
 type SubmittedPrompt = Pick<TaskRequest, 'instruction' | 'refs' | 'selection' | 'chatQuotes' | 'skillMentions' | 'skillScope'>;
+
+function markOpenContext({ currentTarget }: ToggleEvent<HTMLDetailsElement>) {
+	currentTarget.parentElement?.classList.toggle('is-open', currentTarget.open);
+}
 
 function Timestamp({ timestamp }: { timestamp?: number }) {
 	if (!timestamp) return null;
@@ -98,7 +102,7 @@ export function UserMessage({ app, content, request, timestamp, editing, onEdit,
 						<ChatIcon name="book-open" /><span>${skill.name} · {skill.sourceLabel ?? skill.id}</span>
 					</li>)}
 					{quotes.length > 0 && <li>
-						<details className="scribe-message-selection">
+						<details className="scribe-message-selection" onToggle={markOpenContext}>
 							<summary className="scribe-message-chip"><ChatIcon name="quote" />
 								<span>{text.chatQuotedText.replace('{n}', String(quotes.length))}</span>
 							</summary>
@@ -106,7 +110,7 @@ export function UserMessage({ app, content, request, timestamp, editing, onEdit,
 						</details>
 					</li>}
 					{selection ? <li>
-						<details className="scribe-message-selection">
+						<details className="scribe-message-selection" onToggle={markOpenContext}>
 							<summary className="scribe-message-chip" title={selection.path}>
 								<ChatIcon name="text-select" />
 								<span>{selection.title}</span>

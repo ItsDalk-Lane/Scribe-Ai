@@ -19,8 +19,6 @@ const messages: Record<string, string> = {
 	"ZIP links, special files, encryption or unsupported compression cannot be imported.": "不能导入包含文件链接、特殊文件、加密内容或不支持压缩方式的 ZIP。",
 	"Skill import was cancelled.": "技能导入已取消。",
 	"Choose a skill folder, a ZIP archive, or a single skill Markdown file.": "请选择技能文件夹、ZIP 压缩包或单个技能 Markdown 文件。",
-	"Login shell environment": "登录 shell 环境",
-	"Could not read the login shell environment; inherited environment was used.": "无法读取登录 shell 环境，已改用继承的环境变量。",
 	"Could not import this skill: {reason}": "无法导入此技能：{reason}",
 	"A skill from another source already uses this name.": "其他来源的技能已使用此名称，不能覆盖。",
 	"The skill folder returned an unsafe child path.": "技能文件夹中发现不安全的子文件位置。",

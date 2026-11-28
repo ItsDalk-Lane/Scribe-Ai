@@ -420,7 +420,7 @@ void test('queued messages keep their saved destination and need confirmation be
 	assert.deepEqual(received, [secondModel.providerId, secondModel.providerId]);
 });
 
-void test('automatic review sees only changed lines and delegates persistent rule changes to the user', async (t) => {
+void test('automatic review can approve an external read but sends external edits and rule changes to the user', async (t) => {
 	const { cwd, connect } = await fixture(t);
 	const outside = join(cwd, '..', 'approval-diff.txt');
 	await writeFile(outside, 'replace this\nprivate unchanged line\n');
@@ -441,23 +441,31 @@ void test('automatic review sees only changed lines and delegates persistent rul
 	t.after(() => sessions.dispose());
 	const id = await sessions.createConversation();
 	const result = await sessions.submit({ conversationId: id, refs: [], instruction: '调整已指定的内容' }, {
-		approve: async (approval) => { human.push(approval.target); return false; },
+		approve: async (approval) => {
+			assert.equal(approval.humanRequired, true);
+			human.push(approval.target);
+			return false;
+		},
 	}, undefined, { executionMode: 'auto-review' }).result;
 	assert.equal(result.status, 'done', result.error);
-	assert.deepEqual(human, ['AGENTS.md']);
-	assert.equal(reviews.length, 2);
-	assert.match(reviews[1]!, /updated/u);
-	assert.doesNotMatch(reviews[1]!, /private unchanged line|Persistent rule/u);
-	assert.equal(await readFile(outside, 'utf8'), 'updated\nprivate unchanged line\n');
+	assert.equal(human.length, 2);
+	assert.ok(human[0]?.endsWith('/approval-diff.txt'));
+	assert.equal(human[1], 'AGENTS.md');
+	assert.equal(reviews.length, 1);
+	assert.match(reviews[0]!, /approval-diff\.txt/u);
+	assert.doesNotMatch(reviews[0]!, /updated|private unchanged line|Persistent rule/u);
+	assert.deepEqual(result.messages.filter(({ toolCallId }) => toolCallId).map(({ isError }) => Boolean(isError)), [false, true, true]);
+	assert.equal(await readFile(outside, 'utf8'), 'replace this\nprivate unchanged line\n');
 });
 
-void test('chat execution modes run vault edits directly and route outside actions to the selected approver', async (t) => {
+void test('external writes require a person except when full access explicitly waives approval', async (t) => {
 	const { cwd, connect, directory } = await fixture(t);
-	for (const [executionMode, decision] of [
-		['ask', 'approve'], ['ask', 'deny'], ['auto-review', 'APPROVE'], ['auto-review', 'DENY'],
-		['auto-review', 'APPROVE with extra text'], ['full-access', 'unused'],
+	for (const [executionMode, decision, confirm] of [
+		['ask', true], ['ask', false], ['auto-review', true], ['auto-review', false],
+		['full-access', true], ['full-access', false],
+		['ask', false, false], ['auto-review', false, false], ['full-access', false, false],
 	] as const) {
-		const label = `${executionMode}-${decision}`;
+		const label = `${executionMode}-${decision}-${confirm !== false}`;
 		const outside = join(cwd, '..', `${label}.md`);
 		const inside = `${label}.md`;
 		const write = (id: string, path: string): ToolCall => ({ id, name: 'Write', input: { file_path: path, content: '新内容' } });
@@ -468,30 +476,31 @@ void test('chat execution modes run vault edits directly and route outside actio
 			if (!first) return reply('执行完毕。');
 			first = false;
 			return reply('', [write('inside', inside), write('outside', outside)]);
-		}, firstModel, undefined, { async send(request) { reviews.push(request); return reply(decision).result(); } });
+		}, { ...firstModel, confirmFullAccessExternalActions: confirm }, undefined,
+		{ async send(request) { reviews.push(request); return reply('APPROVE').result(); } });
 		const id = await sessions.createConversation();
 		const instruction = `创建 ${inside} 以及库外的 ${outside}`;
 		const state = await sessions.submit({ conversationId: id, instruction, refs: [] }, {
-			approve: async (operation) => { prompts++; assert.ok(operation.target.endsWith(`${label}.md`)); return decision === 'approve'; },
+			approve: async (operation) => {
+				prompts++;
+				assert.ok(operation.target.endsWith(`${label}.md`));
+				assert.equal(operation.humanRequired, true);
+				assert.equal(operation.after, '新内容');
+				return decision;
+			},
 		}, undefined, { executionMode }).result;
 		assert.equal(await readFile(join(cwd, inside), 'utf8'), '新内容');
-		const allowed = decision === 'approve' || decision === 'APPROVE' || executionMode === 'full-access';
+		const skip = executionMode === 'full-access' && confirm === false;
+		const allowed = decision || skip;
+		const outsideResult = state.messages.find(({ toolCallId }) => toolCallId === 'outside');
+		assert.equal(outsideResult?.isError, !allowed, outsideResult?.content);
 		if (allowed) assert.equal(await readFile(outside, 'utf8'), '新内容');
 		else await assert.rejects(access(outside), { code: 'ENOENT' });
-		assert.equal(state.messages.find(({ toolCallId }) => toolCallId === 'outside')?.isError, !allowed);
 		const [saved] = (await createConversationStore(directory).load(id)).runs;
 		assert.deepEqual(saved?.state.messages.find(({ toolCallId }) => toolCallId === 'inside')?.noteChange, { path: inside, after: '新内容' });
 		assert.equal(saved?.state.messages.find(({ toolCallId }) => toolCallId === 'outside')?.noteChange, undefined);
-		assert.equal(prompts, executionMode === 'ask' ? 1 : 0);
-		assert.equal(reviews.length, executionMode === 'auto-review' ? 1 : 0);
-		for (const review of reviews) {
-			assert.deepEqual(review.tools, []);
-			assert.equal(review.sessionId, undefined);
-			const payload = JSON.parse(review.messages[0]!.content) as { instruction: string; operation: { target: string; after: string } };
-			assert.equal(payload.instruction, instruction);
-			assert.ok(payload.operation.target.endsWith(`${label}.md`));
-			assert.equal(payload.operation.after, '新内容');
-		}
+		assert.equal(prompts, skip ? 0 : 1);
+		assert.deepEqual(reviews, []);
 		sessions.dispose();
 	}
 });
@@ -511,7 +520,7 @@ void test('plan and review do not regain write permissions and review sends only
 			return reply('', [deniedWrite, ...planReads]);
 		}
 		return reply('说完了。');
-	});
+	}, { ...firstModel, confirmFullAccessExternalActions: false });
 	t.after(() => sessions.dispose());
 	const conversationId = await sessions.createConversation();
 	await sessions.submit({ conversationId, instruction: 'unrelated prior history', refs: [] }).result;

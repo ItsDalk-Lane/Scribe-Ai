@@ -21,6 +21,7 @@ export async function createRunContext(
 	toolsEnabled: () => boolean = () => true,
 	sideChat = false,
 	executionMode?: ExecutionMode,
+	confirmFullAccessExternalActions?: () => boolean,
 ): Promise<RunContext> {
 	const { cwd, signal } = options;
 	signal.throwIfAborted();
@@ -35,7 +36,7 @@ export async function createRunContext(
 		: intent === 'review' ? [] : intent === 'plan'
 			? task.request.refs.filter(({ path }) => !isAbsolute(path) && isWithinPath(cwd, resolve(cwd, path))) : task.request.refs;
 	const permissions = await createPermissionPolicy(cwd, configDir, refs, toolsEnabled,
-		sideChat || intent ? undefined : executionMode, intent !== 'plan');
+		sideChat || intent ? undefined : executionMode, intent !== 'plan', confirmFullAccessExternalActions);
 	signal.throwIfAborted();
 	if (sideChat) {
 		return { ...options, task, sideChat, readFiles: new Map(), readDelivery, permissions: {

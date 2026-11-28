@@ -25,7 +25,9 @@ function syncHelp(setting: HTMLElement): void {
 export function watchSettingDescriptions(container: HTMLElement): () => void {
 	const scan = () => container.querySelectorAll<HTMLElement>('.setting-item').forEach(syncHelp);
 	scan();
-	const observer = new MutationObserver(scan);
+	const win = container.ownerDocument.defaultView;
+	if (!win) return () => {};
+	const observer = new win.MutationObserver(scan);
 	observer.observe(container, { subtree: true, childList: true, characterData: true });
 	return () => observer.disconnect();
 }

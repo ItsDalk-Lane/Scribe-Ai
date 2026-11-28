@@ -1,16 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { homedir, hostname } from 'node:os';
 import type { App } from 'obsidian';
 import { restoreChatGoal } from '../../interaction/chatGoal';
 import { restoredTimelineExpansion } from '../../interaction/chatTimeline';
 import type { ConversationStore, ExecutionMode } from '../../types';
 import { readStoredJson, writeStoredJson } from './jsonFile';
 
-type LegacyStorage = Pick<App, 'loadLocalStorage' | 'saveLocalStorage'>;
+type LocalStorage = Pick<App, 'loadLocalStorage' | 'saveLocalStorage'> & {
+	secretStorage: Pick<App['secretStorage'], 'getSecret' | 'setSecret'>;
+};
 type Goals = Pick<ConversationStore, 'loadGoal' | 'saveGoal'>;
 
 const expansionKey = 'scribe-ai:timeline-expanded';
 const oauthDeviceIdKey = 'oauth-device-id';
+const localProfileKey = 'scribe-ai-local-profile';
+const memoryScopePattern = /^[a-f0-9]{64}$/u;
 const goalKey = (id: string) => `scribe-ai:chat-goal:${id}`;
 export const executionModeKey = (id?: string) => id ? `scribe-ai:execution-mode:${id}` : 'scribe-ai:last-execution-mode';
 const globalLegacyKeys = [executionModeKey(), expansionKey, oauthDeviceIdKey];
@@ -18,6 +21,7 @@ const globalLegacyKeys = [executionModeKey(), expansionKey, oauthDeviceIdKey];
 interface StoredState {
 	device: string;
 	contextScope?: string;
+	legacyMemoryScope?: string;
 	trustDirectoryRules?: true;
 	longTermMemory?: true;
 	searchVaultHistory?: true;
@@ -43,31 +47,39 @@ function legacyValue(app: Pick<App, 'loadLocalStorage'>, key: string): unknown {
 	try { return app.loadLocalStorage(key); } catch { return undefined; }
 }
 
-export async function initializeLocalState(path: string, app: LegacyStorage, conversationIds: readonly string[]) {
+export async function initializeLocalState(path: string, app: LocalStorage, conversationIds: readonly string[]) {
 	const ids = [...new Set(conversationIds)];
-	// 搬到另一台设备的笔记库不能自动继承本机的工具权限和登录标识。
-	const device = createHash('sha256').update(JSON.stringify([process.platform, hostname(), homedir()])).digest('hex');
+	// Obsidian keeps this random profile secret with the local vault registration.
+	let device = deviceId(app.secretStorage.getSecret(localProfileKey));
+	if (!device) {
+		device = randomUUID();
+		app.secretStorage.setSecret(localProfileKey, device);
+	}
 	const contextScope = createHash('sha256').update(JSON.stringify([device, path])).digest('hex');
 	const saved = record(await readStoredJson(path));
-	const currentDevice = saved.device === device;
-	const sameContext = currentDevice && saved.contextScope === contextScope;
+	const sameContext = saved.device === device && saved.contextScope === contextScope;
+	const legacyScope = sameContext ? saved.legacyMemoryScope
+		: typeof saved.device === 'string' && memoryScopePattern.test(saved.device) ? saved.contextScope : undefined;
+	const legacyMemoryScope = typeof legacyScope === 'string' && memoryScopePattern.test(legacyScope)
+		&& legacyScope !== contextScope ? legacyScope : undefined;
 	const oldMode = (id?: string) => executionMode(legacyValue(app, executionModeKey(id)));
 	const storedModes = record(saved.conversationModes);
 	let state: StoredState = {
 		device,
 		contextScope,
+		...(legacyMemoryScope && { legacyMemoryScope }),
 		...(sameContext && saved.trustDirectoryRules === true && { trustDirectoryRules: true as const }),
 		...(sameContext && saved.longTermMemory === true && { longTermMemory: true as const }),
 		...(sameContext && saved.searchVaultHistory === true && { searchVaultHistory: true as const }),
-		lastExecutionMode: (currentDevice ? executionMode(saved.lastExecutionMode) : oldMode()) ?? 'ask',
-		conversationModes: Object.fromEntries((currentDevice ? Object.keys(storedModes) : ids).flatMap((id) => {
-			const mode = currentDevice ? executionMode(storedModes[id]) : oldMode(id);
+		lastExecutionMode: (sameContext ? executionMode(saved.lastExecutionMode) : oldMode()) ?? 'ask',
+		conversationModes: Object.fromEntries((sameContext ? Object.keys(storedModes) : ids).flatMap((id) => {
+			const mode = sameContext ? executionMode(storedModes[id]) : oldMode(id);
 			return mode ? [[id, mode]] : [];
 		})),
-		timelineExpanded: [...restoredTimelineExpansion(currentDevice ? saved.timelineExpanded : legacyValue(app, expansionKey))],
-		oauthDeviceId: deviceId(currentDevice ? saved.oauthDeviceId : legacyValue(app, oauthDeviceIdKey)),
+		timelineExpanded: [...restoredTimelineExpansion(sameContext ? saved.timelineExpanded : legacyValue(app, expansionKey))],
+		oauthDeviceId: deviceId(sameContext ? saved.oauthDeviceId : legacyValue(app, oauthDeviceIdKey)),
 	};
-	if (!currentDevice) await writeStoredJson(path, state);
+	if (!sameContext) await writeStoredJson(path, state);
 
 	let persisted = state;
 	let writes = Promise.resolve();
@@ -115,6 +127,9 @@ export async function initializeLocalState(path: string, app: LegacyStorage, con
 	};
 	return {
 		memoryScope: contextScope,
+		legacyMemoryScope: () => state.legacyMemoryScope,
+		clearLegacyMemoryScope: () => save((current) => current.legacyMemoryScope
+			? { ...current, legacyMemoryScope: undefined } : current),
 		contextVersion: () => contextVersion,
 		directoryRulesTrusted: () => contextSetting('trustDirectoryRules'),
 		saveDirectoryRulesTrust: (enabled: boolean) => saveContextSetting('trustDirectoryRules', enabled),

@@ -129,7 +129,9 @@ export function renderMcpServerForm(app: App, parent: HTMLElement, original: Mcp
 	name.required = true;
 	const type = field(parent, tr('连接类型', 'Connection type')).createEl('select', { cls: 'dropdown' });
 	for (const [value, label] of [
-		['stdio', tr('本地命令（STDIO）', 'Local command (STDIO)')], ['sse', tr('服务器推送（SSE）', 'Server-sent events (SSE)')], ['http', tr('流式 HTTP', 'Streamable HTTP')],
+		['stdio', tr('本地命令（STDIO）', 'Local command (STDIO)')],
+		['http', tr('流式 HTTP（远程连接推荐）', 'Streamable HTTP (recommended for remote servers)')],
+		['sse', tr('服务器推送（旧版 SSE）', 'Server-sent events (legacy SSE)')],
 	] as const) type.createEl('option', { text: label, attr: { value } });
 	type.value = original.type;
 	const description = input(parent, tr('说明', 'Description'), original.description, { wide: true });

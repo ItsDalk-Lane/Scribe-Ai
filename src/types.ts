@@ -954,6 +954,7 @@ export type ExecutionMode = 'ask' | 'auto-review' | 'full-access';
 
 export interface PermissionPolicy {
 	executionMode?: ExecutionMode;
+	canSkipFullAccessApproval?(): boolean;
 	canRequestPath?(this: void, path: string, operation: 'read' | 'write'): boolean;
 	canRead(path: string): boolean;
 	readLines?(path: string): [number, number] | undefined;
@@ -1107,6 +1108,8 @@ export interface ScribeSettings {
 	chatLocation: ChatLocation;
 	/** 删除、归档对话前是否弹出确认框；缺省视为开启。 */
 	confirmChatRemoval: boolean;
+	/** 完全访问模式下是否仍需本人批准库外写入和超出只读沙箱的命令。 */
+	confirmFullAccessExternalActions?: boolean;
 	/** 诊断日志保留天数；超过该天数没有新写入的日志文件会被清理，0 表示永久保留。 */
 	logRetentionDays: number;
 	/** Days before the one-shot startup cleanup removes spill files; 0 disables cleanup. */

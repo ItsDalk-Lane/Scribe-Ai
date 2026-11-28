@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,8 +9,41 @@ import { createLongTermMemory, memoryReceipt } from '../context/longTermMemory';
 import { promptText } from '../context/promptXml';
 import { initializeLocalState } from '../storage/localState';
 import { scribeDataPaths } from '../storage/paths';
+import { testSecretStorage } from './testSecretStorage';
 
-const app = { loadLocalStorage: () => null, saveLocalStorage: () => {} };
+const app = { secretStorage: testSecretStorage(), loadLocalStorage: () => null, saveLocalStorage: () => {} };
+
+void test('升级后重置授权，手动合并旧记忆并保留新版同名主题和旧文件', async (t) => {
+	const root = await realpath(await mkdtemp(join(tmpdir(), 'scribe-memory-')));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const paths = scribeDataPaths(root);
+	const legacy = 'b'.repeat(64);
+	const legacyDirectory = join(paths.memory, legacy);
+	await mkdir(legacyDirectory, { recursive: true });
+	await writeFile(paths.state, JSON.stringify({ device: 'a'.repeat(64), contextScope: legacy,
+		lastExecutionMode: 'full-access', conversationModes: { example: 'full-access' },
+		trustDirectoryRules: true, longTermMemory: true, searchVaultHistory: true }));
+	const updatedAt = '2026-01-10T00:00:00.000Z';
+	const legacyContents = (topic: string) => JSON.stringify({ topic, summary: '旧摘要', updatedAt }) + '\n旧偏好';
+	await Promise.all(['editor', 'sources'].map((topic) => writeFile(join(legacyDirectory, `${topic}.txt`), legacyContents(topic))));
+	const profile = { ...app, secretStorage: testSecretStorage() };
+	const state = await initializeLocalState(paths.state, profile, ['example']);
+	const memory = createLongTermMemory(root, state);
+	assert.equal(state.loadExecutionMode('example'), 'ask');
+	assert.equal(state.directoryRulesTrusted(), false);
+	assert.equal(state.vaultHistoryEnabled(), false);
+	assert.equal(await memory.hasLegacy(), true);
+	assert.deepEqual(await memory.list(), []);
+	await memory.save('editor', '新摘要', '新偏好', null, true);
+	await memory.restoreLegacy();
+	assert.equal(await memory.hasLegacy(), false);
+	assert.equal(await memory.index(), undefined);
+	const reopened = await initializeLocalState(paths.state, profile, ['example']);
+	const restored = createLongTermMemory(root, reopened);
+	assert.equal((await restored.read('editor', true))?.content, '新偏好');
+	assert.deepEqual(await restored.read('sources', true), { topic: 'sources', summary: '旧摘要', content: '旧偏好', updatedAt });
+	assert.equal(await readFile(join(legacyDirectory, 'sources.txt'), 'utf8'), legacyContents('sources'));
+});
 
 void test('长期记忆显式开启，主题正文按需读取，并在重开后保留同库设置与内容', async (t) => {
 	const root = await realpath(await mkdtemp(join(tmpdir(), 'scribe-memory-')));

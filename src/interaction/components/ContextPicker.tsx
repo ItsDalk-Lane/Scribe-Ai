@@ -1,7 +1,7 @@
 import { basename, isAbsolute } from 'node:path';
-import { Platform, TFile, TFolder } from 'obsidian';
+import { Platform } from 'obsidian';
 import type { App } from 'obsidian';
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, RefObject } from 'react';
 import type { ConversationStore, ConversationSummary, NoteRef } from '../../types';
 import { isImageFile } from '../../tools/support/imageData';
@@ -11,6 +11,7 @@ import { conversationReference, conversationReferenceTitle } from '../conversati
 import { externalReferenceAt, pickExternalReference } from '../externalReferencePicker';
 import type { ExternalReferenceMode } from '../externalReferencePicker';
 import { uiText } from '../uiText';
+import { isVaultFolder, vaultSuggestions } from '../vaultSuggestions';
 import ChatIcon from './ChatIcon';
 import PastedImageThumbnail from './PastedImageThumbnail';
 import { useComposerPopoverPosition } from './useComposerPopoverPosition';
@@ -45,7 +46,9 @@ export function ContextChips({ app, refs, quotes, disabled, onRemove, onRemoveQu
 	return (
 		<ul className="scribe-context-chips" aria-label={text.chatContextLabel}>
 			{quoteGroups.map((group) => <li key={group.history ? group.quotes[0] : 'excerpts'} className="scribe-context-chip scribe-chat-quote-chip">
-				<details className="scribe-selection-preview">
+				<details className="scribe-selection-preview" onToggle={({ currentTarget }) => {
+					currentTarget.parentElement?.classList.toggle('is-open', currentTarget.open);
+				}}>
 					<summary><ChatIcon name={group.history ? 'message-circle' : 'quote'} />{group.title}</summary>
 					<pre className="scribe-chat-pre" tabIndex={0} aria-label={text.chatSelectionPreview}>{group.quotes.join('\n\n')}</pre>
 				</details>
@@ -252,18 +255,16 @@ export function useReferenceSuggestions({ options, launcher, inputRef, instructi
 	const query = manual ? manualQuery : range?.term ?? '';
 	const needle = query.trim().toLocaleLowerCase();
 	const browsing = category !== 'all' || Boolean(needle);
+	const vaultItems = useMemo(() => menuOpen && !outside && browsing && app
+		? vaultSuggestions(app, query, (item): item is typeof item => true) : [], [app, browsing, menuOpen, outside, query]);
 	const chats = conversationIndex ?? history;
 	const choices: ReferenceChoice[] = [];
 	if (menuOpen && !outside) {
 		if (browsing && app) {
-			const configDir = app.vault.configDir;
-			for (const item of app.vault.getAllLoadedFiles()) {
-				if (item.path === '/' || item.path === configDir || item.path.startsWith(`${configDir}/`)) continue;
-				if (item instanceof TFile || item instanceof TFolder) {
-					const kind = item instanceof TFolder ? 'folder' : 'file';
-					choices.push({ key: item.path, label: item.name, detail: item.path !== item.name ? item.path : undefined,
-						icon: kind === 'folder' ? 'folder' : 'file-text', select: () => complete({ path: item.path, kind }) });
-				}
+			for (const item of vaultItems) {
+				const kind = isVaultFolder(item) ? 'folder' : 'file';
+				choices.push({ key: item.path, label: item.name, detail: item.path !== item.name ? item.path : undefined,
+					icon: kind === 'folder' ? 'folder' : 'file-text', select: () => complete({ path: item.path, kind }) });
 			}
 		} else if (!browsing) {
 			choices.push({ key: 'vault', label: text.chatVaultReference, icon: 'folder-open', select: () => changeCategory('vault') });

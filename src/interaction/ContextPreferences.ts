@@ -51,8 +51,16 @@ function manageMemory(plugin: ScribeAiPlugin, memory: MemoryRun) {
 	const modal = new Modal(plugin.app).setTitle(tr('管理长期记忆', 'Manage long-term memory'));
 	function refresh() {
 		modal.contentEl.empty();
-		void memory.list().then((entries) => {
+		void Promise.all([memory.list(), memory.hasLegacy()]).then(([entries, hasLegacy]) => {
 			if (!modal.contentEl.isConnected) return;
+			if (hasLegacy) new Setting(modal.contentEl).setName(tr('旧版长期记忆', 'Memories from the previous version'))
+				.setDesc(tr('合并旧版记忆，保留现有同名主题。导入后仍由你决定是否启用长期记忆。',
+					'Merge memories, keeping current topics with the same names. Long-term memory remains under your control.'))
+				.addButton((button) => button.setButtonText(tr('导入', 'Import')).onClick(async () => {
+					button.setDisabled(true);
+					try { await memory.restoreLegacy(); refresh(); }
+					catch (error) { new Notice(error instanceof Error ? error.message : String(error)); button.setDisabled(false); }
+				}));
 			if (!entries.length) modal.contentEl.createEl('p', { text: tr('还没有已保存的记忆。', 'No memories saved yet.') });
 			for (const { topic, summary, updatedAt } of entries) new Setting(modal.contentEl).setName(topic)
 				.setDesc(summary + ' · ' + updatedAt.slice(0, 10)).addButton((button) =>

@@ -158,7 +158,7 @@ export function renderChatMedia(app: App, root: HTMLElement, sourcePath: string,
 		trigger.setAttribute('aria-label', `${imagePreviewLabel()}${image.alt ? ` · ${image.alt}` : ''}`);
 	};
 	const scanImages = (element: Element) => {
-		if (element.matches('img')) armImage(element as HTMLImageElement);
+		if (element.instanceOf(HTMLImageElement)) armImage(element);
 		element.querySelectorAll<HTMLImageElement>('img').forEach(armImage);
 	};
 	scanImages(root);

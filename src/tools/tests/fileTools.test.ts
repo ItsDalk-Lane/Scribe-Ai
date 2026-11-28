@@ -104,10 +104,26 @@ void test('execution modes approve only out-of-vault file operations in restrict
 	assert.equal((await edit('approved')).isError, false);
 
 	context.permissions = await createPermissionPolicy(cwd, context.app.vault.configDir, [], () => true, 'full-access');
-	const approvalCount = asked.length;
-	assert.equal((await execute('Edit', { file_path: file, old_string: 'approved', new_string: 'direct' })).isError, false);
-	assert.match(await readFile(file, 'utf8'), /^direct/);
-	assert.equal(asked.length, approvalCount);
+	allowed = false;
+	assert.equal((await execute('Edit', { file_path: file, old_string: 'approved', new_string: 'blocked' })).isError, true);
+	assert.match(await readFile(file, 'utf8'), /^approved/);
+	assert.equal(asked.at(-1)?.humanRequired, true);
+	allowed = true;
+	assert.equal((await execute('Edit', { file_path: file, old_string: 'approved', new_string: 'confirmed' })).isError, false);
+	assert.match(await readFile(file, 'utf8'), /^confirmed/);
+});
+
+void test('re-enabling full-access approval blocks an already prepared external write and writing rules still need approval', async (t) => {
+	const { cwd, outside, context, prepare } = await fileToolsFixture(t);
+	let confirm = false;
+	context.permissions = await createPermissionPolicy(cwd, context.app.vault.configDir, [], undefined, 'full-access', true, () => confirm);
+	const target = join(outside, 'draft.md');
+	const pending = await prepare('Write', { file_path: target, content: 'private' });
+	assert.equal(pending.approval, undefined);
+	assert.equal((await prepare('Write', { file_path: 'AGENTS.md', content: 'new rule' })).approval?.humanRequired, true);
+	confirm = true;
+	await assert.rejects(async () => pending.run(), /审批设置已变化/u);
+	await assert.rejects(readFile(target), { code: 'ENOENT' });
 });
 
 void test('read approval stays bound to the resolved file if a link is retargeted', async (testContext) => {

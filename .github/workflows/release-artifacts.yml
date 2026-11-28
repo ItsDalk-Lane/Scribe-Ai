@@ -1,0 +1,50 @@
+name: Release artifacts
+
+on:
+    push:
+        tags: ['*.*.*']
+
+jobs:
+    build-and-attest:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            id-token: write
+            attestations: write
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  persist-credentials: false
+            - uses: actions/setup-node@v6
+              with:
+                  node-version: '22.19.0'
+                  cache: npm
+            - name: Verify release version
+              run: |
+                  node --input-type=module <<'NODE'
+                  import { readFileSync } from 'node:fs';
+                  const tag = process.env.GITHUB_REF_NAME;
+                  const manifest = JSON.parse(readFileSync('manifest.json', 'utf8'));
+                  const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+                  if (!/^\d+\.\d+\.\d+$/.test(tag) || manifest.version !== tag || pkg.version !== tag) {
+                      throw new Error('The release tag must match the manifest and package versions.');
+                  }
+                  NODE
+            - run: npm ci
+            - run: npm run build:release
+            - name: Attest release files
+              uses: actions/attest@v4
+              with:
+                  subject-path: |
+                      main.js
+                      manifest.json
+                      styles.css
+            - name: Package release files
+              uses: actions/upload-artifact@v7
+              with:
+                  name: scribe-ai-${{ github.ref_name }}
+                  path: |
+                      main.js
+                      manifest.json
+                      styles.css
+                  if-no-files-found: error

@@ -1,5 +1,6 @@
 import type { Agent, ClientRequest, IncomingMessage } from 'node:http';
 import type { LookupFunction } from 'node:net';
+import { clearTimeout, setTimeout } from 'node:timers';
 import { diagnostics } from './diagnostics';
 import { toLogEntry } from './events';
 import type { NodeFetchObserver } from './events';
@@ -82,13 +83,13 @@ export function createNodeFetch(
 				let activeResponse: IncomingMessage | undefined;
 				let responded = false;
 				const clearTimer = () => {
-					if (timer) globalThis.clearTimeout(timer);
+					if (timer) clearTimeout(timer);
 					timer = undefined;
 				};
 				const arm = (kind: 'connect' | 'first-byte' | 'stream-idle', ms: number) => {
 					clearTimer();
 					if (ms <= 0) return;
-					timer = globalThis.setTimeout(() => req.destroy(timeoutError(kind, ms)), ms);
+					timer = setTimeout(() => req.destroy(timeoutError(kind, ms)), ms);
 				};
 				const onAbort = () => {
 					const reason = abortReason(request.signal);

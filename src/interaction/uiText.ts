@@ -25,6 +25,8 @@ export interface UiText {
 	editorTab: string;
 	modelsTab: string;
 	advancedTab: string;
+	fullAccessApprovalSetting: string;
+	fullAccessApprovalSettingDescription: string;
 	diagnostics: string;
 	noDiagnostics: string;
 	phaseDone: string;
@@ -188,8 +190,11 @@ export interface UiText {
 	chatModeAutoReviewDescription: string;
 	chatModeFullAccess: string;
 	chatModeFullAccessDescription: string;
+	chatModeFullAccessWarning: string;
 	chatModeFullAccessConfirm: string;
 	chatModeFullAccessDisclosure: string;
+	chatModeFullAccessUnrestrictedDisclosure: string;
+	chatModeFullAccessPolicyChanged: string;
 	chatModeLocked: string;
 	chatPickVaultItem: string;
 	chatSearchReferences: string;
@@ -465,6 +470,8 @@ const EN: UiText = {
 	editorTab: 'Editor tab',
 	modelsTab: 'Models',
 	advancedTab: 'Advanced',
+	fullAccessApprovalSetting: 'Require approval for elevated actions in full access',
+	fullAccessApprovalSettingDescription: 'Enabled by default. Turn this off to allow full access chats to write outside the vault and run commands beyond the read-only sandbox without asking each time.',
 	diagnostics: 'Diagnostic log',
 	dataDirectory: 'Data directory',
 	appData: 'Plugin data',
@@ -624,7 +631,7 @@ const EN: UiText = {
 	oauthLoginFailed: 'Sign-in failed',
 	oauthLoginCancelled: 'Sign-in cancelled',
 	oauthOpenPage: 'Complete sign-in in your browser.',
-	oauthDeviceCode: 'Device code (copied)',
+	oauthDeviceCode: 'Device code',
 	proxyUrl: 'Proxy URL',
 	proxyDescription: 'Optional proxy URL for model requests.',
 	model: 'Model',
@@ -640,9 +647,12 @@ const EN: UiText = {
 	chatModeAutoReview: 'Approve for me',
 	chatModeAutoReviewDescription: 'Send requests for extra permissions to your selected model for a separate review.',
 	chatModeFullAccess: 'Full access',
-	chatModeFullAccessDescription: 'Access files outside the vault and use the internet without individual approvals.',
+	chatModeFullAccessDescription: 'Read external files and use configured online tools directly. Advanced settings control approval for external writes and commands beyond the read-only sandbox.',
+	chatModeFullAccessWarning: 'Full access warning',
 	chatModeFullAccessConfirm: 'Enable full access',
-	chatModeFullAccessDisclosure: 'Scribe Ai can read and change files your computer account can access, including files outside this vault. It can also run commands and use the internet without individual approvals. This chat saves the mode, and new chats and tabs inherit it from the current chat.',
+	chatModeFullAccessDisclosure: 'Scribe Ai can read files your account can access and use configured online tools directly. Writing outside the vault or running commands outside the read-only sandbox needs your approval. This chat saves the mode, and new chats and tabs inherit it.',
+	chatModeFullAccessUnrestrictedDisclosure: 'Scribe Ai can directly read and write files your account can access, including outside the vault, and use configured online tools. Commands can run beyond the read-only sandbox without asking and may change or delete files or access the network. This chat saves the mode, and new chats and tabs inherit it.',
+	chatModeFullAccessPolicyChanged: 'Approval settings changed. Select full access again to review the new permissions.',
 	chatModeLocked: 'You can change modes when the current task and queue finish.',
 	chatPickVaultItem: 'Select a vault file or folder',
 	chatSearchReferences: 'Search files, folders or chats',
@@ -918,6 +928,8 @@ const ZH_CN: UiText = {
 	editorTab: '编辑器标签页',
 	modelsTab: '模型',
 	advancedTab: '高级',
+	fullAccessApprovalSetting: '完全访问时逐项批准高权限操作',
+	fullAccessApprovalSettingDescription: '默认开启。关闭后，完全访问模式可以直接写入库外文件，并运行超出只读沙箱的命令，无需逐项批准。',
 	diagnostics: '诊断日志',
 	dataDirectory: '数据目录',
 	appData: '应用数据',
@@ -1077,7 +1089,7 @@ const ZH_CN: UiText = {
 	oauthLoginFailed: '登录失败',
 	oauthLoginCancelled: '已取消登录',
 	oauthOpenPage: '请在浏览器中完成登录。',
-	oauthDeviceCode: '设备码（已复制）',
+	oauthDeviceCode: '设备码',
 	proxyUrl: '代理服务器 URL',
 	proxyDescription: '模型请求的可选代理服务器 URL。',
 	model: '模型',
@@ -1093,9 +1105,12 @@ const ZH_CN: UiText = {
 	chatModeAutoReview: '帮我批准',
 	chatModeAutoReviewDescription: '需要额外权限时，将请求详情发给当前模型单独审核。',
 	chatModeFullAccess: '完全访问',
-	chatModeFullAccessDescription: '可访问库外文件并联网，无需逐项批准。',
+	chatModeFullAccessDescription: '可直接读取库外文件和调用已配置的联网工具。库外写入和超出只读沙箱的命令是否需要批准，由高级设置决定。',
+	chatModeFullAccessWarning: '完全访问警告',
 	chatModeFullAccessConfirm: '启用完全访问',
-	chatModeFullAccessDisclosure: 'Scribe Ai 可以读写你的电脑账户有权访问的文件，包括库外文件，也可以直接运行命令和联网。当前聊天会保存此模式，新开的聊天和标签页会沿用它。',
+	chatModeFullAccessDisclosure: 'Scribe Ai 可以直接读取你的电脑账户有权访问的文件，并调用已配置的联网工具。库外写入及超出只读沙箱的命令仍需你批准。当前聊天会保存此模式，新开的聊天和标签页会沿用它。',
+	chatModeFullAccessUnrestrictedDisclosure: 'Scribe Ai 可以直接读写你的电脑账户有权访问的文件，包括库外文件，并调用已配置的联网工具。超出只读沙箱的命令无需逐项批准，可能修改或删除文件，也可能联网。当前聊天会保存此模式，新开的聊天和标签页会沿用它。',
+	chatModeFullAccessPolicyChanged: '审批设置已更改。请重新选择完全访问，查看当前权限。',
 	chatModeLocked: '当前任务和队列结束后可切换模式。',
 	chatPickVaultItem: '选择库内文件或文件夹',
 	chatSearchReferences: '搜索文件、文件夹或历史对话',
@@ -1371,6 +1386,8 @@ const ZH_TW: UiText = {
 	editorTab: '編輯器分頁',
 	modelsTab: '模型',
 	advancedTab: '進階',
+	fullAccessApprovalSetting: '完全存取時逐項批准高權限操作',
+	fullAccessApprovalSettingDescription: '預設開啟。關閉後，完全存取模式可直接寫入庫外檔案，並執行超出唯讀沙箱的指令，無需逐項批准。',
 	diagnostics: '診斷日誌',
 	dataDirectory: '資料目錄',
 	appData: '應用資料',
@@ -1530,7 +1547,7 @@ const ZH_TW: UiText = {
 	oauthLoginFailed: '登入失敗',
 	oauthLoginCancelled: '已取消登入',
 	oauthOpenPage: '請在瀏覽器中完成登入。',
-	oauthDeviceCode: '裝置碼（已複製）',
+	oauthDeviceCode: '裝置碼',
 	proxyUrl: '代理伺服器 URL',
 	proxyDescription: '模型請求的可選代理伺服器 URL。',
 	model: '模型',
@@ -1546,9 +1563,12 @@ const ZH_TW: UiText = {
 	chatModeAutoReview: '幫我批准',
 	chatModeAutoReviewDescription: '需要額外權限時，將請求詳情傳給目前的模型單獨審核。',
 	chatModeFullAccess: '完全存取',
-	chatModeFullAccessDescription: '可存取庫外檔案並連網，無需逐項批准。',
+	chatModeFullAccessDescription: '可直接讀取庫外檔案和呼叫已設定的連網工具。庫外寫入及超出唯讀沙箱的指令是否需要批准，由進階設定決定。',
+	chatModeFullAccessWarning: '完全存取警告',
 	chatModeFullAccessConfirm: '啟用完全存取',
-	chatModeFullAccessDisclosure: 'Scribe Ai 可以讀寫你的電腦帳戶有權存取的檔案，包括庫外檔案，也可以直接執行指令及連網。目前對話會儲存此模式，新開的對話和分頁會沿用它。',
+	chatModeFullAccessDisclosure: 'Scribe Ai 可以直接讀取你的電腦帳戶有權存取的檔案，並呼叫已設定的連網工具。庫外寫入及超出唯讀沙箱的指令仍需你批准。目前對話會儲存此模式，新開的對話和分頁會沿用它。',
+	chatModeFullAccessUnrestrictedDisclosure: 'Scribe Ai 可以直接讀寫你的電腦帳戶有權存取的檔案，包括庫外檔案，並呼叫已設定的連網工具。超出唯讀沙箱的指令無需逐項批准，可能修改或刪除檔案，也可能連網。目前對話會儲存此模式，新開的對話和分頁會沿用它。',
+	chatModeFullAccessPolicyChanged: '審批設定已變更。請重新選擇完全存取，查看目前權限。',
 	chatModeLocked: '目前任務及佇列結束後可切換模式。',
 	chatPickVaultItem: '選擇庫內檔案或資料夾',
 	chatSearchReferences: '搜尋檔案、資料夾或歷史對話',

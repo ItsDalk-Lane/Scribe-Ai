@@ -86,9 +86,9 @@ export function createLongTermMemory(vaultRoot: string, localState: LocalState,
 		shared.queue = result.catch(() => {});
 		return result;
 	};
-	async function directory(create = false): Promise<string | undefined> {
+	async function directory(create = false, scopeId = localState.memoryScope): Promise<string | undefined> {
 		const paths = scribeDataPaths(await realpath(vaultRoot));
-		const scope = join(paths.memory, localState.memoryScope);
+		const scope = join(paths.memory, scopeId);
 		for (const path of [paths.root, paths.memory, scope]) {
 			if (create) await ensureStoredDirectory(path);
 			const info = await storageStat(path);
@@ -142,6 +142,28 @@ export function createLongTermMemory(vaultRoot: string, localState: LocalState,
 	const run = {
 		enabled, version,
 		list: () => queue(list),
+		async hasLegacy() {
+			const scopeId = localState.legacyMemoryScope();
+			const scope = scopeId ? await directory(false, scopeId) : undefined;
+			return Boolean(scope && (await topics(scope)).length);
+		},
+		restoreLegacy: () => queue(async () => {
+			const scopeId = localState.legacyMemoryScope();
+			const previous = scopeId ? await directory(false, scopeId) : undefined;
+			if (!previous) return;
+			const scope = (await directory(true))!;
+			const existing = new Set(await topics(scope));
+			const missing = (await topics(previous)).filter((topic) => !existing.has(topic));
+			if (existing.size + missing.length > limit) throw new Error('合并后超过 100 个记忆主题，请先清理当前记忆。');
+			for (const topic of missing) {
+				const entry = await read(previous, topic, true);
+				if (!entry) continue;
+				const { summary, content } = normalizeMemoryText(entry.summary, entry.content);
+				await writeStoredText(join(scope, topic + '.txt'), JSON.stringify({ topic, summary, updatedAt: entry.updatedAt }) + '\n' + content);
+				shared.revision++;
+			}
+			await localState.clearLegacyMemoryScope();
+		}),
 		index: () => queue(async () => {
 			if (!enabled()) return;
 			let index = '';

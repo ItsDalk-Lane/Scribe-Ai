@@ -29,6 +29,7 @@ export const DEFAULT_SETTINGS: ScribeSettings = {
 	customProviders: {},
 	chatLocation: 'right-sidebar',
 	confirmChatRemoval: true,
+	confirmFullAccessExternalActions: true,
 	logRetentionDays: 30,
 	spillCleanupDays: 30,
 	subagents: DEFAULT_SUBAGENT_SETTINGS,
@@ -142,6 +143,7 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 		confirmChatRemoval: typeof stored.confirmChatRemoval === 'boolean'
 			? stored.confirmChatRemoval
 			: DEFAULT_SETTINGS.confirmChatRemoval,
+		confirmFullAccessExternalActions: stored.confirmFullAccessExternalActions !== false,
 		logRetentionDays: typeof stored.logRetentionDays === 'number' && Number.isSafeInteger(stored.logRetentionDays) && stored.logRetentionDays >= 0
 			? stored.logRetentionDays
 			: DEFAULT_SETTINGS.logRetentionDays,

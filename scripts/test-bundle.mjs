@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { glob, mkdtemp, rm } from 'node:fs/promises';
+import { createMcpValidationPlugin } from './mcp-validation-plugin.mjs';
 import { createNodeFetchPlugin } from './node-fetch-plugin.mjs';
+import { createReactDomPlugin } from './react-dom-plugin.mjs';
 
 const suite = process.argv[2] ?? 'all';
 if (!['all', 'agent', 'communication'].includes(suite)) throw new Error(`Unknown test suite: ${suite}`);
@@ -24,7 +26,8 @@ try {
 		platform: 'node',
 		format: 'cjs',
 		target: 'node22',
-		plugins: [createNodeFetchPlugin()],
+		define: { 'process.env.NODE_ENV': '"production"' },
+		plugins: [createNodeFetchPlugin(), createMcpValidationPlugin(), createReactDomPlugin()],
 		external: ['obsidian', 'electron', ...builtinModules],
 		outdir,
 		outExtension: { '.js': '.cjs' },

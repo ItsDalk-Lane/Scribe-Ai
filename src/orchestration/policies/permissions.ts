@@ -26,7 +26,7 @@ async function canonicalPath(path: string): Promise<string> {
 
 export async function createPermissionPolicy(
 	cwd: string, configDir: string, refs: NoteRef[], toolsEnabled: () => boolean = () => true,
-	executionMode?: ExecutionMode, allowConfigReferences = true,
+	executionMode?: ExecutionMode, allowConfigReferences = true, confirmFullAccessExternalActions: () => boolean = () => true,
 ): Promise<PermissionPolicy> {
 	const vaultRoot = await realpath(cwd);
 	const roots = [cwd, vaultRoot];
@@ -74,6 +74,7 @@ export async function createPermissionPolicy(
 
 	return {
 		executionMode,
+		canSkipFullAccessApproval: () => executionMode === 'full-access' && !confirmFullAccessExternalActions(),
 		canRequestPath: executionMode && executionMode !== 'full-access'
 			? (path, operation) => !inVault(path) && !isProtected(path) && !isScribePrivate(path, operation === 'write')
 				&& !matchingReferences(path).some(({ ref }) => ref.lines)

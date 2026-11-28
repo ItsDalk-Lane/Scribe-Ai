@@ -110,6 +110,7 @@ export default function QueuedMessages({
 	const [work, setWork] = useState<ReadonlySet<string>>(new Set());
 	const working = useRef(new Set<string>());
 	const [editing, setEditing] = useState<{ id: string; draft: SkillDraft }>();
+	const [suggesting, setSuggesting] = useState(false);
 	const editor = useRef<HTMLTextAreaElement>(null);
 	const editRow = useRef<HTMLElement | null>(null);
 	const single = rows.length === 1;
@@ -175,7 +176,7 @@ export default function QueuedMessages({
 			<span>{count}</span><ChatIcon name={showing ? 'chevron-down' : 'chevron-up'} />
 		</button>}
 		<div className="scribe-queue-expansion" data-expanded={showing} inert={!showing}>
-			<ul className="scribe-queue-list" id={listId} aria-label={count}>
+			<ul className="scribe-queue-list" id={listId} aria-label={count} data-suggesting={suggesting || undefined}>
 				{rows.map(({ id, request, pending, failed }) => {
 					const edit = currentEdit?.id === id ? currentEdit : undefined;
 					const locked = work.has(id);
@@ -199,7 +200,7 @@ export default function QueuedMessages({
 						</div>}
 						{edit ? <SkillTextArea inputRef={editor} className="scribe-queue-editor" rows={2} aria-label={text.queueEdit}
 							registry={skills} refs={request.refs} scope={request.skillScope}
-							draft={edit.draft} readOnly={locked} onDraftChange={(draft) => setEditing({ id, draft })} />
+							draft={edit.draft} readOnly={locked} onSuggestionsChange={setSuggesting} onDraftChange={(draft) => setEditing({ id, draft })} />
 							: <span className="scribe-queue-preview">{request.target && <strong>{request.target.label} · </strong>}{preview}</span>}
 						{(status || selectionUnavailable) && <span className="scribe-queue-status" role="status">{status ?? selectionUnavailable}</span>}
 						<div className="scribe-queue-actions">

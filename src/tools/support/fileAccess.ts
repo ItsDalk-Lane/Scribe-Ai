@@ -102,17 +102,26 @@ export async function prepareFileChange(
 	checkTextSize(after);
 	if (before === after) throw new Error('文件内容没有变化。');
 	const mode = ctx.permissions.executionMode;
+	const external = path.vaultPath === undefined;
 	const writingRule = path.vaultPath && posix.basename(path.vaultPath).toLowerCase() === WRITING_RULE_FILENAME.toLowerCase();
-	const direct = !writingRule && !path.requiresApproval && (mode === 'full-access'
+	const direct = (!external || ctx.permissions.canSkipFullAccessApproval?.()) && !writingRule && !path.requiresApproval && (mode === 'full-access'
 		|| Boolean(mode && path.vaultPath && isWithinPath(ctx.cwd, path.requestedPath)));
+	const reason = external ? '此操作将写入当前笔记库以外的文件。'
+		: writingRule ? '可信的写作规则会影响此目录后续的聊天任务。' : undefined;
+	const checkApproval = () => {
+		if (external && direct && !ctx.permissions.canSkipFullAccessApproval?.()) {
+			throw new Error('完全访问的审批设置已变化，请重新请求写入。');
+		}
+	};
 	return {
 		...(direct ? { independent: true } : {
 			approval: { title: before === undefined ? '创建文件' : '修改文件', target: path.displayPath, before, after,
-				...(writingRule && { humanRequired: true, reason: '可信的写作规则会影响此目录后续的聊天任务。' }) },
+				...(reason && { humanRequired: true, reason }) },
 		}),
 		async run() {
 			const current = await recheckToolPath(ctx, path, 'write', options);
 			ctx.signal.throwIfAborted();
+			checkApproval();
 			const file = current.vaultPath ? ctx.app.vault.getFileByPath(current.vaultPath) : null;
 			if (!current.stat) {
 				if (current.vaultPath) await ctx.app.vault.create(current.vaultPath, after);
@@ -130,7 +139,7 @@ export async function prepareFileChange(
 					return after;
 				});
 			} else {
-				await replaceExternalFile(ctx, current, before, after);
+				await replaceExternalFile(ctx, current, before, after, checkApproval);
 			}
 			ctx.readFiles.set(current.absolutePath, fileFingerprint(after));
 			const content = `${before === undefined ? '已创建' : '已更新'} ${path.displayPath}。`;
@@ -149,6 +158,7 @@ async function replaceExternalFile(
 	path: ResolvedToolPath,
 	before: string | undefined,
 	after: string,
+	checkApproval: () => void,
 ): Promise<void> {
 	const staging = await mkdtemp(join(dirname(path.absolutePath), '.scribe-ai-'));
 	try {
@@ -165,6 +175,7 @@ async function replaceExternalFile(
 				throw new Error('文件已变化，请重新读取和确认。');
 			}
 			ctx.signal.throwIfAborted();
+			checkApproval();
 			await rename(temp, path.absolutePath);
 		} finally {
 			committingExternalFiles.delete(key);

@@ -13,6 +13,7 @@ import { composerShortcut } from './composerKeyboard';
 import { exportSlash, showSlashMcp, showSlashWarnings } from './slashActions';
 import { tr } from './skills/dialog';
 import ExecutionView from './components/ExecutionView';
+import { chatStatusBarSpace } from './components/chatStatusBarSpace';
 import { MetricPopoverProvider } from './components/MetricPopover';
 import TaskInput from './components/TaskInput';
 import { emptyExecution, updateExecution } from './context';
@@ -146,7 +147,7 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 	}, []);
 
 	return <MetricPopoverProvider>
-		<div className="scribe-app scribe-side-chat" data-layout="conversation" onKeyDown={(event) => {
+		<div ref={chatStatusBarSpace} className="scribe-app scribe-side-chat" data-layout="conversation" onKeyDown={(event) => {
 			if (!running.current || event.defaultPrevented || composerShortcut(event.nativeEvent) !== 'escape') return;
 			event.preventDefault();
 			event.stopPropagation();

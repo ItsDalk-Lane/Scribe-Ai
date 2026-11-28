@@ -171,6 +171,14 @@ export default class ScribeAiPlugin extends Plugin {
 		});
 	}
 
+	async saveFullAccessExternalActions(confirm: boolean): Promise<void> {
+		await this.enqueueSettingsSave(async () => {
+			const { settings } = this.services;
+			await this.writeSettings({ ...settings, confirmFullAccessExternalActions: confirm });
+			settings.confirmFullAccessExternalActions = confirm;
+		});
+	}
+
 	async saveProxy(value: string, forgetCredentials = false): Promise<void> {
 		await this.enqueueSettingsSave(async () => {
 			const { settings, communication } = this.services;

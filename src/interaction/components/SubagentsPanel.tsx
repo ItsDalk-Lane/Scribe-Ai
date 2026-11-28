@@ -240,7 +240,7 @@ export default function SubagentsPanel({ controller, conversationId, snapshot, o
 		<ul className="scribe-subagent-list">{agents.map((agent) => {
 			const tone = badgeTone(agent);
 			const parent = agent.parentId && agents.find(({ id }) => id === agent.parentId);
-			return <li key={agent.id} className="scribe-subagent-entry">
+			return <li key={agent.id} className="scribe-subagent-entry" data-can-stop={tone === 'active' || undefined}>
 				<button type="button" className="scribe-subagent-row" data-agent-id={agent.id}
 					onClick={(event) => { onSelect(agent.id, event.currentTarget); setMode('closed'); }}
 					onContextMenu={(event) => { event.preventDefault(); menu(agent, event.currentTarget); }}>
