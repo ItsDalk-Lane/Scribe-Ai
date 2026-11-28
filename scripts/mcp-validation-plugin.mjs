@@ -1,8 +1,11 @@
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+
+const stdioDigest = '298514feae7875117a119a2598b40f2346ef07c30152fa7ad2ffb6cfb51782bc';
 
 export function createMcpValidationPlugin() {
 	return {
-		name: 'mcp-interpreted-schema-validation',
+		name: 'mcp-sdk-safety',
 		setup(build) {
 			build.onLoad({ filter: /[\\/]@modelcontextprotocol[\\/]sdk[\\/]dist[\\/]esm[\\/]client[\\/]index\.js$/ }, async ({ path }) => {
 				const source = await readFile(path, 'utf8');
@@ -15,6 +18,18 @@ export function createMcpValidationPlugin() {
 				return { contents: source
 					.replace(ajvImport, "import { CfWorkerJsonSchemaValidator } from '../validation/cfworker-provider.js';")
 					.replace(ajvDefault, 'new CfWorkerJsonSchemaValidator()'), loader: 'js' };
+			});
+			build.onLoad({ filter: /[\\/]@modelcontextprotocol[\\/]sdk[\\/]dist[\\/]esm[\\/]client[\\/]stdio\.js$/ }, async ({ path }) => {
+				const source = await readFile(path, 'utf8');
+				if (createHash('sha256').update(source).digest('hex') !== stdioDigest) {
+					throw new Error('MCP SDK stdio changed. Recheck its environment inheritance before bundling.');
+				}
+				const defaultsStart = source.indexOf('/**\n * Environment variables to inherit by default');
+				const clientStart = source.indexOf('/**\n * Client transport for stdio');
+				// The SDK merges its defaults at spawn time even when the caller supplies an environment.
+				const contents = (source.slice(0, defaultsStart) + source.slice(clientStart))
+					.replace(/\/\/ merge default env with server env[^\n]*\n\s*env: \{[^}]*\},/, 'env: this._serverParams.env ?? {},');
+				return { contents, loader: 'js' };
 			});
 		},
 	};

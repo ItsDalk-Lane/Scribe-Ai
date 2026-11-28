@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { glob, mkdtemp, rm } from 'node:fs/promises';
+import { createAnthropicResourcesPlugin } from './anthropic-resources-plugin.mjs';
 import { createMcpValidationPlugin } from './mcp-validation-plugin.mjs';
 import { createNodeFetchPlugin } from './node-fetch-plugin.mjs';
 import { createReactDomPlugin } from './react-dom-plugin.mjs';
@@ -27,7 +28,7 @@ try {
 		format: 'cjs',
 		target: 'node22',
 		define: { 'process.env.NODE_ENV': '"production"' },
-		plugins: [createNodeFetchPlugin(), createMcpValidationPlugin(), createReactDomPlugin()],
+		plugins: [createNodeFetchPlugin(), createMcpValidationPlugin(), createReactDomPlugin(), createAnthropicResourcesPlugin()],
 		external: ['obsidian', 'electron', ...builtinModules],
 		outdir,
 		outExtension: { '.js': '.cjs' },

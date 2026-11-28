@@ -145,7 +145,10 @@ export function renderMcpServerForm(app: App, parent: HTMLElement, original: Mcp
 	const args = textarea(local, tr('参数', 'Arguments'), argsOriginal, argsHint);
 	const cwd = input(local, tr('工作目录', 'Working directory'), original.cwd, { wide: true });
 	const env = secretMap(app, local, tr('环境变量', 'Environment variables'), original.secrets?.env, original.secretRefs?.env);
-	const envVars = textarea(local, tr('沿用本机环境变量', 'Use local environment variables'), original.envVars?.join('\n') ?? '', tr('每行填一个变量名。', 'One variable name per line.'));
+	const envVars = textarea(local, tr('沿用本机环境变量', 'Use local environment variables'), original.envVars?.join('\n') ?? '', tr(
+		'默认仅传入启动所需的系统变量。需要额外变量时，每行填写一个名称，例如 HOME。',
+		'Only system variables required for launch are included by default. To pass additional variables, enter one name per line, such as HOME.',
+	));
 	const remote = parent.createDiv({ cls: 'scribe-mcp-fields is-wide' });
 	remote.createEl('p', { cls: 'scribe-mcp-description is-wide', text: tr('调用工具时，对应参数会发给这台服务器。', 'Tool arguments are sent to this server when a tool is called.') });
 	const originalUrl = original.secrets?.url ? original.url?.split('?')[0] : original.url;

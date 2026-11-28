@@ -225,6 +225,38 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:msg.id,result})+'\\n'); })
 	assert.equal((await sse.listTools())[0]?.name, 'echo');
 });
 
+void test('local MCP only inherits the launch environment and explicitly selected variables', { timeout: 5_000 }, async (t) => {
+	const identity = ['HOME', 'USER', 'LOGNAME', 'USERPROFILE', 'USERNAME', 'HOSTNAME', 'APPDATA', 'LOCALAPPDATA'];
+	const configured = ['SCRIBE_MCP_FIXTURE', 'SCRIBE_MCP_TOKEN'];
+	const names = [...identity, ...configured];
+	const saved = names.map((name) => [name, process.env[name]] as const);
+	for (const name of names) process.env[name] = `fixture-${name}`;
+	t.after(() => {
+		for (const [name, value] of saved) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	});
+	const script = `const rl = require('node:readline').createInterface({input:process.stdin});
+rl.on('line', (line) => { const msg = JSON.parse(line); if (msg.id === undefined) return;
+const env = Object.fromEntries(${JSON.stringify(names)}.map((name) => [name, process.env[name]]));
+const result = msg.method === 'initialize' ? ${JSON.stringify(initialize)} : msg.method === 'tools/list' ? {tools:${JSON.stringify(tools)}} :
+{content:[{type:'text',text:JSON.stringify({hasPath: Boolean(process.env.PATH), ...env})}]};
+process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:msg.id,result})+'\\n'); });`;
+	const hasPath = Boolean(process.env.PATH) || process.platform === 'darwin';
+	const tokenVariable = process.platform === 'win32' ? 'scribe_mcp_token' : 'SCRIBE_MCP_TOKEN';
+	for (const explicit of [[], ['HOME', ...configured]]) {
+		const { connection } = connect(t, { type: 'stdio', command: process.execPath, args: ['-e', script], envVars: explicit,
+			secrets: { env: { [tokenVariable]: 'fixture-linked-token' } } });
+		await connection.start();
+		const result = await connection.callTool('echo', {}, new AbortController().signal);
+		assert.deepEqual(JSON.parse(result.content), explicit.length
+			? { hasPath, HOME: 'fixture-HOME', SCRIBE_MCP_FIXTURE: 'fixture-SCRIBE_MCP_FIXTURE', SCRIBE_MCP_TOKEN: '[已隐藏]' }
+			: { hasPath, SCRIBE_MCP_TOKEN: '[已隐藏]' });
+		await connection.close();
+	}
+});
+
 void test('legacy SSE rejects a message endpoint on another origin before sending headers or a request', { timeout: 5_000 }, async (t) => {
 	let outsideRequests = 0;
 	const other = await listen(t, (_request, response) => { outsideRequests++; response.writeHead(202).end(); });

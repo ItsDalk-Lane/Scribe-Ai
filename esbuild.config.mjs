@@ -3,6 +3,7 @@ import process from 'process';
 import { readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { builtinModules } from 'node:module';
+import { createAnthropicResourcesPlugin } from './scripts/anthropic-resources-plugin.mjs';
 import { createMcpValidationPlugin } from './scripts/mcp-validation-plugin.mjs';
 import { createNodeFetchPlugin } from './scripts/node-fetch-plugin.mjs';
 import { createReactDomPlugin } from './scripts/react-dom-plugin.mjs';
@@ -25,7 +26,7 @@ const options = {
 	bundle: true,
 	platform: 'node',
 	define: { 'process.env.NODE_ENV': '"production"' },
-	plugins: [createNodeFetchPlugin(), createReactDomPlugin(), createMcpValidationPlugin()],
+	plugins: [createNodeFetchPlugin(), createReactDomPlugin(), createMcpValidationPlugin(), createAnthropicResourcesPlugin()],
 	external: [
 		'obsidian',
 		'electron',
@@ -64,6 +65,11 @@ if (prod) {
 	}
 	if (inputs.some((path) => /\/node_modules\/(?:ajv|ajv-formats)\//u.test(path)) || /\bnew\s+Function\s*\(/u.test(bundle.text)) {
 		throw new Error('Dynamic schema compilation or code execution in the release bundle.');
+	}
+	const anthropicEnvironment = /(?:^|\/)node_modules\/@anthropic-ai\/sdk\/(?:resources\/beta|lib)\/environments\//u;
+	if (Object.values(result.metafile.outputs).some(({ inputs }) => Object.entries(inputs)
+		.some(([path, { bytesInOutput }]) => bytesInOutput > 0 && anthropicEnvironment.test(path)))) {
+		throw new Error('Unused Anthropic environment resources in the release bundle.');
 	}
 	await writeFile(bundle.path, bundle.contents);
 } else {

@@ -4,7 +4,7 @@ import { delimiter, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { extractWWWAuthenticateParams, UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
-import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { ErrorCode, McpError, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -75,6 +75,21 @@ type RequestScope = { signal: AbortSignal; timeout: number };
 
 const networkFetch: typeof fetch = createNodeFetch(undefined, { timeouts: { firstByteMs: 0, streamIdleMs: 0 } });
 const credentialName = /credential|token|secret|password|passphrase|cookie|authorization|api[-_]?key|access[-_]?key|private[-_]?key/i;
+
+function localMcpEnvironment(inherited: readonly (readonly [string, string | undefined])[], configured?: Record<string, string>): Record<string, string> {
+	const windows = process.platform === 'win32';
+	const keys = windows ? ['SYSTEMROOT', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP'] : [];
+	const path = process.env.PATH;
+	const executablePath = process.platform === 'darwin' ? [path || '/usr/bin:/bin', '/usr/local/bin', '/opt/homebrew/bin'].join(delimiter) : path;
+	const defaultValues = [['PATH', executablePath] as const, ...keys.map((key) => [key, process.env[key]] as const)];
+	const values = new Map<string, string>();
+	const envName = (name: string) => windows ? name.toUpperCase() : name;
+	for (const [name, value] of [...defaultValues, ...inherited]) {
+		if (value !== undefined && !value.startsWith('()')) values.set(envName(name), value);
+	}
+	for (const [name, value] of Object.entries(configured ?? {})) values.set(envName(name), value);
+	return Object.fromEntries(values);
+}
 
 function fragments(values: Array<string | undefined>): string[] {
 	const unique = new Set<string>();
@@ -257,11 +272,8 @@ export function createMcpConnection(options: ConnectionOptions): McpConnection {
 	function makeTransport(onChallenge?: (challenge: McpOAuthChallenge) => void) {
 		if (server.type === 'stdio') {
 			if (!server.command) throw new Error('请输入本地启动命令。');
-			const env = getDefaultEnvironment();
-			if (process.platform === 'darwin') env.PATH = [env.PATH || '/usr/bin:/bin', '/usr/local/bin', '/opt/homebrew/bin'].join(delimiter);
-			for (const [key, value] of envValues) if (value !== undefined && !value.startsWith('()')) env[key] = value;
 			return new StdioClientTransport({ command: server.command, args: restoreMcpArgumentSecrets(server.args, server.secrets?.args),
-				cwd: server.cwd ? resolve(cwd, server.cwd) : cwd, env: { ...env, ...server.secrets?.env }, stderr: 'ignore' });
+				cwd: server.cwd ? resolve(cwd, server.cwd) : cwd, env: localMcpEnvironment(envValues, server.secrets?.env), stderr: 'ignore' });
 		}
 		if (!endpoint) throw new Error('请输入服务器地址。');
 		const url = new URL(endpoint);
