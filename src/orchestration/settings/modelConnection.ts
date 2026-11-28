@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
 import type { ModelService, QueuedModelDestination, RunContext, ScribeSettings } from '../../types';
+import { isTextModel } from './modelAvailability';
+
+export function withPreparedModels<T>(models: Pick<ModelService, 'withPreparedModels'> | undefined, work: () => Promise<T>): Promise<T> {
+	return models?.withPreparedModels?.(work) ?? work();
+}
 
 export function queuedModelDestination({ providerId, model }: RunContext['model'], resolve?: ModelService['modelConnection']): QueuedModelDestination | undefined {
 	const route = resolve?.(providerId, model);
@@ -29,7 +34,7 @@ function connectionKey(settings: ScribeSettings, provider: string, model: string
 }
 
 export function guardModelConnection(
-	settings: ScribeSettings, { providerId, model }: RunContext['model'], resolve?: ModelService['modelConnection'],
+	settings: ScribeSettings, { providerId, model }: RunContext['model'], resolve?: ModelService['modelConnection'], modelType?: ModelService['modelType'],
 ): () => void {
 	const read = () => {
 		const route = resolve?.(providerId, model);
@@ -37,6 +42,9 @@ export function guardModelConnection(
 	};
 	const original = read();
 	return () => {
+		if (!isTextModel(settings, { providerId, model }, modelType)) {
+			throw new Error('所选模型无法处理文字对话，请重新选择。');
+		}
 		if (original !== read()) {
 			throw new Error('运行期间模型连接设置已变更，请重新提交任务。');
 		}

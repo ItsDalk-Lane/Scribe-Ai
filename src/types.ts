@@ -67,7 +67,7 @@ export interface ModelUsageReceipt {
 }
 
 export interface AuxiliaryUsage extends ModelUsageReceipt {
-	kind: 'review' | 'goal-review' | 'summary' | 'video' | 'main-attempt';
+	kind: 'review' | 'goal-review' | 'summary' | 'video' | 'pdf' | 'main-attempt';
 	/** 实时预览与保存回执共用同一次实际请求的标识。 */
 	id?: string;
 }
@@ -200,6 +200,7 @@ export interface QueuedMessage {
 	id: string;
 	request: TaskRequest;
 	destination?: QueuedModelDestination;
+	pdfDestination?: QueuedModelDestination;
 }
 
 export interface QueuedModelDestination {
@@ -371,6 +372,8 @@ export interface ModelRequest {
 	responseSchema?: Record<string, unknown>;
 	/** Explicitly attached to a user message. Binary data is loaded for this request only. */
 	video?: { messageIndex: number; hasFiles: boolean; load: (signal: AbortSignal) => Promise<ModelVideo[]> };
+	/** PDF 原件只随独立解析请求读取和发送。 */
+	pdf?: { messageIndex: number; load: (signal: AbortSignal) => Promise<{ filename: string; data: string }> };
 	images?: {
 		required: boolean;
 		references: ReadonlyMap<number, readonly ImageReference[]>;
@@ -566,6 +569,8 @@ export interface ModelProviderInfo {
 	id: string;
 	label: string;
 	models: ProviderModelInfo[];
+	/** 目录另列的专用模型类型，不能作为聊天模型使用。 */
+	nonChatModelTypes?: ReadonlyMap<string, ConfiguredModelType>;
 	/** 服务商自带的默认地址；模型地址不统一时为空 */
 	baseUrl: string;
 	/** 服务商自带的协议；模型协议不统一时为空 */
@@ -606,10 +611,12 @@ export interface ModelCatalogEvidence {
 
 export interface ModelCatalogResult {
 	models: string[];
-	source: 'provider' | 'pi' | 'bundled';
+	specializedModels?: string[];
+	source: 'provider' | 'docs' | 'pi' | 'models.dev' | 'bundled';
 	details?: ReadonlyMap<string, ModelCatalogDetails>;
 	updatedAt?: string;
 	stale?: true;
+	partial?: true;
 }
 
 export type ModelConnectionIssue = 'unknown-provider' | 'missing-protocol' | 'unsupported-protocol' | 'missing-address' | 'invalid-address' | 'incompatible-address';
@@ -624,8 +631,13 @@ export interface ModelConnection {
 
 export interface ModelService {
 	providers(): ModelProviderInfo[];
+	withPreparedModels?<T>(work: () => Promise<T>): Promise<T>;
+	prepareModel?(this: void, model: Pick<RunContext['model'], 'providerId' | 'model'>, signal?: AbortSignal): Promise<void>;
 	modelConnection(this: void, providerId: string, model: string): ModelConnection;
-	modelCapabilities?(this: void, providerId: string, model: string): { structuredOutput: boolean; tools?: boolean; imageInput?: boolean; videoAnalysis?: VideoSourceKind };
+	modelType?(this: void, providerId: string, model: string): ConfiguredModelType | undefined;
+	modelCapabilities?(this: void, providerId: string, model: string): {
+		structuredOutput: boolean; tools?: boolean; imageInput?: boolean; videoAnalysis?: VideoSourceKind; pdfAnalysis?: boolean;
+	};
 	thinkingOptions(this: void, model: Pick<ModelRequest, 'providerId' | 'model'>, preferred?: string): {
 		levels: string[];
 		level?: string;
@@ -633,7 +645,7 @@ export interface ModelService {
 	modelOrigin?(model: RunContext['model']): string | undefined;
 	contextLimits?(model: RunContext['model']): Pick<ProviderModelInfo, 'contextWindow' | 'maxTokens'> | undefined;
 	login(providerId: string, interaction: AuthInteraction, options?: LoginOptions): Promise<Credential>;
-	listProviderModels(providerId: string, signal?: AbortSignal, sharedPublicCatalog?: Promise<unknown>, sharedPiCatalog?: () => Promise<unknown>): Promise<ModelCatalogResult>;
+	listProviderModels(providerId: string, signal?: AbortSignal): Promise<ModelCatalogResult>;
 	/** 自建/本地服务商：直接向它的 /models 查询模型清单 */
 	listCustomModels(providerId: string, baseUrl: string, signal?: AbortSignal): Promise<Omit<ModelCatalogResult, 'source'> & { baseUrl: string }>;
 	/** 用量回调更新当前尝试的累计快照，同一次请求的多次回调只保留最新值。 */
@@ -753,7 +765,7 @@ export type MainConversationEntry =
 	| { type: 'history-summary'; taskId: string; summary: HistorySummary }
 	| { type: 'run-summary'; taskId: string; summary: RunSummary }
 	| { type: 'prompt-context'; taskId: string; checkpoint: import('./orchestration/context/promptContext').PromptCheckpoint }
-	| { type: 'video-item'; taskId: string; item: SavedVideoItem }
+	| { type: 'video-item' | 'pdf-item'; taskId: string; item: SavedMediaAnalysisItem }
 	| { type: 'video-analysis'; taskId: string; content: string; sources?: VideoSourceKind[] }
 	| { type: 'context-compaction'; taskId: string; compaction: ContextCompaction }
 	| { type: 'auxiliary-usage'; taskId: string; usage: AuxiliaryUsage }
@@ -769,7 +781,7 @@ export interface RunSummary {
 	text: string;
 }
 
-export interface SavedVideoItem {
+export interface SavedMediaAnalysisItem {
 	key: string;
 	content: string;
 }
@@ -788,9 +800,10 @@ export interface SavedRun {
 	historySummary?: HistorySummary;
 	runSummary?: RunSummary;
 	promptCheckpoints?: import('./orchestration/context/promptContext').PromptCheckpoint[];
-	videoItems?: SavedVideoItem[];
+	videoItems?: SavedMediaAnalysisItem[];
 	videoAnalysis?: string;
 	videoAnalysisSources?: VideoSourceKind[];
+	pdfItems?: SavedMediaAnalysisItem[];
 }
 
 export interface SubagentRole {
@@ -941,7 +954,7 @@ export interface SideChat {
 	submit(draft: Pick<TaskRequest, 'instruction' | 'chatQuotes' | 'skillMentions' | 'skillScope' | 'skillNotePaths' | 'imageSourcePath'> & {
 		refs?: NoteRef[]; model?: RunContext['model']; queued?: { destination?: QueuedModelDestination };
 	}, observer?: RunObserver): {
-		taskId: string; request: TaskRequest; model: SavedRun['model']; result: Promise<RunState>;
+		taskId: string; request: TaskRequest; model: SavedRun['model']; prepared?: Promise<void>; result: Promise<RunState>;
 	};
 	stop(): void;
 	close(): void;
@@ -981,6 +994,7 @@ export interface RunContext {
 	plan?: import('./tools/planTools').RunPlanTools;
 	mcpRun?: McpRun;
 	videoAnalysis?: { sources: readonly VideoSourceKind[]; read(): Promise<string> };
+	pdfAnalysis?: () => Promise<string>;
 	manualSummary?: string;
 	skillRun?: SkillRun;
 	subagents?: SubagentToolAccess;
@@ -1109,6 +1123,7 @@ export interface ScribeSettings {
 	media?: import('./orchestration/settings/mediaSettings').MediaSettings;
 	videoModel?: Pick<ModelRequest, 'providerId' | 'model'>;
 	videoLinkModel?: ScribeSettings['videoModel'] | null;
+	pdfModel?: Pick<ModelRequest, 'providerId' | 'model'>;
 	skillSettings?: SkillSettings;
 	subagents?: SubagentSettings;
 	slashPresets?: Array<{ label: string; content: string } | null>;

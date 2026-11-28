@@ -25,7 +25,9 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 	private skillPage?: SkillPageHandle;
 	private instructionsEditor?: CustomInstructionsEditor;
 	private mcpDispose?: () => void;
+	private modelsController?: AbortController;
 	private servicesDispose?: () => void;
+	private settingsContainer?: HTMLElement;
 	private settingDescriptionsDispose?: () => void;
 
 	constructor(
@@ -33,7 +35,10 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		private plugin: ScribeAiPlugin,
 	) {
 		super(app, plugin);
-		plugin.register(() => this.instructionsEditor?.dispose());
+		plugin.register(() => {
+			this.disposeModels();
+			this.instructionsEditor?.dispose();
+		});
 	}
 
 	override getSettingDefinitions(): SettingDefinitionItem[] {
@@ -45,7 +50,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 				text.generalTab, text.chatLocation, text.confirmChatRemoval,
 				text.personalizationTab, text.customInstructions, tr('长期记忆', 'Long-term memory'),
 				text.modelsTab, text.models, tr('模型服务商', 'Model providers'),
-				tr('服务', 'Services'), tr('视频解析', 'Video analysis'), tr('网页搜索', 'Web search'), tr('上下文压缩', 'Context compression'),
+				tr('服务', 'Services'), tr('视频解析', 'Video analysis'), tr('PDF 解析', 'PDF analysis'), tr('网页搜索', 'Web search'), tr('上下文压缩', 'Context compression'),
 				tr('技能', 'Skills'), subagents.tab, subagents.roles, 'MCP',
 				text.advancedTab, text.proxyUrl, text.fullAccessApprovalSetting, text.dataDirectory, text.clearCache,
 				tr('当前插件版本', 'Current plugin version'),
@@ -55,7 +60,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 				const content = controlEl.createDiv();
 				this.renderSettings(content);
 				return () => {
-					this.disposeSettings();
+					if (this.settingsContainer === content) this.disposeSettings();
 					content.remove();
 				};
 			},
@@ -69,6 +74,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 
 	private renderSettings(containerEl: HTMLElement): void {
 		this.disposeSettings();
+		this.settingsContainer = containerEl;
 		containerEl.empty();
 		this.settingDescriptionsDispose = watchSettingDescriptions(containerEl);
 
@@ -78,6 +84,7 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		const servicesTab = tr('服务', 'Services');
 		const subagentsTab = subagentSettingsText().tab;
 		const rendered = new Set<SettingsSection>();
+		const openModelProviders = new Set<string>();
 		const tabList = containerEl.createDiv({
 			cls: 'scribe-settings-tabs',
 			attr: { role: 'tablist', 'aria-label': `${text.generalTab} / ${text.personalizationTab} / ${text.modelsTab} / ${servicesTab} / ${skillsTab} / ${subagentsTab} / MCP / ${text.advancedTab}` },
@@ -189,7 +196,8 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		};
 
 		const renderModels = () => {
-			renderModelSettings(this.app, panels.models, this.plugin, text);
+			this.modelsController = new AbortController();
+			renderModelSettings(this.app, panels.models, this.plugin, text, openModelProviders, this.modelsController.signal);
 		};
 		const editInstructions = () => {
 			if (this.instructionsEditor) return;
@@ -244,6 +252,11 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 		};
 		void this.plugin.services.orchestration.skills.library.list().then((skills) => updateSkillWarning(skills.filter((s) => s.error).length)).catch(() => {});
 		const activate = (section: SettingsSection, focus = false) => {
+			if (this.activeSection === 'models' && section !== 'models') {
+				this.disposeModels();
+				panels.models.empty();
+				rendered.delete('models');
+			}
 			if (this.activeSection === 'services' && section !== 'services') {
 				this.servicesDispose?.();
 				this.servicesDispose = undefined;
@@ -303,14 +316,23 @@ export class ScribeAiSettingTab extends PluginSettingTab {
 	}
 
 	private disposeSettings(): void {
+		this.settingsContainer = undefined;
 		this.skillPage?.dispose();
 		this.skillPage = undefined;
 		this.mcpDispose?.();
 		this.mcpDispose = undefined;
+		this.disposeModels();
 		this.servicesDispose?.();
 		this.servicesDispose = undefined;
 		this.settingDescriptionsDispose?.();
 		this.settingDescriptionsDispose = undefined;
+	}
+
+	private disposeModels(): void {
+		if (!this.modelsController) return;
+		this.modelsController.abort();
+		this.modelsController = undefined;
+		this.plugin.services.communication.modelCatalog.clearSettings();
 	}
 
 	override hide(): void {

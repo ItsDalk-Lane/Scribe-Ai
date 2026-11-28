@@ -15,6 +15,12 @@ export function chatModelKey(providerId: string, model: string): string {
 	return JSON.stringify([providerId, model]);
 }
 
+export function chatReasoningForRequest(thinking: { levels: readonly string[]; level?: string }, preferred?: string): string | null | undefined {
+	if (preferred === 'off') return null;
+	const level = thinking.level ?? preferred;
+	return level === 'off' || (level === undefined && thinking.levels[0] === 'off') ? null : level;
+}
+
 export function updateChatThinking(
 	settings: ScribeSettings,
 	selection: Pick<ScribeSettings, 'providerId' | 'model'> & { thinkingLevel?: string },
@@ -22,7 +28,9 @@ export function updateChatThinking(
 ): ScribeSettings['thinkingByModel'] {
 	const key = chatModelKey(selection.providerId, selection.model);
 	const current = settings.thinkingByModel[key];
-	const level = options(selection, selection.thinkingLevel ?? current).level;
+	const preferred = selection.thinkingLevel ?? current;
+	const thinking = options(selection, preferred);
+	const level = thinking.level ?? (!thinking.levels.length && isThinkingLevel(preferred) ? preferred : undefined);
 	if (level === current) return settings.thinkingByModel;
 	const values = { ...settings.thinkingByModel };
 	if (level) values[key] = level;

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type ScribeAiPlugin from '../main';
-import type { ModelProviderInfo, RunContext, ScribeSettings } from '../types';
+import type { ModelProviderInfo, ModelService, RunContext, ScribeSettings } from '../types';
 import { isModelAvailable, isProviderEnabled } from '../orchestration/settings/modelAvailability';
-import { chatModelKey } from '../orchestration/settings/thinking';
+import { chatModelKey, chatReasoningForRequest } from '../orchestration/settings/thinking';
 import type { ThinkingSelection } from './components/ThinkingSlider';
 
 export interface ChatModelGroup {
@@ -16,15 +16,20 @@ export function chatModelOptions(
 	providers: () => readonly (Pick<ModelProviderInfo, 'id' | 'label'> & Partial<Pick<ModelProviderInfo, 'models'>>)[],
 	preferred?: Pick<ScribeSettings, 'providerId' | 'model'>,
 	imageInput?: (providerId: string, model: string) => boolean | undefined,
+	modelType?: ModelService['modelType'],
 ) {
-	const configured = Object.entries(settings.providerModels).filter(([id]) => isProviderEnabled(settings, id));
+	const configured = Object.entries(settings.providerModels).flatMap(([providerId, models]) => {
+		if (!isProviderEnabled(settings, providerId)) return [];
+		const eligible = [...new Set(models)].filter((model) => isModelAvailable(settings, { providerId, model }, modelType));
+		return eligible.length || !models.length ? [{ providerId, models: eligible }] : [];
+	});
 	const catalog = new Map(configured.length ? providers().map((provider) => [provider.id, provider]) : []);
 	const displayLabels = new Map<string, number>();
-	const groups: ChatModelGroup[] = configured.map(([id, models]) => {
+	const groups: ChatModelGroup[] = configured.map(({ providerId: id, models }) => {
 		const provider = catalog.get(id);
 		const label = settings.communication.providerNames[id] ?? settings.customProviders[id]?.label ?? provider?.label ?? id;
 		displayLabels.set(label, (displayLabels.get(label) ?? 0) + 1);
-		return { id, label, models: [...new Set(models)].map((model) => ({
+		return { id, label, models: models.map((model) => ({
 			id: model, value: chatModelKey(id, model), vision: imageInput?.(id, model)
 				?? provider?.models?.find((entry) => entry.id === model)?.input.includes('image'),
 		})) };
@@ -32,7 +37,7 @@ export function chatModelOptions(
 	for (const group of groups) {
 		if ((displayLabels.get(group.label) ?? 0) > 1) group.label = `${group.label} · ${group.id}`;
 	}
-	const selection = preferred && isModelAvailable(settings, preferred) ? preferred : settings;
+	const selection = preferred && isModelAvailable(settings, preferred, modelType) ? preferred : settings;
 	const active = chatModelKey(selection.providerId, selection.model);
 	const value = groups.some(({ models }) => models.some((model) => model.value === active)) ? active : '';
 	return { groups, active, value, selection };
@@ -42,37 +47,39 @@ export function useChatModel(plugin: ScribeAiPlugin, initialModel?: RunContext['
 	const { settings, communication } = plugin.services;
 	const read = useCallback((preferred?: RunContext['model']) => {
 		const options = chatModelOptions(settings, () => communication.models.providers(), preferred,
-			(id, model) => communication.models.modelCapabilities?.(id, model).imageInput);
+			(id, model) => communication.models.modelCapabilities?.(id, model).imageInput, communication.models.modelType);
 		const { providerId, model } = options.selection;
 		const effort = options.selection === preferred ? preferred.reasoning : undefined;
 		const storedLevel = effort === null ? 'off' : effort ?? settings.thinkingByModel[options.value];
 		const thinking: ThinkingSelection = options.value
 			? communication.models.thinkingOptions({ providerId, model }, storedLevel)
 			: { levels: [] };
-		const choice = options.value ? { providerId, model, reasoning: thinking.level ?? null } : undefined;
-		return { ...options, thinking, choice };
+		const preference = options.value ? { providerId, model, reasoning: effort } : undefined;
+		const choice = preference && { ...preference, reasoning: chatReasoningForRequest(thinking, storedLevel) };
+		return { ...options, thinking, choice, preference };
 	}, [communication, settings]);
 	const [options, setOptions] = useState(() => read(scoped ? initialModel : undefined));
-	const localChoice = useRef<RunContext['model'] | undefined>(options.choice);
+	const localChoice = useRef<RunContext['model'] | undefined>(options.preference);
 	const [saving, setSaving] = useState<'model' | 'thinking' | null>(null);
 	const pending = useRef<'model' | 'thinking' | null>(null);
 	const latestLevel = useRef<string | undefined>(undefined);
 	const [preview, setPreview] = useState<{ key: string; level: string } | null>(null);
 	const sync = useCallback(() => {
 		const next = read(scoped ? localChoice.current : undefined);
-		if (scoped && next.choice) localChoice.current = next.choice;
+		if (scoped && next.preference) localChoice.current = next.preference;
 		setOptions(next);
 	}, [read, scoped]);
 
 	useEffect(() => {
-		const unsubscribe = plugin.subscribeSettings(sync);
+		const unsubscribeSettings = plugin.subscribeSettings(sync);
+		const unsubscribeCatalog = communication.modelCatalog.subscribeProtocols(sync);
 		sync();
-		return unsubscribe;
-	}, [plugin, sync]);
+		return () => { unsubscribeSettings(); unsubscribeCatalog(); };
+	}, [communication, plugin, sync]);
 
 	function refreshSelection() {
 		const { providerId, model } = scoped ? localChoice.current ?? settings : settings;
-		const configured = isModelAvailable(settings, { providerId, model });
+		const configured = isModelAvailable(settings, { providerId, model }, communication.models.modelType);
 		if (options.active === chatModelKey(providerId, model) && Boolean(options.value) === configured) return true;
 		sync();
 		return false;
@@ -115,7 +122,7 @@ export function useChatModel(plugin: ScribeAiPlugin, initialModel?: RunContext['
 			while (true) {
 				await plugin.saveSettings({ providerId, model, thinkingLevel: next, keepDefault: scoped });
 				if (scoped) {
-					localChoice.current = { providerId, model, reasoning: next };
+					localChoice.current = { providerId, model, reasoning: next === 'off' ? null : next };
 					sync();
 				}
 				if (!latestLevel.current || latestLevel.current === next) break;

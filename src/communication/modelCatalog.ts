@@ -1,7 +1,8 @@
 import { PI_AI_VERSION } from '@earendil-works/pi-ai';
-import type { ModelCatalogDetails, ModelCatalogEvidence, ModelCatalogField, ModelCatalogResult, ProviderModelInfo, Transport } from '../types';
+import type { ModelCatalogDetails, ModelCatalogEvidence, ModelCatalogField, ModelCatalogModelType, ModelCatalogResult, ProviderModelInfo, Transport } from '../types';
 import { openCodeCatalogProtocol } from './openCodeModels';
 import { addProviderCapabilityEvidence } from './providerCapabilityEvidence';
+import { isVolcengineSubscriptionProvider } from './extraProviders';
 
 // 只为实际使用同一服务地址的目录补充别名。
 const MODELS_DEV_PROVIDERS: ReadonlyMap<string, string> = new Map([
@@ -25,6 +26,7 @@ const MODELS_DEV_PROVIDERS: ReadonlyMap<string, string> = new Map([
 interface CatalogRow {
 	api?: unknown;
 	baseUrl?: unknown;
+	provider?: unknown;
 	recommended_api?: unknown;
 	id?: unknown;
 	name?: unknown;
@@ -43,6 +45,7 @@ interface CatalogRow {
 	model_picker_enabled?: unknown;
 	policy?: { state?: unknown };
 	archived?: unknown;
+	status?: unknown;
 	supports_image_in?: unknown;
 	supports_video_in?: unknown;
 	supports_reasoning?: unknown;
@@ -90,6 +93,7 @@ interface CatalogPage {
 	next_page_token?: string;
 	links?: { next?: string | null };
 	total_count?: number;
+	success?: boolean;
 	result?: CatalogRow[];
 	result_info?: { page?: number; per_page?: number; total_pages?: number; total_count?: number };
 	modelSummaries?: CatalogRow[];
@@ -139,21 +143,70 @@ function modelModalities(row: CatalogRow) {
 	};
 }
 
-const NON_CHAT_TYPES = new Set([
-	'audio', 'asr', 'classification', 'classifier', 'decision', 'embedding', 'evaluation', 'extraction', 'image', 'imagegeneration',
-	'moderation', 'realtime', 'rerank', 'reranking', 'speech', 'transcribe', 'transcription', 'tts', 'video', 'videogeneration', '3dgeneration',
+const CATALOG_MODEL_TYPES: Record<string, ModelCatalogModelType> = {
+	text: 'text', chat: 'text', language: 'text', llm: 'text', vlm: 'text', code: 'text',
+	'text-generation': 'text', 'text-completion': 'text',
+	image: 'image', imagegeneration: 'image', 'image-generation': 'image', 'text-to-image': 'image', 'image-to-image': 'image',
+	video: 'video', videogeneration: 'video', 'video-generation': 'video', 'text-to-video': 'video', 'image-to-video': 'video',
+	audio: 'audio', speech: 'audio', realtime: 'audio',
+	tts: 'speech-synthesis', 'text-to-speech': 'speech-synthesis', 'speech-synthesis': 'speech-synthesis',
+	asr: 'speech-recognition', transcribe: 'speech-recognition', transcription: 'speech-recognition',
+	'speech-to-text': 'speech-recognition', 'speech-recognition': 'speech-recognition',
+	embedding: 'embedding', embeddings: 'embedding', 'text-embedding': 'embedding', 'text-embeddings': 'embedding',
+	rerank: 'rerank', reranking: 'rerank', 're-ranking': 'rerank',
+	other: 'other', classification: 'other', classifier: 'other', decision: 'other', evaluation: 'other', extraction: 'other',
+	moderation: 'other', '3d-generation': 'other', '3dgeneration': 'other',
+};
+
+// https://mimo.mi.com/docs/zh-CN/quick-start/summary/model
+const MIMO_SPEECH_MODELS: ReadonlyMap<string, ModelCatalogModelType> = new Map([
+	['mimo-v2.5-asr', 'speech-recognition'], ['mimo-v2.5-tts', 'speech-synthesis'],
+	['mimo-v2.5-tts-voiceclone', 'speech-synthesis'], ['mimo-v2.5-tts-voicedesign', 'speech-synthesis'],
 ]);
 
+// https://developers.cloudflare.com/workers-ai/models/
+const CLOUDFLARE_TASK_TYPES: ReadonlyMap<string, ModelCatalogModelType> = new Map([
+	['text generation', 'text'], ['image to text', 'text'], ['text embeddings', 'embedding'],
+	['automatic speech recognition', 'speech-recognition'], ['text to speech', 'speech-synthesis'], ['text to image', 'image'],
+	['text classification', 'other'], ['image classification', 'other'], ['object detection', 'other'],
+	['voice activity detection', 'other'], ['summarization', 'other'], ['translation', 'other'],
+]);
+
+function cloudflareTask(row: CatalogRow): string {
+	const name = typeof row.task === 'string' ? row.task : row.task?.name;
+	return typeof name === 'string' ? name.trim().toLowerCase().replace(/[_-]+/gu, ' ') : '';
+}
+
+/** 类型来自服务商目录或已核对的官方模型资料。 */
+function catalogModelType(row: CatalogRow, providerId = ''): ModelCatalogModelType | undefined {
+	// The TypeSafe directory only lists models for its System One classification API.
+	if (providerId === 'typesafe') return 'other';
+	if (providerId === 'vercel-ai-gateway' && row.type === 'speech') return 'speech-synthesis';
+	let type: ModelCatalogModelType | undefined;
+	for (const raw of [row.type, row.model_type, row.domain]) {
+		if (typeof raw !== 'string') continue;
+		const normalized = raw.trim().toLowerCase().replace(/[\s_]+/gu, '-').replace(/-+/gu, '-');
+		if (!Object.prototype.hasOwnProperty.call(CATALOG_MODEL_TYPES, normalized)) continue;
+		const candidate = CATALOG_MODEL_TYPES[normalized];
+		if (!type || type === 'audio' && (candidate === 'speech-synthesis' || candidate === 'speech-recognition')) type = candidate;
+	}
+	if ((!type || type === 'audio') && (providerId === 'xiaomi' || providerId.startsWith('xiaomi-token-plan-'))) {
+		return MIMO_SPEECH_MODELS.get(catalogId(row)) ?? type;
+	}
+	if (providerId.startsWith('cloudflare-')) return type ?? CLOUDFLARE_TASK_TYPES.get(cloudflareTask(row));
+	return type;
+}
+
 function isChatModel(row: CatalogRow, id: string, providerId: string, nonChat?: ReadonlySet<string>): boolean {
-	const type = [row.type, row.model_type, row.domain].find((value): value is string => typeof value === 'string')?.toLowerCase();
-	if (type && NON_CHAT_TYPES.has(type)) return false;
+	const catalogType = catalogModelType(row, providerId);
+	if (catalogType && catalogType !== 'text') return false;
 	if (row.enabled === false) return false;
 	if (row.archived === true || row.responseStreamingSupported === false) return false;
 	if (catalogFlag(row.capabilities?.completion_chat ?? row.capabilities?.chat_completion) === false) return false;
 	if (providerId === 'github-copilot' && (row.policy?.state === 'disabled' || (row.model_picker_enabled === false && row.policy?.state !== 'enabled'))) return false;
 	if (providerId.startsWith('cloudflare-')) {
-		const task = typeof row.task === 'string' ? row.task : row.task?.name;
-		if (typeof task === 'string' && !['text generation', 'image-to-text'].includes(task.toLowerCase())) return false;
+		const task = cloudflareTask(row);
+		if (task && !['text generation', 'image to text'].includes(task)) return false;
 		const formats = catalogStrings(row.request_formats);
 		if (formats?.length && !formats.some((format) => ['chat-completions', 'responses', 'messages', 'generate-content'].includes(format))) return false;
 	}
@@ -168,7 +221,7 @@ function isChatModel(row: CatalogRow, id: string, providerId: string, nonChat?: 
 	if (providerId === 'groq' && /^(?:whisper-|canopylabs\/orpheus-|playai-tts)/i.test(id)) return false;
 	if (providerId === 'nvidia' && (/(?:^|[-/])embed(?:ding|qa)?(?:[-/]|$)/i.test(id)
 		|| ['nvidia/nvclip', 'fastino/gliner2-pii', 'nvidia/ai-synthetic-video-detector'].includes(id))) return false;
-	if (type && ['chat', 'language', 'llm', 'vlm', 'code', 'text-generation'].includes(type)) return true;
+	if (catalogType === 'text') return true;
 	if (nonChat?.has(id)) return false;
 	const { input, output } = modelModalities(row);
 	return (!input?.length || input.includes('text')) && (!output?.length || output.includes('text'));
@@ -194,6 +247,7 @@ function readCatalogDetails(row: CatalogRow, providerId: string): ModelCatalogDe
 		?? (parameters?.includes('response_format') ? true : undefined);
 	const reasoning = caps?.reasoning as { effort?: unknown } | undefined;
 	const fields: ModelCatalogDetails = {
+		type: catalogModelType(row, providerId),
 		contextWindow: positiveInteger(row.top_provider?.context_length, row.context_length, row.inputTokenLimit, row.max_input_tokens,
 			row.contextWindow, row.context_window, row.max_context_length, row.token_limits?.context_window, row.limit?.context),
 		maxTokens: positiveInteger(row.top_provider?.max_completion_tokens, row.outputTokenLimit, row.max_tokens,
@@ -313,6 +367,11 @@ const documentedStructuredOutput = new Map<string, readonly string[]>([
 ]);
 
 export function documentedModelDetails(providerId: string): ReadonlyMap<string, ModelCatalogDetails> {
+	if (isVolcengineSubscriptionProvider(providerId)) {
+		return sourceModelCatalogDetails(new Map([
+			['doubao-embedding-vision', { type: 'embedding', contextWindow: 128_000, inputModalities: ['text', 'image', 'video'] }],
+		]), 'docs', '2026-11-28');
+	}
 	const details = new Map<string, ModelCatalogDetails>();
 	for (const id of documentedStructuredOutput.get(providerId) ?? []) details.set(id, { ...details.get(id), structuredOutput: true });
 	addProviderCapabilityEvidence(providerId, details);
@@ -365,7 +424,7 @@ export function documentedRouteDetails(providerId: string, model: string, api: s
 	return undefined;
 }
 
-async function fetchCatalogJson(fetch: Transport['fetch'], url: URL, headers: HeadersInit, signal: AbortSignal): Promise<unknown> {
+export async function fetchCatalogJson(fetch: Transport['fetch'], url: URL, headers: HeadersInit, signal: AbortSignal): Promise<unknown> {
 	const response = await fetch(url, { headers, signal });
 	if (!response.ok) {
 		await response.body?.cancel();
@@ -384,11 +443,15 @@ export function readProviderCatalog(json: unknown): ModelCatalogResult {
 	const page = json as CatalogPage | null;
 	const rows = catalogRows(page);
 	const details = new Map<string, ModelCatalogDetails>();
+	const models = new Set<string>();
 	for (const row of rows) {
 		const id = catalogId(row);
-		if (id && isChatModel(row, id, '')) addCatalogRow(details, id, row);
+		if (!id) continue;
+		const chat = isChatModel(row, id, '');
+		if (chat) models.add(id);
+		if (chat || catalogModelType(row) !== undefined) addCatalogRow(details, id, row);
 	}
-	return { models: [...details.keys()], source: 'provider', details };
+	return { models: [...models], source: 'provider', details };
 }
 
 function catalogRows(page: CatalogPage | null, providerId = ''): CatalogRow[] {
@@ -407,6 +470,7 @@ export async function fetchModelList(
 	// 百炼等目录会拒绝缺少客户端标识的请求。
 	if (!requestHeaders.has('user-agent')) requestHeaders.set('user-agent', 'Scribe-Ai');
 	const details = new Map<string, ModelCatalogDetails>();
+	const models = new Set<string>();
 	const visited = new Set<string>();
 	let current = new URL(url);
 	let returned = 0;
@@ -416,11 +480,15 @@ export async function fetchModelList(
 		if (visited.has(current.href)) throw new Error('Model catalog pagination repeated a page');
 		visited.add(current.href);
 		const page = await fetchCatalogJson(fetch, current, requestHeaders, signal) as CatalogPage | null;
+		if (providerId === 'bailian-payg' && page?.success === false) throw new Error('Bailian rejected the model catalog request');
 		const rows = catalogRows(page, providerId);
 		returned += rows.length;
 		for (const row of rows) {
 			const id = catalogId(row).replace(/^(?:publishers\/google\/)?models\//u, '');
-			if (id && isChatModel(row, id, providerId, nonChat)) addCatalogRow(details, id, row, providerId);
+			if (!id) continue;
+			const chat = isChatModel(row, id, providerId, nonChat);
+			if (chat) models.add(id);
+			if (chat || catalogModelType(row, providerId) !== undefined) addCatalogRow(details, id, row, providerId);
 		}
 		const nextLink = page?.links?.next;
 		if (typeof nextLink === 'string' && nextLink) {
@@ -456,8 +524,9 @@ export async function fetchModelList(
 			current.searchParams.set('after_id', cursor);
 			continue;
 		}
-		if (typeof page?.total_count === 'number' && returned < page.total_count) throw new Error('Model catalog returned an incomplete list');
-		return { models: [...details.keys()], source: 'provider', details };
+		const reportedTotal = workspace?.total ?? page?.total_count;
+		if (typeof reportedTotal === 'number' && returned < reportedTotal) throw new Error('Model catalog returned an incomplete list');
+		return { models: [...models], source: 'provider', details };
 	}
 	throw new Error('Model catalog has too many pages');
 }
@@ -468,28 +537,52 @@ export async function fetchModelsDevCatalog(fetch: Transport['fetch'], signal: A
 	return data;
 }
 
-export function modelsDevDetails(providerId: string, data: unknown, connection: {
+type CatalogConnection = {
 	baseUrl: string; protocol: string; models: readonly Pick<ProviderModelInfo, 'id' | 'api' | 'baseUrl'>[];
-}, checkedAt?: string): ReadonlyMap<string, ModelCatalogDetails> {
-	const providers = data as Record<string, { api?: string; models?: Record<string, CatalogRow | null> }> | undefined;
+};
+
+const publicCatalogProtocols: ReadonlyMap<string, string> = new Map([
+	['@ai-sdk/openai-compatible', 'openai-completions'],
+	['@openrouter/ai-sdk-provider', 'openai-completions'],
+	['@ai-sdk/anthropic', 'anthropic-messages'],
+	['@ai-sdk/google', 'google-generative-ai'],
+]);
+
+function normalizeCatalogAddress(address: string): string {
+	return address.replace(/\/+$/u, '').replace(/\$\{/gu, '{');
+}
+
+export function readModelsDevCatalog(providerId: string, data: unknown, connection: CatalogConnection, checkedAt?: string) {
+	const providers = data as Record<string, { api?: string; npm?: string; models?: Record<string, CatalogRow | null> }> | undefined;
 	const provider = providers?.[MODELS_DEV_PROVIDERS.get(providerId) ?? providerId];
 	const details = new Map<string, ModelCatalogDetails>();
+	const models: string[] = [];
+	const specializedModels: string[] = [];
 	const routes = new Map(connection.models.map((model) => [model.id, model]));
-	const normalize = (address: string) => address.replace(/\/$/u, '').replace(/\$\{/gu, '{');
+	const publicProtocol = provider?.npm && publicCatalogProtocols.get(provider.npm);
+	const publicAddress = typeof provider?.api === 'string' ? normalizeCatalogAddress(provider.api) : undefined;
 	for (const [id, row] of Object.entries(provider?.models ?? {})) {
 		const route = routes.get(id);
 		const baseUrl = route?.baseUrl || connection.baseUrl;
 		if (!baseUrl) continue;
+		const address = normalizeCatalogAddress(baseUrl);
+		const protocol = route?.api ?? connection.protocol;
 		const sharedRouterCatalog = providerId === 'openrouter' && provider?.api === 'https://openrouter.ai/api/v1'
-			&& route?.api === 'anthropic-messages' && normalize(baseUrl) === 'https://openrouter.ai/api';
-		const messagesVersion = (route?.api ?? connection.protocol) === 'anthropic-messages'
-			&& typeof provider?.api === 'string' && normalize(provider.api) === normalize(baseUrl) + '/v1';
-		if (!sharedRouterCatalog && !messagesVersion && typeof provider?.api === 'string' && normalize(provider.api) !== normalize(baseUrl)) continue;
+			&& route?.api === 'anthropic-messages' && address === 'https://openrouter.ai/api';
+		const messagesVersion = protocol === 'anthropic-messages' && publicAddress === address + '/v1';
+		const exactAddress = address === publicAddress || messagesVersion;
+		if (!sharedRouterCatalog && publicAddress !== undefined && !exactAddress) continue;
+		if (!sharedRouterCatalog && exactAddress && publicProtocol && protocol && publicProtocol !== protocol) continue;
 		// Parallel protocols of a gateway can expose different features on the same host.
 		if (!sharedRouterCatalog && typeof provider?.api === 'string' && !connection.protocol && route?.api !== 'openai-completions'
 			&& !(providerId === 'openrouter' && !route)) continue;
 		if (!row || typeof row !== 'object') continue;
-		addCatalogRow(details, id, row);
+		addCatalogRow(details, id, row, providerId);
+		if (exactAddress && publicProtocol === protocol && row.status !== 'deprecated' && row.archived !== true && row.enabled !== false) {
+			const type = catalogModelType(row, providerId);
+			if (type && type !== 'text') specializedModels.push(id);
+			else if ((type === 'text' || modelModalities(row).output?.includes('text')) && isChatModel(row, id, providerId)) models.push(id);
+		}
 		if (providerId === 'fireworks' && route?.api === 'openai-completions' && row.structured_output === true) {
 			// The documented Fireworks Chat capability uses a JSON Schema, on this route only.
 			// https://docs.fireworks.ai/structured-responses/structured-response-formatting
@@ -502,62 +595,50 @@ export function modelsDevDetails(providerId: string, data: unknown, connection: 
 				structuredOutput: undefined });
 		}
 	}
-	return sourceModelCatalogDetails(details, 'models.dev', checkedAt);
+	return { models, specializedModels, source: 'models.dev' as const, details: sourceModelCatalogDetails(details, 'models.dev', checkedAt) };
 }
 
-export function readStoredModelDetails(value: unknown): ModelCatalogDetails {
-	if (!value || typeof value !== 'object') return {};
-	const row = value as ModelCatalogDetails;
-	const fields: ModelCatalogDetails = {
-		connectionProtocol: typeof row.connectionProtocol === 'string' ? row.connectionProtocol : undefined,
-		contextWindow: positiveInteger(row.contextWindow),
-		maxTokens: positiveInteger(row.maxTokens),
-		reasoning: catalogFlag(row.reasoning),
-		tools: catalogFlag(row.tools),
-		structuredOutput: catalogFlag(row.structuredOutput),
-		jsonOutput: catalogFlag(row.jsonOutput),
-		thinkingLevels: catalogStrings(row.thinkingLevels),
-		reportedThinkingLevels: catalogStrings(row.reportedThinkingLevels),
-		inputModalities: catalogStrings(row.inputModalities),
-		videoInput: catalogFlag(row.videoInput),
-		outputModalities: catalogStrings(row.outputModalities),
-	};
-	const evidence: ModelCatalogDetails['evidence'] = {};
-	for (const field of catalogFields(fields)) {
-		const entry = row.evidence?.[field];
-		if (entry && Object.prototype.hasOwnProperty.call(evidenceRanks, entry.source)) {
-			evidence[field] = { source: entry.source,
-				...(typeof entry.checkedAt === 'string' && { checkedAt: entry.checkedAt }),
-				...(entry.conflict === true && { conflict: true }),
-			};
-		}
-	}
-	const clean: ModelCatalogDetails = Object.fromEntries(Object.entries(fields).filter(([, field]) => field !== undefined));
-	if (Object.keys(evidence).length) clean.evidence = evidence;
-	return clean;
-}
-
-export async function fetchPiModelCatalog(providerId: string, fetch: Transport['fetch'], signal: AbortSignal): Promise<ModelCatalogResult> {
+export async function fetchPiModelCatalog(providerId: string, fetch: Transport['fetch'], signal: AbortSignal,
+	connection: CatalogConnection): Promise<ModelCatalogResult> {
 	const url = new URL(`https://pi.dev/api/models/providers/${encodeURIComponent(providerId)}`);
 	url.searchParams.set('pi-version', PI_AI_VERSION);
-	return readPiModelCatalog(await fetchCatalogJson(fetch, url, { accept: 'application/json' }, signal), providerId);
+	return readPiModelCatalog(await fetchCatalogJson(fetch, url, { accept: 'application/json' }, signal), providerId, connection);
 }
 
-export function fetchPiCatalog(fetch: Transport['fetch'], signal: AbortSignal): Promise<unknown> {
-	const url = new URL('https://pi.dev/api/models');
-	url.searchParams.set('pi-version', PI_AI_VERSION);
-	return fetchCatalogJson(fetch, url, { accept: 'application/json' }, signal);
-}
-
-export function readPiModelCatalog(catalog: unknown, providerId = ''): ModelCatalogResult {
+export function readPiModelCatalog(catalog: unknown, providerId = '', connection?: CatalogConnection): ModelCatalogResult {
 	if (!catalog || typeof catalog !== 'object' || Array.isArray(catalog)) throw new Error('Invalid Pi model catalog');
 	const entries = Object.values(catalog) as Array<CatalogRow | null>;
 	const details = new Map<string, ModelCatalogDetails>();
+	const models = new Set<string>();
+	const routes = new Map(connection?.models.map((model) => [model.id, model]));
 	for (const row of entries) {
-		if (row?.type !== 'chat') continue;
+		if (!row) continue;
+		const type = catalogModelType(row);
+		if (!type) continue;
 		const id = catalogId(row);
-		if (id) addCatalogRow(details, id, row, providerId);
+		if (!id) continue;
+		if (connection) {
+			const route = routes.get(id);
+			const protocol = route?.api || connection.protocol;
+			const baseUrl = route?.baseUrl || connection.baseUrl;
+			if (row.provider !== providerId || typeof row.baseUrl !== 'string') continue;
+			const matches = Boolean(protocol && baseUrl && row.api === protocol
+				&& normalizeCatalogAddress(row.baseUrl) === normalizeCatalogAddress(baseUrl));
+			if (!matches && !openCodeCatalogProtocol(providerId, row.api, row.recommended_api, row.baseUrl)) continue;
+		}
+		if (type === 'text') models.add(id);
+		addCatalogRow(details, id, row, providerId);
+		const entry = details.get(id);
+		if (entry) {
+			// Pi's input modalities describe the model, not the video format accepted by Scribe's route.
+			if (entry.inputModalities?.includes('video')) {
+				const confirmed = entry.inputModalities.filter((value) => value !== 'video');
+				if (confirmed.length) entry.inputModalities = confirmed;
+				else delete entry.inputModalities;
+			}
+			delete entry.videoInput;
+		}
 	}
 	if (entries.length && !details.size) throw new Error('Invalid Pi model catalog');
-	return { models: [...details.keys()], source: 'pi', details };
+	return { models: [...models], source: 'pi', details };
 }

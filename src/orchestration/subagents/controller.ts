@@ -1,7 +1,7 @@
 import { systemXml } from '../context/promptXml';
 import { meteredService } from '../meteredService';
 import { isModelAvailable } from '../settings/modelAvailability';
-import { queuedModelDestination, sameQueuedDestination } from '../settings/modelConnection';
+import { queuedModelDestination, sameQueuedDestination, withPreparedModels } from '../settings/modelConnection';
 import { randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { setTimeout, clearTimeout } from 'node:timers';
@@ -20,7 +20,7 @@ import type {
 } from '../../types';
 
 type Model = RunContext['model'];
-type OriginatingRun = Pick<RunContext, 'task' | 'model' | 'history' | 'manualSummary' | 'signal' | 'permissions' | 'skillRun' | 'observer'>;
+type OriginatingRun = Pick<RunContext, 'task' | 'model' | 'history' | 'manualSummary' | 'signal' | 'permissions' | 'skillRun' | 'observer' | 'checkModel'>;
 type StartRecord = Extract<SubagentRecord, { kind: 'create' }>;
 type RunEntry = Extract<SubagentRecord, { kind: 'run' }>['entry'];
 type ReviewRecord = Extract<SubagentRecord, { kind: 'review' }>;
@@ -101,7 +101,8 @@ export function createSubagentController(
 	store: ConversationStore,
 	runChild: (task: Task, model: Model, signal: AbortSignal, observer: RunObserver, mode: ExecutionMode | undefined, options: ChildRunOptions) => Promise<RunState>,
 	selectModel: (model: Model, restored?: boolean) => Model,
-	models?: Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin'> & Partial<Pick<ModelService, 'modelConnection'>>,
+	models?: Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin' | 'modelType' | 'prepareModel' | 'withPreparedModels'>
+		& Partial<Pick<ModelService, 'modelConnection'>>,
 	stopJobs?: (conversationId: string, ids: Set<string>) => Promise<void>,
 ) {
 	const groups = new Map<string, Group>();
@@ -170,11 +171,13 @@ export function createSubagentController(
 		const { model, agentIds } = delivery;
 		const creations = agentIds.map((id) => group.agents.get(id)?.create);
 		const destination = creations[0]?.reportDestination;
-		const authorized = () => Boolean(destination && isModelAvailable(settings, model)
+		const authorized = () => Boolean(destination && isModelAvailable(settings, model, models?.modelType)
 			&& sameQueuedDestination(destination, queuedModelDestination(model, models?.modelConnection))
 			&& creations.every((create) => create?.modelOrigin === URL.parse(destination.baseUrl)?.origin
 				&& sameQueuedDestination(destination, create?.reportDestination)));
-		if (!models || !destination || !authorized()) return;
+		if (!models || !destination || !isModelAvailable(settings, model, models.modelType)) return;
+		if (models.prepareModel) await models.prepareModel(model, signal);
+		if (!authorized()) return;
 		const base = new URL(destination.baseUrl);
 		const { contextWindow, maxTokens } = models.contextLimits?.(model) ?? {};
 		const window = contextWindow || 32_000;
@@ -223,7 +226,7 @@ export function createSubagentController(
 		// 同一组最后两个任务可能同时结束，只让一份回传写入聊天记录。
 		delivery.writing = Promise.resolve().then(async () => {
 			const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(180_000)]);
-			const content = await composeReport(group, taskId, delivery, sections, signal).catch(() => undefined);
+			const content = await withPreparedModels(models, () => composeReport(group, taskId, delivery, sections, signal)).catch(() => undefined);
 			if (controller.signal.aborted) return;
 			const report = { content: content || sections.join('\n\n---\n\n'), sentAt: Date.now() };
 			await store.append(group.id, [{ type: 'subagent-report', taskId, report }]);
@@ -474,10 +477,18 @@ export function createSubagentController(
 				runs: [...(restored ? previous.slice(0, -1) : previous), liveRun] });
 			publish(group);
 		};
-		const selected = selectModel(restored?.model ?? view.model, restored !== undefined);
-		const open = creating ? save(group, [{ agentId, record: create }]) : visibility(group, agent, false);
+		const requested = restored?.model ?? view.model;
+		const initial = models?.prepareModel ? undefined : selectModel(requested, restored !== undefined);
 		const signal = parentSignal ? AbortSignal.any([controller.signal, parentSignal]) : controller.signal;
-		const ready = open.then(async () => {
+		let resolveReady!: () => void;
+		let rejectReady!: (error: unknown) => void;
+		const ready = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+		const done = withPreparedModels(models, async () => {
+			if (models?.prepareModel && isModelAvailable(settings, requested, models.modelType)) await models.prepareModel(requested, signal);
+			signal.throwIfAborted();
+			const selected = initial ?? selectModel(requested, restored !== undefined);
+			if (!restored) liveRun = { ...liveRun, model: selected };
+			await (creating ? save(group, [{ agentId, record: create }]) : visibility(group, agent, false));
 			await beforeRun?.();
 			const options: ChildRunOptions = {
 				agentId, instructions: create.instructions ?? '', readOnly: create.readOnly === true,
@@ -495,9 +506,7 @@ export function createSubagentController(
 				snapshot: { id: group.id, runs: previous }, restored,
 				confirmDestination: destinationGuard(group, agent, task, signal, restored !== undefined),
 			};
-			return { selected, options };
-		});
-		const done = ready.then(async ({ selected, options }) => {
+			resolveReady();
 			const state = await runChild(task, selected, signal, {
 				onEvent: update,
 				onWork,
@@ -521,6 +530,7 @@ export function createSubagentController(
 				void tryReturnReport(group, view.rootTaskId);
 			}
 		}).catch((error: unknown) => {
+			rejectReady(error);
 			if (creating && !agent.view.runs.length) group.agents.delete(agentId);
 			else viewOf(agent, { status: restored ? 'interrupted' : 'failed' });
 			publish(group, reason(error));
@@ -533,7 +543,7 @@ export function createSubagentController(
 		viewOf(agent, { status: 'running' });
 		group.agents.set(agentId, agent);
 		publish(group);
-		return ready.then(() => undefined);
+		return ready;
 	}
 
 	function destinationGuard(group: Group, agent: Agent, task: Task, signal: AbortSignal, restored: boolean): ChildRunOptions['confirmDestination'] {
@@ -559,14 +569,16 @@ export function createSubagentController(
 		model?: string; reasoning_effort?: string; fork_turns?: 'all' | 'none'; timeout_ms?: number;
 		question_id?: string; result_id?: string; decision?: ReviewRecord['disposition']; reason?: string; error_key?: string; path?: string;
 	};
-	function chooseModel(base: Model, input: Input, preset?: Model): Model {
-		if (preset) return selectModel(preset);
+	async function chooseModel(base: Model, input: Input, signal: AbortSignal, preset?: Model): Promise<Model> {
 		const qualified = input.model && Object.entries(settings.providerModels).find(([providerId, ids]) =>
 			ids.some((id) => `${providerId}/${id}` === input.model));
 		const providerId = qualified?.[0] ?? base.providerId;
 		const model = qualified ? input.model!.slice(providerId.length + 1) : input.model ?? base.model;
 		const reasoning = input.reasoning_effort ?? (model === base.model && providerId === base.providerId ? base.reasoning : undefined);
-		return selectModel({ providerId, model, reasoning });
+		const choice = preset ?? { providerId, model, reasoning };
+		if (models?.prepareModel && isModelAvailable(settings, choice, models.modelType)) await models.prepareModel(choice, signal);
+		signal.throwIfAborted();
+		return selectModel(choice);
 	}
 	function taskFor(group: Group, instruction: string, source?: Task['request'], quotes = false, caller?: OriginatingRun, allowMcp = false) {
 		const target = caller?.task.request.target ?? source?.target;
@@ -747,7 +759,8 @@ export function createSubagentController(
 			const role = (input.system_instructions ? undefined : live.roles.find(({ name }) => name === roleName))
 				?? BUILTIN_SUBAGENT_ROLES.find(({ name }) => name === roleName);
 			if (!role) throw new Error('找不到指定的子 Agent 角色。');
-			const model = chooseModel(caller.model, input, role.model);
+			const model = await chooseModel(caller.model, input, caller.signal, role.model);
+			caller.checkModel?.();
 			const sameProvider = model.providerId === caller.model.providerId;
 			const identity: SubagentIdentity = { id: randomUUID(), parentId: agentId, parentTaskId: caller.task.id,
 				rootTaskId: agentId ? find(group, agentId).view.rootTaskId : caller.task.id,

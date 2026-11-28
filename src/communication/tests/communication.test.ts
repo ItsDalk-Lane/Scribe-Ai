@@ -5,7 +5,7 @@ import http from 'node:http';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import type { App } from 'obsidian';
-import type { CredentialStore, Provider } from '@earendil-works/pi-ai';
+import type { CredentialStore, ImageModel, Provider } from '@earendil-works/pi-ai';
 import { createProvider, PI_AI_VERSION } from '@earendil-works/pi-ai';
 import * as openAI from '@earendil-works/pi-ai/api/openai-completions';
 import * as google from '@earendil-works/pi-ai/api/google-generative-ai';
@@ -22,6 +22,7 @@ import { groupProviders } from '../../interaction/providerGroups';
 import { providerIcon } from '../../interaction/providerIcons';
 import { applyModelDraft } from '../../interaction/modelDraft';
 import { normalizeSettings } from '../../orchestration/settings/defaults';
+import { AGENT_PLAN_PROVIDER_ID, IMAGE_MODELS } from '../../orchestration/settings/mediaSettings';
 import { chatModelKey, updateChatThinking } from '../../orchestration/settings/thinking';
 import { configureProxy, matchesLegacyProxy, readConfiguredProxy, storeProxyCredentials } from '../proxy';
 import type { AuxiliaryUsage, CommunicationSettings, ModelUsageReceipt, Transport } from '../../types';
@@ -399,6 +400,79 @@ void test('OpenAI SDK uses the unified transport and normalizes tool calls', asy
 	assert.ok(eventTypes.includes('text_delta'));
 	assert.ok(eventTypes.includes('toolcall_end'));
 	assert.equal(eventTypes.at(-1), 'done');
+});
+
+void test('the text transport rejects specialized models before any network request', async () => {
+	const providerId = 'custom-media-type';
+	const model = 'local-picture';
+	const arkImage = IMAGE_MODELS[0];
+	const overrides = normalizeSettings({ modelOverrides: {
+		[providerId]: { [model]: { type: 'image' } },
+		[AGENT_PLAN_PROVIDER_ID]: { [arkImage]: { type: 'text' } },
+	} }).modelOverrides;
+	const custom = overrides[providerId]?.[model];
+	assert.ok(custom);
+	let catalogType: 'text' | 'audio' | undefined;
+	let sends = 0;
+	const service = createModelService(credentials, { ...transport, fetch: async (...args) => {
+		sends++;
+		return transport.fetch(...args);
+	} }, {
+		baseUrls: () => ({ [AGENT_PLAN_PROVIDER_ID]: baseUrl + '/openai' }),
+		modelOverrides: () => overrides,
+		catalogDetails: (provider, id, address) => provider === providerId && id === model
+			&& address === baseUrl + '/openai' && catalogType ? { type: catalogType } : undefined,
+		customProviders: () => [{ id: providerId, label: 'Local fixture', baseUrl: baseUrl + '/openai',
+			protocol: 'openai-completions', models: [model] }],
+	});
+	const request = { providerId, model, messages: [{ role: 'user' as const, content: 'Fixture' }], tools: [], maxRetries: 0 };
+	assert.equal(service.modelType?.(providerId, model), undefined);
+	assert.throws(() => service.stream(request), /无法处理文字对话/u);
+	await assert.rejects(async () => service.send({ ...request, providerId: AGENT_PLAN_PROVIDER_ID, model: arkImage }), /无法处理文字对话/u);
+	assert.equal(sends, 0);
+
+	custom.type = 'text';
+	await assert.rejects(service.send({ ...request, beforeSend: async () => { custom.type = 'image'; } }), /无法处理文字对话/u);
+	assert.equal(sends, 0);
+
+	custom.type = 'text';
+	await assert.rejects(service.send({ ...request, beforeSend: async () => { catalogType = 'audio'; } }), /无法处理文字对话/u);
+	assert.equal(sends, 0);
+	assert.equal(service.modelType?.(providerId, model), 'audio');
+	assert.throws(() => service.stream(request), /无法处理文字对话/u);
+	catalogType = 'text';
+	await assert.rejects(service.send({ ...request, onTransmission: async () => { catalogType = 'audio'; } }), /无法处理文字对话/u);
+	assert.equal(sends, 0);
+	custom.baseUrl = baseUrl + '/unconfirmed';
+	assert.equal(service.modelType?.(providerId, model), undefined);
+	delete custom.baseUrl;
+
+	custom.type = 'image';
+	catalogType = 'text';
+	assert.equal(service.modelType?.(providerId, model), 'text');
+	assert.equal((await service.send(request)).content, 'Checking');
+	assert.equal(sends, 1);
+});
+
+void test('bundled specialized model data stays separate from the chat list and from overrides of the provider connection', async () => {
+	const adapter = testProvider('openai-completions');
+	const [chat] = adapter.getModels();
+	assert.ok(chat);
+	const image: ImageModel<'openrouter-images'> = { ...chat, id: 'fixture-picture', api: 'openrouter-images', type: 'image', output: ['image'] };
+	const provider: Provider = { ...adapter, getAllModels: () => [chat, image] };
+	const addresses: Record<string, string> = {};
+	const service = createModelService(credentials, { ...transport, fetch: async () => new Response(null, { status: 404 }) },
+		{ additionalProviders: [provider], baseUrls: () => addresses });
+	assert.equal(service.modelType?.(provider.id, chat.id), 'text');
+	assert.equal(service.modelType?.(provider.id, image.id), 'image');
+	assert.equal(service.providers().find(({ id }) => id === provider.id)?.nonChatModelTypes?.get(image.id), 'image');
+
+	const catalog = await service.listProviderModels(provider.id);
+	assert.deepEqual(catalog.models, [chat.id]);
+	assert.equal(catalog.details?.get(image.id)?.type, 'image');
+	addresses[provider.id] = baseUrl + '/custom-route';
+	assert.equal(service.modelType?.(provider.id, chat.id), undefined);
+	assert.equal(service.modelType?.(provider.id, image.id), undefined);
 });
 
 void test('model requests wait for their own confirmation after leaving the Node async scope', async () => {
@@ -843,6 +917,80 @@ void test('Explicit Bailian models keep Qwen request compatibility', async () =>
 	assert.equal(openAIBody.reasoning_effort, 'low');
 });
 
+void test('MiniMax M Plan uses independent regional routes and never sends a linked pay-as-you-go key', async () => {
+	const model = 'MiniMax-M3.1-Flash';
+	const globalPlan = 'minimax-m-plan';
+	const chinaPlan = 'minimax-m-plan-cn';
+	const keys = new Map([['global-slot', 'sk-cp-global-fixture'], ['china-slot', 'sk-cp-china-fixture'], ['payg-slot', 'sk-api-payg-fixture']]);
+	const app = { secretStorage: { getSecret: (id: string) => keys.get(id) ?? null } } as unknown as App;
+	const settings: CommunicationSettings = { credentialIds: { [globalPlan]: 'global-slot', [chinaPlan]: 'china-slot', minimax: 'payg-slot' },
+		proxyUrl: '', providerNames: {}, baseUrls: {}, protocols: {} };
+	const requests: Array<{ url: string; key: string | null; model?: string }> = [];
+	const service = createModelService(createCredentialStore(app, settings), {
+		...transport,
+		fetch: async (input, init) => {
+			const request = new Request(input, init);
+			const url = new URL(request.url);
+			if (url.hostname === 'pi.dev' || url.hostname === 'models.dev') {
+				assert.equal(request.headers.get('x-api-key'), null);
+				return Response.json({});
+			}
+			const anthropic = url.pathname.startsWith('/anthropic/');
+			const key = anthropic ? request.headers.get('x-api-key') : request.headers.get('authorization')?.replace(/^Bearer /u, '') ?? null;
+			assert.equal(request.headers.get('anthropic-version'), anthropic ? '2023-06-01' : null);
+			if (url.pathname.endsWith('/models')) {
+				requests.push({ url: url.href, key });
+				return Response.json({ data: [{ id: model }, { id: 'MiniMax-M3' }] });
+			}
+			assert.equal(url.pathname, '/anthropic/v1/messages');
+			const payload = JSON.parse(await request.text()) as { model: string; thinking?: { type: string } };
+			assert.equal(payload.thinking?.type, 'adaptive');
+			requests.push({ url: url.origin + url.pathname, key, model: payload.model });
+			const events = [
+				{ type: 'message_start', message: { id: 'msg-plan', type: 'message', role: 'assistant', model,
+					content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } },
+				{ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+				{ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'M Plan OK' } },
+				{ type: 'content_block_stop', index: 0 },
+				{ type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 2 } },
+				{ type: 'message_stop' },
+			];
+			return new Response(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''),
+				{ headers: { 'content-type': 'text/event-stream' } });
+		},
+	}, { protocols: () => settings.protocols });
+	const send = (providerId: string) => service.send({ providerId, model, messages: [{ role: 'user', content: 'Plan fixture' }], tools: [], maxRetries: 0 });
+	for (const [providerId, origin, key] of [
+		[globalPlan, 'https://api.minimax.io', 'sk-cp-global-fixture'],
+		[chinaPlan, 'https://api.minimax.cn', 'sk-cp-china-fixture'],
+	] as const) {
+		const provider = service.providers().find(({ id }) => id === providerId);
+		assert.deepEqual(provider?.models.map(({ id }) => id), [model]);
+		assert.equal(provider?.models[0]?.requiresReasoning, true);
+		assert.deepEqual(service.modelConnection(providerId, model), { api: 'anthropic-messages', baseUrl: `${origin}/anthropic`, source: 'catalog' });
+		assert.equal((await send(providerId)).content, 'M Plan OK');
+		assert.deepEqual(requests.at(-1), { url: `${origin}/anthropic/v1/messages`, key, model });
+		assert.deepEqual((await service.listProviderModels(providerId)).models, [model]);
+		assert.deepEqual(requests.at(-1), { url: `${origin}/anthropic/v1/models`, key });
+		for (const api of ['openai-completions', 'openai-responses']) {
+			settings.protocols[providerId] = api;
+			assert.deepEqual(service.modelConnection(providerId, model), { api, baseUrl: `${origin}/v1`, source: 'configured' });
+			const catalog = await service.listProviderModels(providerId);
+			assert.deepEqual(catalog.models, [model]);
+			assert.equal(catalog.details?.get(model)?.connectionProtocol, api);
+			assert.deepEqual(requests.at(-1), { url: `${origin}/v1/models`, key });
+		}
+		delete settings.protocols[providerId];
+	}
+	settings.credentialIds[globalPlan] = 'payg-slot';
+	const sent = requests.length;
+	await assert.rejects(send(globalPlan), /API key auth failed for provider minimax-m-plan/u);
+	const offlineCatalog = await service.listProviderModels(globalPlan);
+	assert.equal(offlineCatalog.source, 'bundled');
+	assert.deepEqual(offlineCatalog.models, [model]);
+	assert.equal(requests.length, sent);
+});
+
 void test('Volcengine providers register with full pi catalog metadata', () => {
 	const service = createModelService(credentials, transport, {});
 	const ids = ['volcengine-agent-plan', 'volcengine-coding-plan', 'volcengine-doubao'];
@@ -859,10 +1007,25 @@ void test('Volcengine providers register with full pi catalog metadata', () => {
 	assert.equal(doubao?.maxTokens, 16384);
 	assert.deepEqual(doubao?.input, ['text', 'image']);
 	assert.equal(doubao?.reasoning, false);
-	const plan = providers[0]?.models[0];
-	assert.equal(plan?.maxTokens, 16384);
-	assert.deepEqual(plan?.input, ['text']);
-	assert.equal(plan?.reasoning, false);
+	const planNames = [
+		'ark-code-latest', 'doubao-seed-evolving', 'doubao-seed-2.1-pro', 'doubao-seed-2.1-lite', 'doubao-seed-2.0-mini',
+		'glm-5.4', 'glm-5.3', 'glm-5.3-flash', 'deepseek-v4.1-flash', 'deepseek-v4.1-flash-economy', 'deepseek-v4-flash',
+		'deepseek-v4-pro', 'kimi-k2.8-preview', 'kimi-k3.1-pro',
+	];
+	for (const provider of providers.slice(0, 2)) {
+		assert.ok(provider);
+		assert.deepEqual(new Set(provider.models.map(({ id }) => id)), new Set(planNames));
+		const auto = provider.models.find(({ id }) => id === 'ark-code-latest');
+		assert.equal(auto?.maxTokens, 16_384);
+		assert.deepEqual(auto?.input, ['text']);
+		assert.equal(auto?.reasoning, false);
+		const doubaoPro = provider.models.find(({ id }) => id === 'doubao-seed-2.1-pro');
+		assert.equal(doubaoPro?.contextWindow, 1_024_000);
+		assert.equal(doubaoPro?.maxTokens, 256_000);
+		assert.deepEqual(doubaoPro?.input, ['text', 'image']);
+		assert.equal(service.modelType?.(provider.id, 'doubao-embedding-vision'), 'embedding');
+		assert.equal(service.modelConnection(provider.id, 'deepseek-v4.1-flash').baseUrl, provider.baseUrl);
+	}
 });
 
 void test('built-in models require explicitly linked credentials and restrict HTTP to loopback', async (t) => {
@@ -953,10 +1116,12 @@ void test('Official model discovery uses the selected endpoint and falls back to
 				case 'https://pi.dev':
 					assert.equal(headers.get('authorization'), null);
 					assert.equal(headers.get('x-api-key'), null);
-					return Response.json({
-						'pi-chat': { id: 'pi-chat', type: 'chat', baseUrl: 'https://unused.example/v1' },
-						'pi-image': { id: 'pi-image', type: 'image' },
-					});
+					return Response.json(url.pathname.endsWith('/anthropic') ? {
+						'pi-chat': { id: 'pi-chat', type: 'chat', provider: 'anthropic', api: 'anthropic-messages', baseUrl: 'https://api.anthropic.com' },
+						'other-host': { id: 'other-host', type: 'chat', provider: 'anthropic', api: 'anthropic-messages', baseUrl: 'https://unused.example/v1' },
+					} : {});
+				case 'https://models.dev':
+					return Response.json({});
 				default:
 					throw new Error(`Unexpected catalog request ${url.href}`);
 			}
@@ -968,11 +1133,14 @@ void test('Official model discovery uses the selected endpoint and falls back to
 	const anthropic = await service.listProviderModels('anthropic');
 	assert.deepEqual(anthropic.models, ['pi-chat']);
 	assert.equal(anthropic.source, 'pi');
-	assert.deepEqual(urls.filter((url) => !url.includes('models.dev')), [
+	assert.deepEqual([...urls].sort(), [
 		'https://api.openai.com/v1/models',
 		'https://api.anthropic.com/v1/models',
+		'https://models.dev/api.json',
+		'https://models.dev/api.json',
 		`https://pi.dev/api/models/providers/anthropic?pi-version=${PI_AI_VERSION}`,
-	]);
+		`https://pi.dev/api/models/providers/openai?pi-version=${PI_AI_VERSION}`,
+	].sort());
 });
 
 void test('Gemini discovery reads every page and keeps generation models only', async () => {
@@ -981,7 +1149,7 @@ void test('Gemini discovery reads every page and keeps generation models only', 
 		...transport,
 		fetch: async (input, init) => {
 			const url = new URL(new Request(input).url);
-			if (url.origin === 'https://models.dev') return Response.json({});
+			if (url.origin === 'https://models.dev' || url.origin === 'https://pi.dev') return Response.json({});
 			urls.push(url.href);
 			assert.equal(new Headers(init?.headers).get('x-goog-api-key'), 'test-key');
 			return url.searchParams.has('pageToken')
@@ -1004,7 +1172,7 @@ void test('Gemini discovery reads every page and keeps generation models only', 
 	]);
 });
 
-void test('Discovery keeps the bundled list offline and stops before Pi when cancelled', async () => {
+void test('Discovery keeps the bundled list offline and skips all sources when already cancelled', async () => {
 	const urls: string[] = [];
 	const controller = new AbortController();
 	const service = createModelService(credentials, {
@@ -1020,15 +1188,15 @@ void test('Discovery keeps the bundled list offline and stops before Pi when can
 	assert.deepEqual(catalog.models, bundled);
 	assert.equal(catalog.source, 'bundled');
 	assert.ok(catalog.details?.size);
-	assert.deepEqual(urls.filter((url) => !url.includes('models.dev')), [
+	assert.deepEqual(urls.sort(), [
 		'https://api.deepseek.com/models',
 		'https://api.deepseek.com/v1/models',
+		'https://models.dev/api.json',
 		`https://pi.dev/api/models/providers/deepseek?pi-version=${PI_AI_VERSION}`,
-	]);
-	const pending = service.listProviderModels('openai', controller.signal);
+	].sort());
 	controller.abort();
-	await assert.rejects(pending, { name: 'AbortError' });
-	assert.ok(!urls.some((url) => url.includes('/providers/openai')));
+	await assert.rejects(service.listProviderModels('openai', controller.signal), { name: 'AbortError' });
+	assert.equal(urls.length, 4);
 });
 
 void test('Adding models merges exact catalog matches and keeps unpublished ids out of the picker', async () => {
@@ -1051,6 +1219,13 @@ void test('Adding models merges exact catalog matches and keeps unpublished ids 
 				} },
 				google: { models: { 'new-only': { tool_call: true } } },
 			}));
+			if (url.origin === 'https://pi.dev') return Promise.resolve(Response.json({
+				gemini: {
+					id: 'google/gemini-3.8-flash', type: 'chat', provider: 'openrouter',
+					api: 'openai-completions', baseUrl: 'https://openrouter.ai/api/v1',
+					reasoning_options: [{ type: 'effort', values: ['low', 'high'] }],
+				},
+			}));
 			return Promise.reject(new Error(`Unexpected catalog request ${url.href}`));
 		},
 	});
@@ -1068,9 +1243,78 @@ void test('Adding models merges exact catalog matches and keeps unpublished ids 
 	assert.ok(details.thinkingLevels?.includes('high'));
 	assert.equal(details.evidence?.contextWindow?.source, 'provider');
 	assert.equal(details.evidence?.maxTokens?.source, 'models.dev');
+	assert.deepEqual(details.reportedThinkingLevels, ['low', 'high']);
+	assert.equal(details.evidence?.reportedThinkingLevels?.source, 'pi');
 	assert.deepEqual(catalog.details?.get('new-only'), {});
 	assert.deepEqual(seen.find(({ origin }) => origin === 'https://models.dev'), { origin: 'https://models.dev', authorization: null });
+	assert.deepEqual(seen.find(({ origin }) => origin === 'https://pi.dev'), { origin: 'https://pi.dev', authorization: null });
 	assert.deepEqual(seen.find(({ origin }) => origin === 'https://openrouter.ai'), { origin: 'https://openrouter.ai', authorization: 'Bearer test-key' });
+});
+
+void test('Public sources contribute matched candidates without overriding an empty account list', async () => {
+	let officialAvailable = false;
+	let piAvailable = true;
+	const service = createModelService(credentials, {
+		...transport,
+		fetch: async (input) => {
+			const url = new URL(new Request(input).url);
+			if (url.hostname === 'api.deepseek.com') return officialAvailable
+				? Response.json({ data: [] }) : new Response(null, { status: 403 });
+			if (url.hostname === 'pi.dev') return piAvailable
+				? Response.json({ model: { id: 'pi-candidate', type: 'chat', provider: 'deepseek',
+					api: 'openai-completions', baseUrl: 'https://api.deepseek.com' } }) : new Response(null, { status: 404 });
+			if (url.hostname === 'models.dev') return Response.json({
+				deepseek: { api: 'https://api.deepseek.com', npm: '@ai-sdk/openai-compatible', models: {
+					'public-candidate': { modalities: { input: ['text'], output: ['text'] } },
+					'public-embedding': { type: 'embedding', modalities: { input: ['text'], output: ['embedding'] } },
+					'public-retired': { type: 'chat', status: 'deprecated' },
+				} },
+			});
+			throw new Error(`Unexpected catalog request ${url.href}`);
+		},
+	});
+	const fallback = await service.listProviderModels('deepseek');
+	assert.deepEqual(fallback.models, ['pi-candidate', 'public-candidate']);
+	assert.deepEqual(fallback.specializedModels, ['public-embedding']);
+	assert.equal(fallback.source, 'pi');
+	piAvailable = false;
+	const publicOnly = await service.listProviderModels('deepseek');
+	assert.deepEqual(publicOnly.models, ['public-candidate']);
+	assert.equal(publicOnly.source, 'models.dev');
+	officialAvailable = true;
+	const empty = await service.listProviderModels('deepseek');
+	assert.deepEqual(empty.models, []);
+	assert.deepEqual(empty.specializedModels, []);
+	assert.equal(empty.source, 'provider');
+});
+
+void test('OpenCode Go discovers matching Pi routes without keeping them in the SDK catalog', async () => {
+	const service = createModelService(credentials, {
+		...transport,
+		fetch: async (input) => {
+			const url = new URL(new Request(input).url);
+			if (url.hostname === 'opencode.ai') return new Response(null, { status: 503 });
+			if (url.hostname === 'models.dev') return Response.json({});
+			assert.equal(url.pathname, '/api/models/providers/opencode-go');
+			const candidate = {
+				id: 'pi-gemini', provider: 'opencode-go', type: 'chat', api: 'google-generative-ai',
+				baseUrl: 'https://opencode.ai/inference/go/google/v1beta', input: ['text', 'image', 'video'], supports_video_in: true,
+			};
+			return Response.json({
+				valid: candidate,
+				'wrong-plan': { ...candidate, id: 'wrong-plan', baseUrl: 'https://opencode.ai/inference/google/v1beta' },
+				'wrong-provider': { ...candidate, id: 'wrong-provider', provider: 'opencode' },
+			});
+		},
+	});
+	const before = service.providers().find(({ id }) => id === 'opencode-go')?.models;
+	const catalog = await service.listProviderModels('opencode-go');
+	assert.deepEqual(catalog.models, ['pi-gemini']);
+	const gemini = catalog.details?.get('pi-gemini');
+	assert.equal(gemini?.connectionProtocol, 'google-generative-ai');
+	assert.deepEqual(gemini?.inputModalities, ['text', 'image']);
+	assert.equal(gemini?.videoInput, undefined);
+	assert.deepEqual(service.providers().find(({ id }) => id === 'opencode-go')?.models, before);
 });
 
 void test('catalog rows ignore web search fields while retaining supported input and function tools', () => {
@@ -1214,19 +1458,20 @@ void test('Every built-in provider falls into one of four categories', () => {
 	assert.deepEqual([...categories].sort(), ['aggregator', 'domestic', 'global', 'other']);
 });
 
-void test('Providers from the same vendor collapse into one group without URL duplicates', () => {
+void test('Provider groups preserve distinct billing products even at a shared endpoint', () => {
 	const service = createModelService(credentials, transport, {});
 	const groups = groupProviders(service.providers());
 	const bailian = groups.find((group) => group.label === '阿里云百炼');
 	const openai = groups.find((group) => group.label === 'OpenAI');
-	// 新的 Qwen 中国端点与百炼 Token Plan 使用不同域名，同地区的团队与个人套餐仍共享地址。
+	const minimax = groups.find((group) => group.label === 'MiniMax');
+	const zai = groups.find((group) => group.label === 'Z.AI');
 	assert.deepEqual(bailian?.providers.map((provider) => provider.id), [
 		'bailian-token-plan', 'bailian-coding-plan', 'bailian-payg', 'qwen-token-plan', 'qwen-token-plan-cn',
+		'qwen-token-plan-individual', 'qwen-token-plan-individual-cn',
 	]);
 	assert.equal(openai?.providers.length, 2);
-	const ids = groups.flatMap((group) => group.providers.map((provider) => provider.id));
-	assert.ok(!ids.includes('qwen-token-plan-individual'));
-	assert.ok(!ids.includes('qwen-token-plan-individual-cn'));
+	assert.deepEqual(minimax?.providers.map(({ id }) => id), ['minimax', 'minimax-cn', 'minimax-m-plan', 'minimax-m-plan-cn']);
+	assert.deepEqual(zai?.providers.map(({ id }) => id), ['zai', 'zai-coding-cn', 'zai-payg', 'zai-payg-cn']);
 });
 
 void test('Every preset connection has a bundled brand icon, including variants', () => {

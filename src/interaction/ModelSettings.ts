@@ -19,7 +19,8 @@ import { ScribeModelConfigModal } from './ModelConfigModal';
 import { ConfigureProviderModal } from './ProviderConfigModal';
 import { updateOverflowTitle } from './overflowTitle';
 import { removeProviderSettings } from './providerSettings';
-import { isProviderEnabled, reconcileDefaultModel } from '../orchestration/settings/modelAvailability';
+import { isProviderEnabled, isTextModel, reconcileDefaultModel } from '../orchestration/settings/modelAvailability';
+import { AGENT_PLAN_PROVIDER_ID } from '../orchestration/settings/mediaSettings';
 import type { UiText } from './uiText';
 
 /** 显示名可改，索引始终是 provider.id */
@@ -34,6 +35,7 @@ export function renderModelSettings(
 	plugin: ScribeAiPlugin,
 	text: UiText,
 	openState = new Set<string>(),
+	settingsSignal?: AbortSignal,
 ): void {
 	panel.empty();
 	panel.addClass('scribe-models-panel');
@@ -43,6 +45,7 @@ export function renderModelSettings(
 	const configuredIds = [...new Set([
 		...Object.keys(settings.providerModels),
 		...(settings.providerId ? [settings.providerId] : []),
+		...(settings.communication.credentialIds[AGENT_PLAN_PROVIDER_ID] ? [AGENT_PLAN_PROVIDER_ID] : []),
 	])];
 	const cards = configuredIds.map((id): ModelProviderInfo => providers.find((entry) => entry.id === id) ?? {
 		id,
@@ -66,23 +69,10 @@ export function renderModelSettings(
 	const addProvIcon = addProv.createSpan({ cls: 'scribe-icon-text-icon' });
 	setIcon(addProvIcon, 'plus');
 	addProv.createSpan({ text: text.addProvider });
-	const rerender = () => renderModelSettings(app, panel, plugin, text, openState);
-	addProv.addEventListener('click', () => new AddProviderModal(app, plugin, text, rerender).open());
-	const refreshModels = new ButtonComponent(actions)
-		.setButtonText(text.refreshModels)
-		.setTooltip(text.refreshModelsDescription);
-	refreshModels.onClick(async () => {
-		refreshModels.setDisabled(true).setButtonText(text.refreshingModels);
-		try {
-			const { updated, failed } = await plugin.services.communication.modelCatalog.refresh();
-			new Notice(failed ? updated ? text.modelsRefreshPartial : text.refreshModelsFailed : text.modelsRefreshed);
-			if (panel.contains(actions)) rerender();
-		} catch {
-			new Notice(text.refreshModelsFailed);
-		} finally {
-			refreshModels.setDisabled(false).setButtonText(text.refreshModels);
-		}
-	});
+	const rerender = () => {
+		if (!settingsSignal?.aborted) renderModelSettings(app, panel, plugin, text, openState, settingsSignal);
+	};
+	addProv.addEventListener('click', () => new AddProviderModal(app, plugin, text, rerender, settingsSignal).open());
 
 	const list = panel.createDiv({ cls: 'scribe-provider-list', attr: { role: 'list' } });
 	const empty = panel.createDiv({ cls: 'scribe-models-empty' });
@@ -94,7 +84,7 @@ export function renderModelSettings(
 			confirmText: text.remove,
 			cancelText: text.cancel,
 			onConfirm: async () => {
-				removeProviderSettings(settings, provider.id);
+				removeProviderSettings(settings, provider.id, modelService.modelType);
 				openState.delete(provider.id);
 				await plugin.saveSettings();
 				rerender();
@@ -103,6 +93,7 @@ export function renderModelSettings(
 	};
 
 	const renderCard = (provider: ModelProviderInfo, models: string[]) => {
+		const hasChatModels = models.some((model) => isTextModel(settings, { providerId: provider.id, model }, modelService.modelType));
 		const label = providerLabel(plugin, provider.id, provider.label);
 		const card = list.createDiv({ cls: 'scribe-provider-card', attr: { role: 'listitem' } });
 		const isOpen = openState.has(provider.id);
@@ -131,8 +122,8 @@ export function renderModelSettings(
 		actions.addEventListener('click', (event) => event.stopPropagation());
 		actions.addEventListener('keydown', (event) => event.stopPropagation());
 		new ToggleComponent(actions)
-			.setValue(models.length > 0 && isProviderEnabled(settings, provider.id))
-			.setDisabled(!models.length)
+			.setValue(hasChatModels && isProviderEnabled(settings, provider.id))
+			.setDisabled(!hasChatModels)
 			.setTooltip(text.includeProviderModels)
 			.onChange(async (enabled) => {
 				try {
@@ -149,6 +140,7 @@ export function renderModelSettings(
 			.onClick(() => new ConfigureProviderModal(app, plugin, provider, text, {
 				mode: 'edit',
 				onSaved: rerender,
+				settingsSignal,
 			}).open());
 		new ButtonComponent(actions)
 			.setIcon('trash-2')
@@ -174,6 +166,7 @@ export function renderModelSettings(
 					.setClass('scribe-icon-button')
 					.onClick(() => void ScribeModelConfigModal.openFor(app, plugin, provider, model, text, {
 						onSaved: rerender,
+						settingsSignal,
 					}));
 				new ButtonComponent(modelActions)
 					.setIcon('x')
@@ -194,7 +187,7 @@ export function renderModelSettings(
 								if (!Object.keys(overrides).length) delete settings.modelOverrides[provider.id];
 							}
 							if (settings.providerId === provider.id && settings.model === model) {
-								reconcileDefaultModel(settings);
+								reconcileDefaultModel(settings, modelService.modelType);
 							}
 							await plugin.saveSettings();
 							rerender();
@@ -257,14 +250,17 @@ class AddProviderModal extends Modal {
 		private plugin: ScribeAiPlugin,
 		private text: UiText,
 		private onSaved: () => void,
+		private settingsSignal?: AbortSignal,
 	) {
 		super(app);
 		this.titleEl.setText(text.addProvider);
 	}
 
 	private refresh = (): void => {};
+	private readonly closeOnSettingsLeave = () => this.close();
 
 	onOpen(): void {
+		this.settingsSignal?.addEventListener('abort', this.closeOnSettingsLeave, { once: true });
 		this.modalEl.addClass('scribe-add-provider-modal');
 		this.contentEl.addClass('scribe-dialog-content');
 		this.contentEl.createDiv({ cls: 'scribe-dialog-muted', text: this.text.pickProvider });
@@ -311,6 +307,7 @@ class AddProviderModal extends Modal {
 			new ConfigureProviderModal(this.app, this.plugin, provider, this.text, {
 				mode: 'new',
 				custom: true,
+				settingsSignal: this.settingsSignal,
 				onSaved: () => {
 					this.onSaved();
 					this.refresh();
@@ -387,6 +384,7 @@ class AddProviderModal extends Modal {
 					new ConfigureProviderModal(this.app, this.plugin, provider, this.text, {
 						mode: 'new',
 						variants: group.providers,
+						settingsSignal: this.settingsSignal,
 						onSaved: () => {
 							this.onSaved();
 							this.refresh();
@@ -407,6 +405,7 @@ class AddProviderModal extends Modal {
 	}
 
 	onClose(): void {
+		this.settingsSignal?.removeEventListener('abort', this.closeOnSettingsLeave);
 		this.contentEl.empty();
 	}
 }

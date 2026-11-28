@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { access } from 'node:fs/promises';
 import type {
+	AnyModel,
 	AssistantMessage,
 	AssistantMessageEventStream,
 	Api,
@@ -27,15 +28,17 @@ import * as openaiCodexResponses from '@earendil-works/pi-ai/api/openai-codex-re
 import * as openaiCompletions from '@earendil-works/pi-ai/api/openai-completions';
 import * as openaiResponses from '@earendil-works/pi-ai/api/openai-responses';
 import * as piMessages from '@earendil-works/pi-ai/api/pi-messages';
-import { EXTRA_IMAGE_LIMITS, EXTRA_PROVIDERS } from './extraProviders';
+import { fetchArkPublicModelCatalog } from './arkModelCatalog';
+import { checkMiniMaxPlanKey, EXTRA_IMAGE_LIMITS, EXTRA_PROVIDERS, MINIMAX_M_PLAN_ORIGINS, miniMaxPlanBaseUrl } from './extraProviders';
 import { documentedModelDetails, documentedRouteDetails, fetchModelList, fetchModelsDevCatalog, fetchPiModelCatalog,
-	mergeModelCatalogDetails, ModelCatalogHttpError, modelsDevDetails, readPiModelCatalog, sourceModelCatalogDetails } from './modelCatalog';
+	mergeModelCatalogDetails, ModelCatalogHttpError, readModelsDevCatalog, sourceModelCatalogDetails } from './modelCatalog';
 import { ACCOUNT_CATALOGS, fetchAccountModelCatalog } from './modelCatalogAccounts';
 import { fetchOfficialModelCatalog } from './modelCatalogProviders';
 import { openCodeConnection } from './openCodeModels';
 import { resolveModelConnection } from './modelConnection';
 import { applyResponseSchema, supportsResponseSchema } from './modelFeatures';
 import { bufferedGroqSchemaFetch, needsBufferedGroqSchema } from './groqSchema';
+import { applyModelPdf, redactPdfError, supportsPdfInput } from './modelPdf';
 import { applyModelVideo, catalogVideoInput, nativeVideoFormat, videoTakesOnlyUrls } from './modelVideo';
 import { bindBedrockConfirmation, confirmModelRequest } from './modelRequestConfirmation';
 import type { ModelRequestConfirmation } from './modelRequestConfirmation';
@@ -44,8 +47,11 @@ import { isSecureServiceUrl } from './serviceAddress';
 import { captureReportedUsage, reportedCost } from './reportedUsage';
 import { estimatePromptTokens } from './inputUsage';
 import { ContextOverflowError, RetryableModelError } from '../types';
+import { knownMediaModelType, confirmedCatalogModelType } from '../orchestration/settings/mediaSettings';
+import { isTextModel } from '../orchestration/settings/modelAvailability';
 import { isBuiltInThinkingLevel, isThinkingLevel } from '../orchestration/settings/thinking';
 import type {
+	ConfiguredModelType,
 	CredentialStore,
 	Message,
 	CustomProviderDef,
@@ -178,11 +184,12 @@ function payloadIncludesEffort(payload: unknown, effort: string): boolean {
 		|| payloadIncludesEffort(fields.additionalModelRequestFields, effort));
 }
 
-function toResponse(message: AssistantMessage, reportedUsage: ReportedUsage): ModelResponse {
-	if (isContextOverflow(message)) throw new ContextOverflowError(message.errorMessage);
-	if (isRetryableAssistantError(message)) throw new RetryableModelError(message.errorMessage);
+function toResponse(message: AssistantMessage, reportedUsage: ReportedUsage, pdfInput: boolean): ModelResponse {
+	const error = pdfInput ? redactPdfError(message.errorMessage) : message.errorMessage;
+	if (isContextOverflow(message)) throw new ContextOverflowError(error);
+	if (isRetryableAssistantError(message)) throw new RetryableModelError(error);
 	if (message.stopReason === 'error' || message.stopReason === 'aborted') {
-		throw new Error(message.errorMessage || `Model request ${message.stopReason}`);
+		throw new Error(error || `Model request ${message.stopReason}`);
 	}
 	const stopReason = message.stopReason === 'toolUse'
 		? 'tool-calls'
@@ -216,6 +223,7 @@ class PiModelStream implements ModelStream {
 		private usage: ReturnType<typeof captureReportedUsage>,
 		private confirmation: ModelRequestConfirmation | undefined,
 		private structuredOutput: boolean,
+		private pdfInput: boolean,
 		private onUsage?: Parameters<ModelService['send']>[1],
 	) {}
 
@@ -239,7 +247,7 @@ class PiModelStream implements ModelStream {
 			const usageStatus = Object.keys(reportedUsage).length || estimatedUsage ? this.usage.status()
 				: response.stopReason === 'error' || response.stopReason === 'aborted' ? 'provisional' : 'final';
 			this.onUsage?.({ reportedUsage, ...(estimatedUsage && { estimatedUsage }), cost: reportedCost(response.usage), usageStatus });
-			const result = toResponse(response, reportedUsage);
+			const result = toResponse(response, reportedUsage, this.pdfInput);
 			if (estimatedUsage) result.estimatedUsage = estimatedUsage;
 			if (usageStatus === 'provisional') result.usageStatus = usageStatus;
 			if (!this.structuredOutput) return result;
@@ -270,13 +278,36 @@ function providerBaseUrl(provider: Provider): string {
 	return provider.baseUrl ?? (urls.size === 1 ? [...urls][0] ?? '' : '');
 }
 
+function specializedCatalogModels(catalog: ModelCatalogResult): string[] {
+	return [...catalog.details ?? []].flatMap(([id, { type }]) => type && type !== 'text' ? [id] : []);
+}
+
 function catalogSignal(signal?: AbortSignal): AbortSignal {
 	const timeout = AbortSignal.timeout(15_000);
 	return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
-function piCatalogDetails(models: readonly Model<Api>[]): Map<string, ModelCatalogDetails> {
-	return new Map(models.map((model) => [model.id, {
+function normalizeModelAddress(address?: string): string {
+	return (URL.parse(address ?? '')?.href ?? address ?? '').replace(/\/+$/u, '');
+}
+
+function piNonChatType(model: AnyModel): 'image' | 'other' | undefined {
+	return model.type === 'image' ? 'image' : model.type === 'classifier' ? 'other' : undefined;
+}
+
+function piNonChatTypes(provider: Provider): Map<string, ConfiguredModelType> {
+	const types = new Map<string, ConfiguredModelType>();
+	const chat = new Set(provider.getModels().map(({ id }) => id));
+	for (const model of provider.getAllModels?.() ?? []) {
+		const type = piNonChatType(model);
+		if (type && !chat.has(model.id)) types.set(model.id, type);
+	}
+	return types;
+}
+
+function piCatalogDetails(provider: Provider): Map<string, ModelCatalogDetails> {
+	const details = new Map<string, ModelCatalogDetails>(provider.getModels().map((model) => [model.id, {
+		type: 'text',
 		...(model.contextWindow > 0 && { contextWindow: model.contextWindow }),
 		...(model.maxTokens > 0 && { maxTokens: model.maxTokens }),
 		inputModalities: model.input,
@@ -284,6 +315,8 @@ function piCatalogDetails(models: readonly Model<Api>[]): Map<string, ModelCatal
 		reasoning: model.reasoning,
 		thinkingLevels: getSupportedThinkingLevels(model).filter((level) => level !== 'off'),
 	}]));
+	for (const [id, type] of piNonChatTypes(provider)) details.set(id, { type });
+	return details;
 }
 
 const API_MODULES = {
@@ -371,9 +404,11 @@ export function createModelService(
 			auth: {
 				apiKey: {
 					name: def.name,
-					resolve: async ({ credential }) => (credential?.type === 'api_key' && credential.key
-						? { auth: { apiKey: credential.key } }
-						: undefined),
+					resolve: async ({ credential }) => {
+						if (credential?.type !== 'api_key' || !credential.key) return;
+						checkMiniMaxPlanKey(def.id, credential.key);
+						return { auth: { apiKey: credential.key } };
+					},
 				},
 			},
 			models: [...byId.values()],
@@ -498,14 +533,13 @@ export function createModelService(
 
 	function connectionCatalogDetails(providerId: string, id: string, { provider, connection, override }: Pick<ReturnType<typeof resolve>, 'provider' | 'connection' | 'override'>) {
 		if (connection.issue) return undefined;
-		const normalize = (address?: string) => (URL.parse(address ?? '')?.href ?? address ?? '').replace(/\/+$/u, '');
 		const hasConnectionOverride = Boolean(override?.protocol || override?.baseUrl);
 		const catalogConnection = hasConnectionOverride ? resolve(providerId, id, false).connection : connection;
 		let details: ModelCatalogDetails | undefined;
-		if (provider && catalogConnection.api === connection.api && normalize(catalogConnection.baseUrl) === normalize(connection.baseUrl)) {
+		if (provider && catalogConnection.api === connection.api && normalizeModelAddress(catalogConnection.baseUrl) === normalizeModelAddress(connection.baseUrl)) {
 			const configuredAddress = serviceOptions.baseUrls?.()[providerId] || (registered.has(providerId) ? provider.baseUrl : undefined);
 			const configuredProtocol = serviceOptions.protocols?.()[providerId];
-			const catalogAddress = (registered.has(providerId) || (configuredAddress && normalize(configuredAddress) !== normalize(providerBaseUrl(provider))))
+			const catalogAddress = (registered.has(providerId) || (configuredAddress && normalizeModelAddress(configuredAddress) !== normalizeModelAddress(providerBaseUrl(provider))))
 				? configuredAddress : undefined;
 			details = serviceOptions.catalogDetails?.(providerId, id, catalogAddress)
 				?? (!catalogAddress && (!configuredProtocol || configuredProtocol === providerProtocol(provider))
@@ -518,21 +552,55 @@ export function createModelService(
 		return routeDetails ? mergeModelCatalogDetails(new Map([[id, routeDetails]]), details && new Map([[id, details]])).get(id) : details;
 	}
 
-	function modelFeatures(providerId: string, id: string, route: Pick<ReturnType<typeof resolve>, 'provider' | 'connection' | 'override'>) {
+	const modelType: NonNullable<ModelService['modelType']> = (providerId, id) => {
+		const mediaType = knownMediaModelType(providerId, id);
+		if (mediaType) return mediaType;
+		if (providerId === 'typesafe' && !registered.has(providerId)) {
+			const address = normalizeModelAddress(serviceOptions.modelOverrides?.()[providerId]?.[id]?.baseUrl
+				|| serviceOptions.baseUrls?.()[providerId]);
+			if (!address || address === 'https://api.typesafe.ai/v1') return 'other';
+		}
+		const route = resolve(providerId, id);
+		const { provider, exact, connection, override } = route;
+		const details = connectionCatalogDetails(providerId, id, route);
+		const catalogType = confirmedCatalogModelType(details);
+		if (catalogType || details?.evidence?.type?.conflict) return catalogType;
+		if (!provider || registered.has(providerId)) return undefined;
+		if (exact) return !connection.issue && exact.api === connection.api
+			&& normalizeModelAddress(exact.baseUrl) === normalizeModelAddress(connection.baseUrl) ? 'text' : undefined;
+		const known = provider.getAllModels?.().find((entry) => entry.id === id && piNonChatType(entry));
+		if (!known) return undefined;
+		const endpoint = normalizeModelAddress(known.baseUrl);
+		const address = normalizeModelAddress(override?.baseUrl?.trim() || serviceOptions.baseUrls?.()[providerId]);
+		const protocol = override?.protocol?.trim() || serviceOptions.protocols?.()[providerId];
+		const matchingProtocol = !protocol || protocol === known.api
+			|| provider.getModels().some((entry) => entry.api === protocol && normalizeModelAddress(entry.baseUrl) === endpoint);
+		if ((!address || address === endpoint) && matchingProtocol) return piNonChatType(known);
+		return undefined;
+	};
+
+	function modelFeatures(providerId: string, id: string, route: ReturnType<typeof requestModel>) {
 		const { connection, override } = route;
 		const details = connectionCatalogDetails(providerId, id, route);
 		const structuredOutput = (override?.capabilities?.structuredOutput
 			?? (details?.evidence?.structuredOutput?.conflict ? undefined : details?.structuredOutput)) === true
 			&& supportsResponseSchema(connection.api, connection.baseUrl, id);
 		const videoInput = override?.input?.includes('video') ?? catalogVideoInput(details);
+		const pdfFormat = supportsPdfInput(connection, id, route.model?.input.includes('image') ?? false, details, override?.input);
 		const tools = override?.capabilities?.tools ?? details?.tools ?? true;
-		return { structuredOutput, videoInput, tools };
+		return { structuredOutput, videoInput, pdfFormat, tools };
 	}
 
 	const stream = (request: ModelRequest, onUsage?: Parameters<ModelService['send']>[1]): ModelStream => {
+		const checkModelType = () => {
+			if (!isTextModel({ modelOverrides: serviceOptions.modelOverrides?.() ?? {} }, request, modelType)) {
+				throw new Error('所选模型无法处理文字对话，请重新选择。');
+			}
+		};
+		checkModelType();
 		const { provider, connection, override, model: selectedModel } = requestModel(request.providerId, request.model);
 		if (!provider || !selectedModel) throw new Error(CONNECTION_ERRORS[connection.issue ?? 'unknown-provider']);
-		const features = modelFeatures(request.providerId, request.model, { provider, connection, override });
+		const features = modelFeatures(request.providerId, request.model, { provider, connection, override, model: selectedModel });
 		const vision = selectedModel.input.includes('image');
 		if (request.images?.required && !vision) throw new Error('当前模型连接未启用图片输入，请选择支持图片的模型。');
 		const schema = request.responseSchema;
@@ -542,6 +610,10 @@ export function createModelService(
 		const videoMarker = video ? `[scribe-video-${randomUUID()}]\n` : undefined;
 		if (video && !videoFormat) throw new Error('当前模型连接无法发送视频，请选择已接通视频输入的模型。');
 		if (video?.hasFiles && videoTakesOnlyUrls(videoFormat)) throw new Error('当前模型接口接受 HTTPS 视频链接，请以 Markdown 视频嵌入链接提交。');
+		const pdf = request.pdf;
+		const pdfMarker = pdf ? `[scribe-pdf-${randomUUID()}]\n` : undefined;
+		if (pdf && !features.pdfFormat) throw new Error('当前模型连接无法发送 PDF，请选择已接通 PDF 输入的模型。');
+		if (pdf && (video || request.images || request.tools.length)) throw new Error('PDF 只能由独立解析请求发送。');
 		ensureAdapter(provider, selectedModel.api);
 		let model = selectedModel;
 		if (override?.contextWindow) model = { ...model, contextWindow: override.contextWindow };
@@ -560,11 +632,14 @@ export function createModelService(
 				};
 			} else if (native) reasoning = level;
 		}
-		if (schema || video) {
+		if (schema || video || pdf) {
 			const validateThinking = onPayload;
 			onPayload = async (payload, activeModel) => {
 				await validateThinking?.(payload, activeModel);
 				const fields = schema ? applyResponseSchema(payload, model.api, schema, model.baseUrl) : payload;
+				if (pdf && features.pdfFormat && pdfMarker) {
+					return applyModelPdf(fields, features.pdfFormat, pdfMarker, await pdf.load(controller.signal));
+				}
 				return video && videoFormat && videoMarker
 					? applyModelVideo(fields, videoFormat, videoMarker, await video.load(controller.signal))
 					: fields;
@@ -576,7 +651,7 @@ export function createModelService(
 		request.signal?.addEventListener('abort', onAbort, { once: true });
 		const cleanup = () => request.signal?.removeEventListener('abort', onAbort);
 		const configuredAddress = override?.baseUrl?.trim() || serviceOptions.baseUrls?.()[request.providerId]?.trim() || registered.has(request.providerId);
-		const expectedBase = configuredAddress && connection.baseUrl ? new URL(connection.baseUrl) : undefined;
+		const expectedBase = (pdf || configuredAddress) && connection.baseUrl ? new URL(connection.baseUrl) : undefined;
 		const reportedUsage = captureReportedUsage(model.api);
 		let promptEstimate: number | undefined;
 		const publishUsage = () => {
@@ -584,8 +659,10 @@ export function createModelService(
 			onUsage?.({ reportedUsage: reportedUsage.read(), ...(estimatedUsage && { estimatedUsage }), usageStatus: reportedUsage.status() });
 		};
 		const confirmation = { beforeSend: request.beforeSend, expectedBase, controller, onSend: async (address: string) => {
+			checkModelType();
 			await request.onTransmission?.(address);
 			controller.signal.throwIfAborted();
+			checkModelType();
 			reportedUsage.reset(promptEstimate);
 			if (promptEstimate !== undefined) publishUsage();
 		} };
@@ -625,10 +702,12 @@ export function createModelService(
 			fetch: schema && needsBufferedGroqSchema(connection) ? bufferedGroqSchemaFetch(fetchModel) : fetchModel,
 		};
 		try {
-			const input = video && videoMarker ? {
+			const marker = pdfMarker ?? videoMarker;
+			const messageIndex = pdf?.messageIndex ?? video?.messageIndex;
+			const input = marker ? {
 				...request,
-				messages: request.messages.map((message, index) => index === video.messageIndex
-					? { ...message, content: videoMarker + message.content } : message),
+				messages: request.messages.map((message, index) => index === messageIndex
+					? { ...message, content: marker + message.content } : message),
 			} : request;
 			const start = (images?: Map<number, ImageContent[]>) => {
 				controller.signal.throwIfAborted();
@@ -637,25 +716,25 @@ export function createModelService(
 				return models.streamSimple(model, context, options);
 			};
 			const source = vision && request.images ? request.images.load(controller.signal).then(start) : start();
-			return new PiModelStream(source, controller, cleanup, reportedUsage, confirmation, Boolean(schema), onUsage);
+			return new PiModelStream(source, controller, cleanup, reportedUsage, confirmation, Boolean(schema), Boolean(pdf), onUsage);
 		} catch (error) {
 			cleanup();
 			throw error;
 		}
 	};
 
-	async function discoverProviderModels(provider: Provider, signal?: AbortSignal, sharedPiCatalog?: () => Promise<unknown>): Promise<ModelCatalogResult> {
+	async function discoverOfficialModels(provider: Provider, baseUrl: string, signal?: AbortSignal): Promise<ModelCatalogResult | undefined> {
 		const providerId = provider.id;
 		const bundled = provider.getModels();
 		const nonChat = new Set(provider.getAllModels?.().filter((model) => model.type && model.type !== 'chat').map((model) => model.id));
 		for (const model of bundled) nonChat.delete(model.id);
 		try {
 			const requestSignal = catalogSignal(signal);
-			const baseUrl = providerBaseUrl(provider);
 			if (ACCOUNT_CATALOGS.has(providerId)) {
 				const credential = await credentials.read(providerId, { signal: requestSignal });
 				const resolved = credential ? await models.getAuth(providerId, { signal: requestSignal }) : undefined;
-				const catalog = await fetchAccountModelCatalog(providerId, baseUrl, credential, resolved, transport.fetch, requestSignal, nonChat);
+				const catalog = await fetchAccountModelCatalog(providerId, baseUrl, credential, resolved, transport.fetch, requestSignal, nonChat,
+					providerId === 'amazon-bedrock' ? new Set(bundled.map(({ id }) => id)) : undefined);
 				signal?.throwIfAborted();
 				if (catalog) return catalog;
 			} else {
@@ -667,33 +746,13 @@ export function createModelService(
 			signal?.throwIfAborted();
 		}
 		try {
-			if (provider.refreshModels) {
-				const result = await models.refresh({ allowNetwork: true, force: true, providers: [providerId], signal: catalogSignal(signal) });
-				signal?.throwIfAborted();
-				const refreshed = provider.getModels();
-				if (!result.aborted && !result.errors.size && refreshed !== bundled) {
-					return { models: refreshed.map((model) => model.id), source: 'provider',
-						details: sourceModelCatalogDetails(piCatalogDetails(refreshed), 'pi', new Date().toISOString()) };
-				}
-			}
+			const catalog = await fetchArkPublicModelCatalog(providerId, transport.fetch, catalogSignal(signal));
+			signal?.throwIfAborted();
+			if (catalog) return catalog;
 		} catch {
 			signal?.throwIfAborted();
 		}
-
-		// 额外预置没有同套餐的 Pi 目录，避免把另一个套餐的模型当成可选。
-		const piId = EXTRA_PROVIDERS.some((entry) => entry.id === providerId) ? undefined : providerId;
-		if (piId) {
-			try {
-				const catalog = sharedPiCatalog
-					? readPiModelCatalog(((await sharedPiCatalog()) as Record<string, unknown> | undefined)?.[piId], piId)
-					: await fetchPiModelCatalog(piId, transport.fetch, catalogSignal(signal));
-				signal?.throwIfAborted();
-				return catalog;
-			} catch {
-				signal?.throwIfAborted();
-			}
-		}
-		return { models: provider.getModels().map((model) => model.id), source: 'bundled' };
+		return undefined;
 	}
 
 	async function readCustomModelCatalog(providerId: string, baseUrl: string, signal?: AbortSignal): ReturnType<ModelService['listCustomModels']> {
@@ -713,7 +772,8 @@ export function createModelService(
 				const details = documentedRouteDetails(providerId, model, protocol, endpoint);
 				if (details) confirmed.set(model, details);
 			}
-			return { models: catalog.models, details: mergeModelCatalogDetails(catalog.details, confirmed), baseUrl: endpoint };
+			return { models: catalog.models, specializedModels: specializedCatalogModels(catalog), partial: catalog.partial,
+				details: mergeModelCatalogDetails(catalog.details, confirmed), baseUrl: endpoint };
 		};
 		if (['azure', 'cloudflare-ai-gateway', 'cloudflare-workers-ai', 'amazon-bedrock', 'bailian-payg'].includes(providerId)) {
 			const catalog = await fetchAccountModelCatalog(providerId, endpoint, credential, undefined, transport.fetch, requestSignal);
@@ -721,9 +781,10 @@ export function createModelService(
 		}
 		const protocol = configuredProtocol
 			|| serviceOptions.customProviders?.().find(({ id }) => id === providerId)?.protocol
-			|| (providerId === 'anthropic' || /^minimax(?:-cn)?$/u.test(providerId) ? 'anthropic-messages' : '')
+			|| (providerId === 'anthropic' || /^minimax(?:-cn)?$/u.test(providerId) || MINIMAX_M_PLAN_ORIGINS.has(providerId) ? 'anthropic-messages' : '')
 			|| (providerId === 'google' ? 'google-generative-ai' : '');
 		if (credential?.type === 'api_key' && credential.key) {
+			checkMiniMaxPlanKey(providerId, credential.key);
 			if (protocol === 'anthropic-messages') headers['x-api-key'] = credential.key;
 			else if (protocol === 'google-generative-ai') headers['x-goog-api-key'] = credential.key;
 			else headers.authorization = `Bearer ${credential.key}`;
@@ -746,6 +807,7 @@ export function createModelService(
 	return {
 		contextLimits,
 		modelConnection: (providerId, id) => resolve(providerId, id).connection,
+		modelType,
 		modelOrigin: ({ providerId, model: id }) => {
 			const { connection } = resolve(providerId, id);
 			return connection.issue ? undefined : URL.parse(connection.baseUrl)?.origin;
@@ -753,61 +815,88 @@ export function createModelService(
 		thinkingOptions,
 		providers: (): ModelProviderInfo[] => {
 			syncCustomProviders();
-			return models.getProviders().map((provider) => ({
-				id: provider.id,
-				label: provider.name,
-				models: provider.getModels().map((model) => ({
-					id: model.id,
-					contextWindow: model.contextWindow ?? 0,
-					maxTokens: model.maxTokens ?? 0,
-					input: [...model.input],
-					reasoning: model.reasoning,
-					requiresReasoning: model.reasoning && model.thinkingLevelMap?.off === null,
-					baseUrl: model.baseUrl,
-					api: model.api,
-					thinkingLevels: getSupportedThinkingLevels(model).filter((level) => level !== 'off'),
-				})),
-				baseUrl: providerBaseUrl(provider),
-				protocol: providerProtocol(provider),
-				protocols: API_PROTOCOLS,
-				...(provider.auth.oauth ? { oauth: { subscription: provider.auth.oauth.isSubscription ?? false } } : {}),
-			}));
+			return models.getProviders().map((provider) => {
+				const nonChatModelTypes = registered.has(provider.id) ? undefined : piNonChatTypes(provider);
+				return {
+					id: provider.id,
+					label: provider.name,
+					models: provider.getModels().map((model) => ({
+						id: model.id,
+						contextWindow: model.contextWindow ?? 0,
+						maxTokens: model.maxTokens ?? 0,
+						input: [...model.input],
+						reasoning: model.reasoning,
+						requiresReasoning: model.reasoning && model.thinkingLevelMap?.off === null,
+						baseUrl: model.baseUrl,
+						api: model.api,
+						thinkingLevels: getSupportedThinkingLevels(model).filter((level) => level !== 'off'),
+					})),
+					baseUrl: providerBaseUrl(provider),
+					protocol: providerProtocol(provider),
+					protocols: API_PROTOCOLS,
+					...(nonChatModelTypes?.size && { nonChatModelTypes }),
+					...(provider.auth.oauth ? { oauth: { subscription: provider.auth.oauth.isSubscription ?? false } } : {}),
+				};
+			});
 		},
 		login: (providerId, interaction, options) => models.login(providerId, 'oauth', interaction, options),
-		listProviderModels: async (providerId, signal, sharedPublicCatalog, sharedPiCatalog) => {
+		listProviderModels: async (providerId, signal) => {
 			signal?.throwIfAborted();
 			syncCustomProviders();
 			const provider = models.getProvider(providerId);
 			if (!provider) throw new Error('Unknown model provider');
 			if (registered.has(providerId)) {
-				const { models, details } = await readCustomModelCatalog(providerId, providerBaseUrl(provider), signal);
-				return { models, details, source: 'provider' };
+				const catalog = await readCustomModelCatalog(providerId, providerBaseUrl(provider), signal);
+				return { ...catalog, source: 'provider' };
 			}
-			const bundled = piCatalogDetails(provider.getModels());
-			const [catalog, publicCatalog] = await Promise.all([
-				discoverProviderModels(provider, signal, sharedPiCatalog),
-				(sharedPublicCatalog ?? fetchModelsDevCatalog(transport.fetch, catalogSignal(signal))).catch(() => undefined),
+			const bundled = piCatalogDetails(provider);
+			const configured = serviceOptions.protocols?.()[providerId];
+			const planAddress = configured && miniMaxPlanBaseUrl(providerId, configured);
+			const baseUrl = planAddress || providerBaseUrl(provider);
+			const protocol = planAddress ? configured : providerProtocol(provider);
+			const known = provider.getAllModels?.() ?? provider.getModels();
+			const connection = { baseUrl, protocol, models: planAddress ? known.map((model) => ({ ...model, api: protocol, baseUrl })) : known };
+			const [official, pi, publicCatalog] = await Promise.all([
+				discoverOfficialModels(provider, baseUrl, signal),
+				fetchPiModelCatalog(providerId, transport.fetch, catalogSignal(signal), connection).catch(() => undefined),
+				fetchModelsDevCatalog(transport.fetch, catalogSignal(signal)).catch(() => undefined),
 			]);
 			signal?.throwIfAborted();
 			const checkedAt = new Date().toISOString();
-			const baseUrl = providerBaseUrl(provider);
-			const protocol = providerProtocol(provider);
-			const configured = serviceOptions.protocols?.()[providerId];
-			if (configured && configured !== protocol) return { ...catalog, details: undefined };
-			const publicDetails = modelsDevDetails(providerId, publicCatalog, { baseUrl, protocol, models: provider.getModels() }, checkedAt);
-			const details = mergeModelCatalogDetails(sourceModelCatalogDetails(bundled, 'bundled'),
-				sourceModelCatalogDetails(catalog.details, catalog.source, checkedAt),
-				publicDetails, documentedModelDetails(providerId));
-			return { ...catalog, details };
+			if (configured && configured !== protocol) return { models: official?.models ?? [], source: official?.source ?? 'bundled' };
+			const publicModels = readModelsDevCatalog(providerId, publicCatalog, connection, checkedAt);
+			const officialDetails = planAddress && official?.details
+				? new Map([...official.details].map(([id, details]) => [id, { ...details, connectionProtocol: protocol }])) : official?.details;
+			const details = mergeModelCatalogDetails(
+				sourceModelCatalogDetails(bundled, 'bundled'),
+				sourceModelCatalogDetails(pi?.details, 'pi', checkedAt),
+				publicModels.details,
+				official && sourceModelCatalogDetails(officialDetails, official.source, checkedAt),
+				documentedModelDetails(providerId),
+			);
+			const publicCandidates = [pi, publicModels].filter((catalog): catalog is ModelCatalogResult =>
+				Boolean(catalog && (catalog.models.length || (catalog.specializedModels ?? specializedCatalogModels(catalog)).length)));
+			const catalogs = official ? [official] : publicCandidates;
+			const source = catalogs[0]?.source ?? 'bundled';
+			const candidates = source === 'bundled' ? provider.getModels().map(({ id }) => id) : catalogs.flatMap(({ models }) => models);
+			const specialized = new Set(catalogs.flatMap((catalog) => catalog.specializedModels ?? specializedCatalogModels(catalog)));
+			const modelIds = [...new Set(candidates)].filter((id) => {
+				const type = confirmedCatalogModelType(details.get(id));
+				if (!type || type === 'text') return true;
+				specialized.add(id);
+				return false;
+			});
+			return { models: modelIds, source, specializedModels: source === 'bundled' ? undefined : [...specialized], details, partial: official?.partial };
 		},
 		listCustomModels: readCustomModelCatalog,
 		modelCapabilities: (providerId, id) => {
 			const route = requestModel(providerId, id);
 			if (!route.model) return { structuredOutput: false, imageInput: false };
-			const { structuredOutput, tools, videoInput } = modelFeatures(providerId, id, route);
+			const { structuredOutput, tools, videoInput, pdfFormat } = modelFeatures(providerId, id, route);
 			const format = videoInput ? nativeVideoFormat(route.connection, id) : undefined;
 			return { structuredOutput, tools, imageInput: route.model.input.includes('image'),
-				...(format && { videoAnalysis: videoTakesOnlyUrls(format) ? 'link' as const : 'file' as const }) };
+				...(format && { videoAnalysis: videoTakesOnlyUrls(format) ? 'link' as const : 'file' as const }),
+				...(pdfFormat && { pdfAnalysis: true }) };
 		},
 		stream,
 		send: (request, onUsage) => stream(request, onUsage).result(),

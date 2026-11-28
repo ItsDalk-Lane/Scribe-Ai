@@ -123,7 +123,8 @@ function openRoleEditor(
 		input.setValue(draft.readOnly === true).onChange((value) => { draft.readOnly = value; });
 	});
 
-	const choices = chatModelOptions(settings, () => communication.models.providers()).groups;
+	const { modelType } = communication.models;
+	const choices = chatModelOptions(settings, () => communication.models.providers(), undefined, undefined, modelType).groups;
 	const modelRow = new Setting(content).setName(text.models);
 	const model = new DropdownComponent(modelRow.controlEl).addOption('', copy.inheritedModel);
 	model.selectEl.setAttribute('aria-label', text.models);
@@ -132,7 +133,7 @@ function openRoleEditor(
 	}
 	if (draft.model) {
 		const key = chatModelKey(draft.model.providerId, draft.model.model);
-		if (!isModelAvailable(settings, draft.model)) {
+		if (!isModelAvailable(settings, draft.model, modelType)) {
 			model.addOption(key, `${draft.model.model} · ${copy.unavailableModel}`);
 			const unavailable = model.selectEl.options[model.selectEl.options.length - 1];
 			if (unavailable) unavailable.disabled = true;
@@ -175,7 +176,7 @@ function openRoleEditor(
 			return;
 		}
 		const selection = normalized.model;
-		if (selection && !isModelAvailable(settings, selection)) {
+		if (selection && !isModelAvailable(settings, selection, modelType)) {
 			new Notice(copy.unavailableModel);
 			return;
 		}

@@ -3,39 +3,50 @@ import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 import { videoMime } from '../../communication/modelVideo';
-import type { ModelRequest, ModelService, RunContext, RunObserver, SavedVideoItem, ScribeSettings, VideoSourceKind } from '../../types';
+import type { ModelRequest, ModelService, RunContext, RunObserver, SavedMediaAnalysisItem, ScribeSettings, VideoSourceKind } from '../../types';
 import { meteredService, type UsagePreview, type UsageRecord } from '../meteredService';
 import { isModelAvailable, videoModelFor } from '../settings/modelAvailability';
 import { guardModelConnection } from '../settings/modelConnection';
 import { prepareVideo, transcodableVideo } from './videoEncoding';
 import { videoSourceKind, videoSources } from './videoAttachments';
 
-type VideoModels = Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin' | 'modelCapabilities'> & Partial<Pick<ModelService, 'modelConnection'>>;
+type VideoModels = Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin' | 'modelCapabilities' | 'modelType' | 'prepareModel'>
+	& Partial<Pick<ModelService, 'modelConnection'>>;
 
-export function createVideoAnalysis(ctx: RunContext, settings: ScribeSettings, models: VideoModels,
+export async function createVideoAnalysis(ctx: RunContext, settings: ScribeSettings, models: VideoModels,
 	record: UsageRecord, save: (content: string, kinds: VideoSourceKind[]) => Promise<void>,
-	items: { previous?: readonly SavedVideoItem[]; alreadySaved: boolean; save(item: SavedVideoItem): Promise<void> },
-	confirmResume?: RunObserver['confirmResume'], preview?: UsagePreview): RunContext['videoAnalysis'] {
+	items: { previous?: readonly SavedMediaAnalysisItem[]; alreadySaved: boolean; save(item: SavedMediaAnalysisItem): Promise<void> },
+	confirmResume?: RunObserver['confirmResume'], preview?: UsagePreview): Promise<RunContext['videoAnalysis']> {
 	const { task, observer, signal } = ctx;
-	const sources = videoSources(task.request, transcodableVideo).flatMap((source) => {
+	const selected = videoSources(task.request, transcodableVideo).flatMap((source) => {
 		const kind = videoSourceKind(source);
 		const choice = videoModelFor(settings, kind);
-		if (!choice) return [];
+		return choice ? [{ source, kind, choice }] : [];
+	});
+	if (!selected.length) return;
+	if (models.prepareModel && ctx.permissions.canSendOutbound()) {
+		for (const [kind, choice] of new Map(selected.map(({ kind, choice }) => [kind, choice] as const))) {
+			if (videoModelFor(settings, kind) === choice && isModelAvailable(settings, choice, models.modelType)) {
+				await models.prepareModel(choice, signal);
+			}
+		}
+		signal.throwIfAborted();
+	}
+	const sources = selected.map(({ source, kind, choice }) => {
 		const origin = models.modelOrigin?.(choice);
-		const guard = guardModelConnection(settings, choice, models.modelConnection);
+		const guard = guardModelConnection(settings, choice, models.modelConnection, models.modelType);
 		const check = () => {
-			guard();
 			const input = models.modelCapabilities?.(choice.providerId, choice.model).videoAnalysis;
-			if (videoModelFor(settings, kind) !== choice || !isModelAvailable(settings, choice) || !input
+			if (videoModelFor(settings, kind) !== choice || !isModelAvailable(settings, choice, models.modelType) || !input
 				|| (kind === 'file' && input !== 'file')) {
 				throw new Error('视频解析模型已停用或连接已变更，请在「服务」中重新选择后提交。');
 			}
+			guard();
 			if (!ctx.permissions.canSendOutbound()) throw new Error('本次任务未授权使用视频解析服务。');
 			return input;
 		};
-		return [{ source, kind, choice, origin, check }];
+		return { source, kind, choice, origin, check };
 	});
-	if (!sources.length) return;
 	const kinds = [...new Set(sources.map(({ kind }) => kind))];
 	const videoModels = meteredService(models, 'video', record, preview);
 	const approved = new Set<string>();

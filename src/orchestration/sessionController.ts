@@ -2,7 +2,7 @@ import { createRunPromptContext } from './context/promptContext';
 import { createLongTermMemory } from './context/longTermMemory';
 import { createDirectoryRules } from './context/writingRules';
 import type { LocalState } from './storage/localState';
-import { guardModelConnection, queuedModelDestination, sameQueuedDestination } from './settings/modelConnection';
+import { guardModelConnection, queuedModelDestination, sameQueuedDestination, withPreparedModels } from './settings/modelConnection';
 import { confirmedGoalReport } from '../interaction/chatGoal';
 import type { ChatGoal } from '../interaction/chatGoal';
 import { reviewGoalCompletion } from './context/goalReview';
@@ -10,7 +10,7 @@ import { matchesApprovedPlan, submittedPlan } from '../interaction/chatPlan';
 import { connectPlanRun } from './context/planRun';
 import { obsidianSearchToolName } from '../tools/workspaceTools';
 import { chatTaskReadTools } from '../tools/chatTaskTools';
-import { isModelAvailable, isProviderEnabled, videoModelFor } from './settings/modelAvailability';
+import { isModelAvailable, isProviderEnabled, isTextModel, videoModelFor } from './settings/modelAvailability';
 import { createSkillRun } from './context/skillRun';
 import { bindSkillMentions } from '../skills/mentions';
 import type { SkillRegistry } from './context/skills';
@@ -20,6 +20,8 @@ import { isAbsolute } from 'node:path';
 import type { App, FileSystemAdapter } from 'obsidian';
 import { logScope } from '../communication/diagnostics';
 import { meteredService } from './meteredService';
+import { checkQueuedPdfDestination, createPdfAnalysis } from './context/pdfAnalysis';
+import { pdfSources } from './context/pdfAttachments';
 import { createVideoAnalysis } from './context/videoAnalysis';
 import { transcodableVideo } from './context/videoEncoding';
 import { videoSourceKind, videoSources } from './context/videoAttachments';
@@ -43,7 +45,8 @@ import type {
 	ConversationSnapshot, ConversationStore, ExecutionMode, ModelService, QueuedMessage, QueuedModelDestination, RunContext, RunObserver, RunState, RuntimeLayer, SavedRun, ScribeSettings, SessionController, SkillMention, Task, TaskRequest,
 } from '../types';
 
-type RunModels = Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin' | 'modelCapabilities'> & Partial<Pick<ModelService, 'modelConnection'>>;
+type RunModels = Pick<ModelService, 'send' | 'contextLimits' | 'modelOrigin' | 'modelCapabilities' | 'modelType' | 'prepareModel' | 'withPreparedModels'>
+	& Partial<Pick<ModelService, 'modelConnection'>>;
 const readOnlyTools = new Set([...readOnlySkillTools, ...chatTaskReadTools, 'Read', 'Glob', 'Grep', obsidianSearchToolName, ...subagentToolNames]);
 
 interface Steering {
@@ -110,7 +113,7 @@ async function runTask(
 		task.request.skillScope ??= skills.scope(refs, activeNote);
 		task.request.skillNotePaths ??= skills.notePaths(refs, restored ? '' : activeNote);
 	}
-	const checkModel = guardModelConnection(settings, selection, models?.modelConnection);
+	const checkModel = guardModelConnection(settings, selection, models?.modelConnection, models?.modelType);
 	if (steering) steering.destination = queuedModelDestination(selection, models?.modelConnection);
 	let current: RunState | undefined;
 	const trackingObserver: RunObserver = {
@@ -327,15 +330,23 @@ async function runTask(
 			await subagents.connect(ctx, () => current, child?.agentId, child?.readOnly, directAgent && { role: directAgent.id, skills: directSkills });
 			if (child?.instructions) ctx.subagentInstructions = child.instructions;
 		}
+		const prior = restored?.run ?? (replaceAt !== undefined ? snapshot.runs[replaceAt] : saved.runs.at(-1));
+		const retryAttachments = prior && ['interrupted', 'failed', 'cancelled'].includes(prior.state.status) ? prior : undefined;
+		if (ctx && !child) {
+			if (!sideSnapshot && !intent) {
+				ctx.pdfAnalysis = await createPdfAnalysis(ctx, settings, models, transcript.recordUsage,
+					{ previous: retryAttachments?.pdfItems, alreadySaved: Boolean(restored),
+						save: (item) => conversations.append(conversationId, [{ type: 'pdf-item', taskId: task.id, item }]) },
+					{ confirmResume: restored ? observer.confirmResume : undefined, preview: transcript.previewUsage, queued: queued?.message });
+			} else if (pdfSources(task.request).length) throw new Error('请在普通聊天中提交 PDF 附件。');
+		}
 		const savedVideo = restored?.run.videoAnalysis;
 		if (ctx && savedVideo) {
 			ctx.videoAnalysis = { sources: restored.run.videoAnalysisSources ?? ['file', 'link'], read: () => Promise.resolve(savedVideo) };
 		} else if (ctx && models && !sideSnapshot && !child && !intent) {
-			const prior = restored?.run ?? (replaceAt !== undefined ? snapshot.runs[replaceAt] : saved.runs.at(-1));
-			const previous = prior && ['interrupted', 'failed', 'cancelled'].includes(prior.state.status) ? prior.videoItems : undefined;
-			ctx.videoAnalysis = createVideoAnalysis(ctx, settings, models, transcript.recordUsage,
+			ctx.videoAnalysis = await createVideoAnalysis(ctx, settings, models, transcript.recordUsage,
 				(content, sources) => conversations.append(task.request.conversationId, [{ type: 'video-analysis', taskId: task.id, content, sources }]),
-				{ previous, alreadySaved: Boolean(restored), save: (item) => conversations.append(task.request.conversationId, [{ type: 'video-item', taskId: task.id, item }]) },
+				{ previous: retryAttachments?.videoItems, alreadySaved: Boolean(restored), save: (item) => conversations.append(task.request.conversationId, [{ type: 'video-item', taskId: task.id, item }]) },
 				restored ? observer.confirmResume : undefined, transcript.previewUsage);
 		}
 		const agent = runtime.createAgent(ctx, restored?.run.state);
@@ -403,7 +414,9 @@ export function createSessionController(
 		return Array.from(active.values()).some(({ conversationId }) => conversationId === key);
 	}
 	function modelChoice(choice?: RunContext['model']): RunContext['model'] {
-		if (choice ? !isModelAvailable(settings, choice) : !isProviderEnabled(settings, settings.providerId)) {
+		const available = choice ? isModelAvailable(settings, choice, models?.modelType)
+			: isProviderEnabled(settings, settings.providerId) && isTextModel(settings, settings, models?.modelType);
+		if (!available) {
 			throw new Error('所选模型已不可用，请重新选择。');
 		}
 		return choice ?? settings;
@@ -415,6 +428,18 @@ export function createSessionController(
 		const preferred = reasoning === undefined ? settings.thinkingByModel[chatModelKey(providerId, model)] : reasoning;
 		selection.reasoning = preferred === null || !thinkingOptions ? preferred : thinkingOptions(selection, preferred).level ?? null;
 		return selection;
+	}
+	function initialSelection(choice?: RunContext['model']): RunContext['model'] {
+		if (!models?.prepareModel) return selectedModel(choice);
+		const { providerId, model, reasoning } = modelChoice(choice);
+		if (!providerId || !model) throw new Error('请先在设置中选择模型。');
+		return { providerId, model, reasoning };
+	}
+	async function prepareSelection(selection: RunContext['model'], signal: AbortSignal): Promise<RunContext['model']> {
+		if (!models?.prepareModel) return selection;
+		await models.prepareModel(selection, signal);
+		signal.throwIfAborted();
+		return selectedModel(selection);
 	}
 	function restoredModel(selection: RunContext['model']): RunContext['model'] {
 		if (selection.reasoning && thinkingOptions && !thinkingOptions(selection).levels.includes(selection.reasoning)) {
@@ -432,7 +457,7 @@ export function createSessionController(
 		const steering: Steering = { accepting: true, pending: new Map(), changed: new AbortController() };
 		active.set(taskId, { conversationId: key, controller, steering });
 		// 这段任务发起的所有模型请求都记入该对话的日志文件。
-		const result = logScope.run(conversationId.toLowerCase(), () => run(controller.signal, steering));
+		const result = logScope.run(conversationId.toLowerCase(), () => withPreparedModels(models, () => run(controller.signal, steering)));
 		return { taskId, result: result.finally(() => {
 			rejectSteering(steering, steering.pending.keys());
 			active.delete(taskId);
@@ -518,11 +543,14 @@ export function createSessionController(
 					if (running) throw new Error('侧聊正在回答。');
 					if ('target' in draft && draft.target) throw new Error('请在普通聊天中指定工具或子 Agent。');
 					if (!instruction.trim()) throw new Error('请输入问题。');
-					const model = selectedModel(choice);
-					if (draft.queued && (!draft.queued.destination
-						|| !sameQueuedDestination(draft.queued.destination, queuedModelDestination(model, models?.modelConnection)))) {
-						throw new Error('侧聊的接收方与排队记录不一致。请切换到原模型，或在主聊天确认接收方后发送。');
-					}
+					const model = initialSelection(choice);
+					const checkDestination = () => {
+						if (draft.queued && (!draft.queued.destination
+							|| !sameQueuedDestination(draft.queued.destination, queuedModelDestination(model, models?.modelConnection)))) {
+							throw new Error('侧聊的接收方与排队记录不一致。请切换到原模型，或在主聊天确认接收方后发送。');
+						}
+					};
+					if (!models?.prepareModel || draft.queued && !draft.queued.destination) checkDestination();
 					const allowedRefs = refs.filter((ref) => !isAbsolute(ref.path) || (ref.kind === 'file' && wasSharedRef(ref)));
 					const notePaths = skills?.notePaths(allowedRefs, '');
 					const task = createTask({ conversationId: id, instruction, skillMentions,
@@ -534,31 +562,51 @@ export function createSessionController(
 					running = controller;
 					// 侧聊不单独存档，它的请求记录归到所属对话。
 					const logOwner = (parentRuns.at(-1)?.request.conversationId ?? id).toLowerCase();
-					const result = logScope.run(logOwner, () => runTask(task, app, settings, runtime, conversations, model, controller.signal,
-						{ onEvent: observer.onEvent }, { sideSnapshot, skills, models })).then((state) => {
+					let confirmPrepared: (() => void) | undefined;
+					let rejectPreparation: ((error: unknown) => void) | undefined;
+					const prepared = models?.prepareModel ? new Promise<void>((resolve, reject) => {
+						confirmPrepared = resolve;
+						rejectPreparation = reject;
+					}) : undefined;
+					void prepared?.catch(() => {});
+					const result = logScope.run(logOwner, () => withPreparedModels(models, async () => {
+						if (models?.prepareModel) {
+							model.reasoning = (await prepareSelection(model, controller.signal)).reasoning;
+							checkDestination();
+							confirmPrepared?.();
+						}
+						return runTask(task, app, settings, runtime, conversations, model, controller.signal,
+							{ onEvent: observer.onEvent }, { sideSnapshot, skills, models });
+					})).then((state) => {
 						// 关闭后，已取消的请求可以收尾，不能恢复已清空的对话。
 						if (!closed && state.messages.some(({ role }) => role === 'user')) {
 							runs.push({ request, model, state });
 						}
 						return state;
+					}, (error: unknown) => {
+						rejectPreparation?.(error);
+						throw error;
 					}).finally(() => { running = undefined; });
-					return { taskId: task.id, request, model, result };
+					return { taskId: task.id, request, model, prepared, result };
 				},
 				stop: () => running?.abort(),
 				close,
 			};
 		},
 		submit(request, observer = {}, replaceFromTaskId, { model, rememberConversation, executionMode, goal } = {}) {
-			const selection = selectedModel(model);
+			const selection = initialSelection(model);
 			const task = mainTask(request, replaceFromTaskId !== undefined);
 			if (replaceFromTaskId && subagents.busy(request.conversationId)) throw new Error('请先停止这段对话的子任务。');
-			return launch(request.conversationId, task.id, (signal, steering) =>
-				runTask(task, app, settings, runtime, conversations, selection, signal, observer, { replaceFromTaskId, steering, rememberConversation, executionMode, models, subagents, skills, goal, localState }));
+			return launch(request.conversationId, task.id, async (signal, steering) => {
+				const resolved = models?.prepareModel ? await prepareSelection(selection, signal) : selection;
+				return runTask(task, app, settings, runtime, conversations, resolved, signal, observer, { replaceFromTaskId, steering, rememberConversation, executionMode, models, subagents, skills, goal, localState });
+			});
 		},
 		submitQueued(message, observer, onStarted, { model, rememberConversation, executionMode, confirmQueuedDestination } = {}) {
-			const selection = selectedModel(model);
+			const initial = initialSelection(model);
 			const task = mainTask(message.request, true);
 			return launch(message.request.conversationId, task.id, async (signal, steering) => {
+				const selection = models?.prepareModel ? await prepareSelection(initial, signal) : initial;
 				let address: string | undefined;
 				if (models?.modelConnection) {
 					const destination = queuedModelDestination(selection, models.modelConnection);
@@ -576,6 +624,12 @@ export function createSessionController(
 					}
 					address = destination.baseUrl;
 				}
+				if (pdfSources(task.request).length) {
+					const pdf = settings.pdfModel;
+					if (pdf && models?.prepareModel) await models.prepareModel(pdf, signal);
+					signal.throwIfAborted();
+					checkQueuedPdfDestination(message, settings.pdfModel, models?.modelConnection);
+				}
 				return runTask(task, app, settings, runtime, conversations, selection, signal, observer, {
 					queued: { message, address, onStarted }, steering, rememberConversation, executionMode, models, subagents, skills, localState,
 				});
@@ -589,6 +643,7 @@ export function createSessionController(
 		steer(taskId, message) {
 			if (message.request.selection) return Promise.reject(new Error('选区问答已停用，请新建普通提问。'));
 			if (message.request.target) return Promise.reject(new Error('指定了工具或子 Agent 的消息需要单独发送。'));
+			if (pdfSources(message.request).length) return Promise.reject(new Error('含 PDF 的消息需作为独立任务发送，请等待队列自动发送。'));
 			if (videoSources(message.request, transcodableVideo).some((source) => videoModelFor(settings, videoSourceKind(source)))) {
 				return Promise.reject(new Error('含视频的消息需作为独立任务发送，请等待队列自动发送。'));
 			}
@@ -617,6 +672,11 @@ export function createSessionController(
 				const selection = modelChoice(model);
 				if (selection.providerId !== run.model.providerId || selection.model !== run.model.model) {
 					throw new Error(`请先选择原任务使用的模型 ${run.model.model}。`);
+				}
+				if (models?.prepareModel) {
+					await models.prepareModel(run.model, signal);
+					signal.throwIfAborted();
+					modelChoice(run.model);
 				}
 				const refs = run.request.refs.filter(wasSharedRef);
 				const task = { ...createTask({ ...run.request, refs }), id: taskId };

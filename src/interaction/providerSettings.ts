@@ -1,7 +1,7 @@
-import type { ScribeSettings } from '../types';
+import type { ModelService, ScribeSettings } from '../types';
 import { reconcileDefaultModel } from '../orchestration/settings/modelAvailability';
 
-export function removeProviderSettings(settings: ScribeSettings, providerId: string): void {
+export function removeProviderSettings(settings: ScribeSettings, providerId: string, modelType?: ModelService['modelType']): void {
 	delete settings.providerModels[providerId];
 	delete settings.modelOverrides[providerId];
 	delete settings.customProviders[providerId];
@@ -10,5 +10,5 @@ export function removeProviderSettings(settings: ScribeSettings, providerId: str
 	delete settings.communication.baseUrls[providerId];
 	delete settings.communication.protocols[providerId];
 	settings.disabledProviderIds = settings.disabledProviderIds.filter((id) => id !== providerId);
-	if (settings.providerId === providerId) reconcileDefaultModel(settings);
+	if (settings.providerId === providerId) reconcileDefaultModel(settings, modelType);
 }

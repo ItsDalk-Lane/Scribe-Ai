@@ -7,10 +7,14 @@ import {
 	setIcon,
 } from 'obsidian';
 import { createCredentialStore, credentialIdForProvider } from '../communication/credentials';
+import { isVolcengineSubscriptionProvider } from '../communication/extraProviders';
 import { createModelService } from '../communication/providers';
 import type ScribeAiPlugin from '../main';
+import { AGENT_PLAN_PROVIDER_ID, knownMediaModelType, CONFIGURED_MODEL_TYPES, confirmedCatalogModelType, MEDIA_MODELS } from '../orchestration/settings/mediaSettings';
+import { mediaAdapters } from '../communication/mediaRegistry';
 import { reconcileDefaultModel } from '../orchestration/settings/modelAvailability';
-import type { ModelCatalogResult, ModelOverride, ModelProviderInfo } from '../types';
+import type { ModelCatalogStore } from '../orchestration/storage/modelCatalogStore';
+import type { ConfiguredModelType, ModelCatalogResult, ModelOverride, ModelProviderInfo } from '../types';
 import { confirmAction } from './ConfirmModal';
 import { renderCredentialLink } from './credentialLink';
 import { modelCatalogAddress, modelDetailsForConnection, renderModelCapabilityIcons } from './modelCapabilityIcons';
@@ -55,6 +59,7 @@ interface ConfigureOptions {
 	custom?: boolean;
 	/** 添加服务商时可选择同一厂商的不同端点 */
 	variants?: ModelProviderInfo[];
+	settingsSignal?: AbortSignal;
 	onSaved: () => void;
 }
 
@@ -88,7 +93,8 @@ export class ConfigureProviderModal extends Modal {
 	private panelOpen = false;
 	private modelCatalog: ModelCatalogResult | null = null;
 	private catalogMessage = '';
-	private fetchController: AbortController | null = null;
+	private fetchRequest: { controller: AbortController; manual: boolean } | null = null;
+	private fetchedCatalog: { connection: Parameters<ModelCatalogStore['fetchConnection']>[1]; result: ModelCatalogResult & { baseUrl?: string } } | null = null;
 	private fetchButton: ButtonComponent | null = null;
 	private panel: HTMLElement | null = null;
 	private triggerEl: HTMLButtonElement | null = null;
@@ -99,10 +105,15 @@ export class ConfigureProviderModal extends Modal {
 	private panelList: HTMLDivElement | null = null;
 	private panelEmpty: HTMLDivElement | null = null;
 	private panelStatus: HTMLDivElement | null = null;
+	private panelTypes: HTMLDivElement | null = null;
+	private panelResults: HTMLDivElement | null = null;
+	private panelType: ConfiguredModelType = 'text';
+	private readonly panelResultsId = `scribe-provider-models-${crypto.randomUUID()}`;
 	private panelSearch?: HTMLInputElement;
 	private loginController: AbortController | null = null;
 	private loginButton: ButtonComponent | null = null;
 	private pendingOAuthSecrets = new Set<string>();
+	private readonly closeOnSettingsLeave = () => this.close();
 
 	constructor(
 		app: App,
@@ -136,6 +147,7 @@ export class ConfigureProviderModal extends Modal {
 	}
 
 	onOpen(): void {
+		this.options.settingsSignal?.addEventListener('abort', this.closeOnSettingsLeave, { once: true });
 		this.modalEl.addClass('scribe-configure-modal');
 		this.contentEl.addClass('scribe-dialog-content');
 		this.renderForm();
@@ -148,8 +160,10 @@ export class ConfigureProviderModal extends Modal {
 	}
 
 	onClose(): void {
-		this.fetchController?.abort();
-		this.fetchController = null;
+		this.options.settingsSignal?.removeEventListener('abort', this.closeOnSettingsLeave);
+		this.fetchRequest?.controller.abort();
+		this.fetchRequest = null;
+		this.fetchedCatalog = null;
 		this.modelCatalog = null;
 		this.catalogMessage = '';
 		this.panelOpen = false;
@@ -210,6 +224,10 @@ export class ConfigureProviderModal extends Modal {
 		});
 	}
 
+	private confirmedModelType(modelId: string, evidence = this.modelDetails(modelId)) {
+		return knownMediaModelType(this.provider.id, modelId) ?? confirmedCatalogModelType(evidence.details, evidence.bundled);
+	}
+
 	private isCustomProvider(): boolean {
 		return Boolean(this.options.custom) || Boolean(this.plugin.services.settings.customProviders[this.provider.id]);
 	}
@@ -260,7 +278,7 @@ export class ConfigureProviderModal extends Modal {
 		this.loginButton = null;
 		this.fetchButton = null;
 		this.panel = this.triggerEl = this.pickerEl = null;
-		this.addedListEl = this.panelList = this.panelEmpty = this.panelStatus = null;
+		this.addedListEl = this.panelList = this.panelEmpty = this.panelStatus = this.panelTypes = this.panelResults = null;
 		const headerTitle = this.renderHeader(`${this.text.configureProvider} ${this.draftName}`, this.text.configureProviderDescription);
 		const scroll = this.contentEl.createDiv({ cls: 'scribe-dialog-scroll' });
 		const fields = scroll.createDiv({ cls: 'scribe-dialog-fields' });
@@ -427,50 +445,71 @@ export class ConfigureProviderModal extends Modal {
 
 	private setPanelOpen(open: boolean): void {
 		this.panelOpen = open;
+		if (open) this.renderPanelRows();
 		this.panel?.toggleClass('scribe-hidden', !open);
 		this.triggerEl?.setAttribute('aria-expanded', String(open));
-		if (open) this.renderPanelRows();
 	}
 
 	private resetModelCatalog(): void {
-		this.fetchController?.abort();
-		this.fetchController = null;
+		this.fetchRequest?.controller.abort();
+		this.fetchRequest = null;
+		this.fetchedCatalog = null;
 		this.modelCatalog = null;
 		this.catalogMessage = '';
+		this.panelType = 'text';
 		this.renderPanelRows();
 		this.renderAddedList();
 	}
 
 	private async requestModelCatalog(baseUrlInput: HTMLInputElement, manual: boolean): Promise<void> {
-		if (this.fetchController) return;
+		if (this.fetchRequest?.manual || (!manual && (this.fetchRequest || this.fetchedCatalog))) return;
 		const baseUrl = this.catalogAddress();
 		if (baseUrl === '') {
 			if (manual) new Notice(this.text.baseUrlRequired);
 			return;
 		}
-		const controller = this.fetchController = new AbortController();
-		const isCurrent = () => this.fetchController === controller && !controller.signal.aborted;
+		this.fetchRequest?.controller.abort();
+		const controller = new AbortController();
+		const request = this.fetchRequest = { controller, manual };
+		const isCurrent = () => this.fetchRequest === request && !controller.signal.aborted;
+		const provider = this.provider;
+		const credentialId = this.draftCredentialId;
+		const protocol = this.isCustomProvider() || this.draftProtocol !== provider.protocol ? this.draftProtocol || undefined : undefined;
+		const connection = { baseUrl, credentialId, protocol };
+		const catalog = this.plugin.services.communication.modelCatalog;
 		this.catalogMessage = '';
+		if (manual) this.setPanelOpen(false);
 		this.renderPanelRows();
+		let ready = false;
 		try {
-			const found = await this.plugin.services.communication.modelCatalog.read(
-				this.provider.id, baseUrl, this.draftCredentialId,
-				this.isCustomProvider() || this.draftProtocol !== this.provider.protocol ? this.draftProtocol : '',
-			);
+			const found = manual
+				? await catalog.fetchConnection(provider, connection, this.createDraftService(credentialId), controller.signal)
+				: await catalog.read(provider.id, baseUrl, credentialId, protocol ?? '');
 			if (!isCurrent()) return;
-			if (this.panelOpen && baseUrl && found?.baseUrl) {
+			if (!found) {
+				this.catalogMessage = manual ? this.text.modelCatalogFetchFailed : this.text.modelCatalogUnavailable;
+				return;
+			}
+			if ((manual || this.panelOpen) && baseUrl && found.baseUrl) {
 				this.draftBaseUrl = baseUrlInput.value = found.baseUrl;
 			}
-			this.modelCatalog = found ?? null;
-			if (!found) this.catalogMessage = this.text.modelCatalogUnavailable;
+			this.modelCatalog = found;
+			if (manual) this.fetchedCatalog = { connection, result: found };
 			this.renderAddedList();
+			ready = true;
 		} catch {
 			if (!isCurrent()) return;
-			this.catalogMessage = this.text.modelCatalogReadFailed;
+			this.catalogMessage = manual ? this.text.modelCatalogFetchFailed : this.text.modelCatalogReadFailed;
 		} finally {
 			if (isCurrent()) {
-				this.fetchController = null;
-				this.renderPanelRows();
+				this.fetchRequest = null;
+				if (manual && ready) {
+					this.setPanelOpen(true);
+					this.panelSearch?.focus();
+				} else {
+					this.renderPanelRows();
+					if (manual && this.catalogMessage) new Notice(this.catalogMessage);
+				}
 			}
 		}
 	}
@@ -521,19 +560,20 @@ export class ConfigureProviderModal extends Modal {
 			addCustom();
 		});
 		addButton.onClick(addCustom);
+		this.panelTypes = panel.createDiv({ cls: 'scribe-model-type-tabs', attr: { role: 'tablist', 'aria-label': this.text.modelType } });
 		this.panelStatus = panel.createDiv({ cls: 'scribe-dialog-muted', attr: { role: 'status' } });
-		this.panelList = panel.createDiv({ cls: 'scribe-model-checklist', attr: { role: 'list' } });
-		this.panelEmpty = panel.createDiv({ cls: 'scribe-models-empty' });
+		const results = this.panelResults = panel.createDiv({ cls: 'scribe-model-type-results', attr: { id: this.panelResultsId } });
+		this.panelList = results.createDiv({ cls: 'scribe-model-checklist', attr: { role: 'list' } });
+		this.panelEmpty = results.createDiv({ cls: 'scribe-models-empty' });
 		search.addEventListener('input', () => this.renderPanelRows());
 
 		trigger.addEventListener('click', () => {
+			if (this.fetchRequest?.manual) return;
 			this.setPanelOpen(!this.panelOpen);
 			if (this.panelOpen) void this.requestModelCatalog(baseUrlInput, false);
 		});
-		this.fetchButton = new ButtonComponent(bar).setTooltip(this.text.fetchModelsDescription).onClick(() => {
-			this.setPanelOpen(true);
-			void this.requestModelCatalog(baseUrlInput, true);
-		});
+		this.fetchButton = new ButtonComponent(bar).setClass('scribe-model-fetch')
+			.setTooltip(this.text.fetchModelsDescription).onClick(() => void this.requestModelCatalog(baseUrlInput, true));
 
 		this.renderPanelRows();
 		this.addedListEl = this.contentEl.createDiv({ cls: 'scribe-model-added-list' });
@@ -555,7 +595,9 @@ export class ConfigureProviderModal extends Modal {
 			const evidence = this.modelDetails(model);
 			renderModelCapabilityIcons(summary, evidence, this.text.modelCapabilityLabels, setIcon);
 			const context = evidence.override?.contextWindow ?? evidence.details?.contextWindow ?? evidence.bundled?.contextWindow ?? 0;
-			summary.createSpan({ cls: 'scribe-model-context', text: formatContext(context) });
+			const type = this.confirmedModelType(model, evidence) ?? evidence.override?.type;
+			summary.createSpan({ cls: 'scribe-model-context',
+				text: type && type !== 'text' ? this.text.modelTypeLabels[type] : formatContext(context) });
 			const meta = row.createSpan({ cls: 'scribe-model-panel-meta' });
 			new ButtonComponent(meta)
 				.setIcon('pencil')
@@ -563,6 +605,8 @@ export class ConfigureProviderModal extends Modal {
 				.setClass('scribe-icon-button')
 				.onClick(() => {
 					void ScribeModelConfigModal.openFor(this.app, this.plugin, this.provider, model, this.text, {
+						settingsSignal: this.options.settingsSignal,
+						catalog: this.modelCatalog ?? undefined,
 						providerBaseUrl: this.draftBaseUrl,
 						providerProtocol: this.draftProtocol,
 						providerCredentialId: this.draftCredentialId,
@@ -599,35 +643,90 @@ export class ConfigureProviderModal extends Modal {
 	}
 
 	private renderPanelRows(): void {
-		const fetching = this.fetchController !== null;
-		this.fetchButton?.setDisabled(fetching).setButtonText(fetching ? this.text.loadingModels : this.text.fetchModels);
-		const list = this.panelList;
-		if (!list) return;
+		const fetching = this.fetchRequest?.manual === true;
+		if (this.triggerEl) this.triggerEl.disabled = fetching;
+		const fetchControl = this.fetchButton?.setDisabled(fetching).buttonEl;
+		if (fetchControl) {
+			fetchControl.setAttribute('aria-busy', String(fetching));
+			fetchControl.setAttribute('aria-label', fetching ? this.text.loadingModels : this.text.fetchModels);
+			fetchControl.empty();
+			fetchControl.createSpan({ cls: 'scribe-model-fetch-label', text: this.text.fetchModels });
+			if (fetching) fetchControl.createSpan({ cls: 'scribe-model-fetch-spinner', attr: { 'aria-hidden': 'true' } });
+		}
+		const { panelList: list, panelTypes: typeTabs, panelResults: results } = this;
+		if (!this.panelOpen || !list || !typeTabs || !results) return;
 		list.empty();
 		const normalized = this.panelSearch?.value.trim().toLowerCase() ?? '';
 		const catalog = this.modelCatalog;
-		const status = fetching ? this.text.loadingModels
-			: this.catalogMessage ? this.catalogMessage
-			: catalog?.source === 'provider' ? this.text.modelsFromProvider
+		const status = catalog?.source === 'provider' ? this.text.modelsFromProvider
 			: catalog?.source === 'pi' ? this.text.modelsFromPi
+			: catalog?.source === 'models.dev' ? this.text.modelsFromModelsDev
+			: catalog?.source === 'docs' ? isVolcengineSubscriptionProvider(this.provider.id) ? this.text.modelsFromArkPlan : this.text.modelsFromDocs
 			: catalog ? this.text.modelsFromBundled : '';
 		const checkedAt = catalog?.updatedAt ? new Date(catalog.updatedAt) : undefined;
-		const freshness = !fetching && catalog ? [catalog.stale && this.text.modelsStale,
+		const freshness = catalog ? [catalog.stale && this.text.modelsStale, catalog.partial && this.text.modelsPartial,
 			checkedAt && Number.isFinite(checkedAt.getTime()) ? checkedAt.toLocaleString() : ''] : [];
-		this.panelStatus?.setText([status, ...freshness].filter(Boolean).join(' · '));
-		this.panelStatus?.toggleClass('scribe-hidden', !status);
-		const ids = catalog
-			? [...new Set([...this.draftModels, ...catalog.models, ...this.customIds])]
-			: [...this.draftModels];
-		const visible = ids.filter((model) => !normalized || model.toLowerCase().includes(normalized));
+		const panelStatus = [status, ...freshness, this.catalogMessage].filter(Boolean).join(' · ');
+		this.panelStatus?.setText(panelStatus);
+		this.panelStatus?.toggleClass('scribe-hidden', !panelStatus);
+		const arkModels = this.provider.id === AGENT_PLAN_PROVIDER_ID ? Object.values(MEDIA_MODELS).flat() : [];
+		const mediaModels = mediaAdapters.flatMap((adapter) => adapter.providerId === this.provider.id ? adapter.models : []);
+		const availableSpecialized = catalog?.specializedModels ?? [...catalog?.details ?? []]
+			.flatMap(([id, { type }]) => type && type !== 'text' ? [id] : []);
+		const specialized = availableSpecialized.filter((id) => {
+			const type = this.confirmedModelType(id);
+			return type !== undefined && type !== 'text';
+		});
+		const ids = [...new Set([
+			...this.draftModels, ...(catalog?.models ?? []), ...specialized, ...arkModels, ...mediaModels, ...(catalog ? this.customIds : []),
+		])];
+		const items = ids.map((model) => {
+			const evidence = this.modelDetails(model);
+			const type = this.confirmedModelType(model, evidence) ?? evidence.override?.type ?? 'text';
+			return { model, evidence, type };
+		});
+		const typesWithModels = new Set(items.map(({ type }) => type));
+		const types = CONFIGURED_MODEL_TYPES.filter((type) => typesWithModels.has(type));
+		const activeType = types.includes(this.panelType) ? this.panelType : types[0];
+		if (activeType) this.panelType = activeType;
+		const tabId = (type: ConfiguredModelType) => `${this.panelResultsId}-${type}`;
+		typeTabs.empty();
+		typeTabs.toggleClass('scribe-hidden', !activeType);
+		results.setAttribute('role', activeType ? 'tabpanel' : 'group');
+		if (activeType) results.setAttribute('aria-labelledby', tabId(activeType));
+		else results.removeAttribute('aria-labelledby');
+		const selectType = (type: ConfiguredModelType) => {
+			this.panelType = type;
+			this.renderPanelRows();
+			typeTabs.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus();
+		};
+		for (const [index, type] of types.entries()) {
+			const selected = type === activeType;
+			const tab = typeTabs.createEl('button', {
+				cls: ['scribe-choice-button', ...(selected ? ['is-selected'] : [])].join(' '), text: this.text.modelTypeLabels[type],
+				attr: { type: 'button', role: 'tab', id: tabId(type), 'aria-controls': this.panelResultsId,
+					'aria-selected': String(selected), tabindex: selected ? '0' : '-1' },
+			});
+			tab.addEventListener('click', () => selectType(type));
+			tab.addEventListener('keydown', (event) => {
+				const next = event.key === 'ArrowLeft' ? types[(index + types.length - 1) % types.length]
+					: event.key === 'ArrowRight' ? types[(index + 1) % types.length]
+						: event.key === 'Home' ? types[0] : event.key === 'End' ? types.at(-1) : undefined;
+				if (!next) return;
+				event.preventDefault();
+				selectType(next);
+			});
+		}
+		const visible = items.filter(({ model, type }) => type === activeType && (!normalized || model.toLowerCase().includes(normalized)));
 		if (this.panelEmpty) {
 			this.panelEmpty.setText(normalized ? this.text.noModelsMatch
 				: catalog ? this.text.noModelsDiscovered : this.text.noModelsAdded);
-			this.panelEmpty.toggleClass('scribe-hidden', visible.length > 0 || fetching || Boolean(this.catalogMessage && !catalog));
+			this.panelEmpty.toggleClass('scribe-hidden', visible.length > 0 || this.fetchRequest !== null || Boolean(this.catalogMessage && !catalog));
 		}
-		for (const model of visible) {
+		for (const { model, evidence } of visible) {
 			const row = list.createDiv({ cls: 'scribe-model-panel-row', attr: { role: 'listitem' } });
-			if (catalog) {
+			const selectable = catalog || knownMediaModelType(this.provider.id, model);
+			if (selectable) {
 				// 圆角复选框：外观像单选，但允许多选
 				const pick = row.createEl('input', {
 					cls: 'scribe-model-radio',
@@ -638,8 +737,8 @@ export class ConfigureProviderModal extends Modal {
 			const summary = row.createDiv({ cls: 'scribe-model-panel-summary' });
 			const name = summary.createSpan({ cls: 'scribe-model-panel-name', text: model });
 			name.addEventListener('pointerenter', () => updateOverflowTitle(name));
-			renderModelCapabilityIcons(summary, this.modelDetails(model), this.text.modelCapabilityLabels, setIcon);
-			if (this.isAdded(model) && !catalog) {
+			renderModelCapabilityIcons(summary, evidence, this.text.modelCapabilityLabels, setIcon);
+			if (this.isAdded(model) && !selectable) {
 				const remove = row.createSpan({ cls: 'scribe-model-panel-remove' });
 				setIcon(remove, 'x');
 				remove.setAttribute('aria-label', this.text.removeModel);
@@ -660,7 +759,9 @@ export class ConfigureProviderModal extends Modal {
 		}
 		try {
 			const settings = this.plugin.services.settings;
-			const providerId = this.provider.id;
+			const provider = this.provider;
+			const providerId = provider.id;
+			const fetched = this.fetchedCatalog;
 			settings.providerModels[providerId] = [...this.draftModels];
 			if (Object.keys(this.draftOverrides).length) settings.modelOverrides[providerId] = { ...this.draftOverrides };
 			else delete settings.modelOverrides[providerId];
@@ -668,9 +769,8 @@ export class ConfigureProviderModal extends Modal {
 				&& this.draftModels.includes(this.draftActiveModel)) {
 				settings.model = this.draftActiveModel;
 			}
-			reconcileDefaultModel(settings);
 			if (custom) {
-				// 自建服务商没有目录，名称/地址/协议就是它的定义本身
+				// 自建服务商由用户保存的名称、地址和协议定义。
 				settings.customProviders[providerId] = { label: name || this.provider.label, baseUrl, protocol };
 				delete settings.communication.providerNames[providerId];
 				delete settings.communication.baseUrls[providerId];
@@ -689,7 +789,12 @@ export class ConfigureProviderModal extends Modal {
 			} else {
 				delete settings.communication.credentialIds[this.provider.id];
 			}
+			const { modelType } = this.plugin.services.communication.models;
+			reconcileDefaultModel(settings, (id, model) => (id === providerId ? this.confirmedModelType(model) : undefined) ?? modelType?.(id, model));
 			await this.plugin.saveSettings();
+			if (this.options.settingsSignal?.aborted) return;
+			if (fetched) await this.plugin.services.communication.modelCatalog.rememberConnection(provider, fetched.connection, fetched.result).catch(() => {});
+			if (this.options.settingsSignal?.aborted) return;
 			this.options.onSaved();
 			this.close();
 		} catch (error) {
@@ -704,7 +809,7 @@ export class ConfigureProviderModal extends Modal {
 			confirmText: this.text.remove,
 			cancelText: this.text.cancel,
 			onConfirm: async () => {
-				removeProviderSettings(this.plugin.services.settings, this.provider.id);
+				removeProviderSettings(this.plugin.services.settings, this.provider.id, this.plugin.services.communication.models.modelType);
 				await this.plugin.saveSettings();
 				this.options.onSaved();
 				this.close();

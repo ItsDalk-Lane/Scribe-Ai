@@ -8,7 +8,7 @@ function fields(value: unknown): Fields {
 
 // 各协议的媒体都沿用 Pi 单幅图像的粗估值；传输编码长度与视觉 token 无关。
 const mediaTokens = estimateTextAndImageContentTokens([{ type: 'image', mimeType: 'image/png', data: '' }]);
-const mediaTypes = new Set(['image', 'image_url', 'input_image', 'video', 'video_url', 'input_video']);
+const mediaTypes = new Set(['image', 'image_url', 'input_image', 'video', 'video_url', 'input_video', 'file', 'input_file', 'document']);
 const signatures = new Set(['signature', 'thoughtSignature', 'thinkingSignature', 'textSignature', 'encrypted_content', 'redactedContent']);
 const contentFields = new Set(['content', 'parts', 'output', 'functionResponse', 'toolResult', 'reasoningContent', 'reasoningText', 'reasoning_details']);
 

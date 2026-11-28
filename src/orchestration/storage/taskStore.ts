@@ -227,6 +227,7 @@ export function isMainEntry(value: unknown): value is MainConversationEntry {
 		case 'queue-add':
 			return record(value.message) && text(value.message.id) && value.message.id.length > 0
 				&& queueDestination(value.message.destination)
+				&& queueDestination(value.message.pdfDestination)
 				&& request(value.message.request) && Boolean(value.message.request.instruction.trim());
 		case 'queue-edit':
 			return text(value.messageId) && text(value.instruction) && Boolean(value.instruction.trim()) && validSkillMentions(value.skillMentions);
@@ -257,6 +258,7 @@ export function isMainEntry(value: unknown): value is MainConversationEntry {
 			return record(value.summary) && count(value.summary.throughMessage) && value.summary.throughMessage > 1
 				&& text(value.summary.text) && Boolean(value.summary.text.trim()) && Buffer.byteLength(value.summary.text) <= 4_096;
 		case 'video-item':
+		case 'pdf-item':
 			return record(value.item) && text(value.item.key) && /^[a-f0-9]{64}$/u.test(value.item.key)
 				&& text(value.item.content) && Boolean(value.item.content.trim()) && Buffer.byteLength(value.item.content) <= 16_384;
 		case 'video-analysis':
@@ -271,7 +273,8 @@ export function isMainEntry(value: unknown): value is MainConversationEntry {
 				&& (item.throughMessage === undefined || (count(item.throughMessage) && item.throughMessage > 1));
 		}
 		case 'auxiliary-usage':
-			return record(value.usage) && (value.usage.kind === 'review' || value.usage.kind === 'goal-review' || value.usage.kind === 'summary' || value.usage.kind === 'video' || value.usage.kind === 'main-attempt')
+			return record(value.usage) && (value.usage.kind === 'review' || value.usage.kind === 'goal-review' || value.usage.kind === 'summary'
+				|| value.usage.kind === 'video' || value.usage.kind === 'pdf' || value.usage.kind === 'main-attempt')
 				&& (value.usage.id === undefined || identifier(value.usage.id))
 				&& (value.usage.usageStatus === undefined || value.usage.usageStatus === 'provisional' || value.usage.usageStatus === 'final')
 				&& (value.usage.reportedUsage === undefined || reportedUsage(value.usage.reportedUsage))
@@ -495,6 +498,9 @@ export async function replayConversation(id: string, entries: AsyncIterable<Conv
 				break;
 			case 'video-item':
 				(run.videoItems ??= []).push(item.item);
+				break;
+			case 'pdf-item':
+				(run.pdfItems ??= []).push(item.item);
 				break;
 			case 'video-analysis':
 				run.videoAnalysis = item.content;

@@ -1,6 +1,6 @@
 import { setIcon, Setting } from 'obsidian';
 import type ScribeAiPlugin from '../main';
-import { isProviderEnabled, videoModelFor } from '../orchestration/settings/modelAvailability';
+import { isModelAvailable, isPdfAnalysisModelAvailable, videoModelFor } from '../orchestration/settings/modelAvailability';
 import { chatModelKey } from '../orchestration/settings/thinking';
 import type { VideoSourceKind } from '../types';
 import { DEFAULT_SUMMARY_LIMIT, isWebSearchProvider, normalizeWebSearchSettings, WEB_SEARCH_PROVIDERS, type WebSearchSettings } from '../tools/external/webSearchSettings';
@@ -12,13 +12,15 @@ import { uiText } from './uiText';
 export function renderServiceSettings(panel: HTMLElement, plugin: ScribeAiPlugin): () => void {
 	const videoGroup = panel.createDiv({ cls: 'scribe-settings-group' });
 	videoGroup.createDiv({ cls: 'scribe-settings-group-title', text: tr('视频解析', 'Video analysis') });
+	const pdfGroup = panel.createDiv({ cls: 'scribe-settings-group' });
+	pdfGroup.createDiv({ cls: 'scribe-settings-group-title', text: tr('PDF 解析', 'PDF analysis') });
 	const searchGroup = panel.createDiv({ cls: 'scribe-settings-group' });
 	const { settings, webSearch, communication: { models } } = plugin.services;
 	const labels = new Map(models.providers().map(({ id, label }) => [id, label]));
 	const videoOptions = Object.entries(settings.providerModels).flatMap(([providerId, ids]) => {
-		if (!isProviderEnabled(settings, providerId)) return [];
 		const provider = settings.communication.providerNames[providerId] ?? labels.get(providerId) ?? providerId;
 		return ids.flatMap((model) => {
+			if (!isModelAvailable(settings, { providerId, model }, models.modelType)) return [];
 			const input = models.modelCapabilities?.(providerId, model).videoAnalysis;
 			return input ? [{ choice: { providerId, model }, input, label: provider + ' / ' + model }] : [];
 		});
@@ -60,6 +62,42 @@ export function renderServiceSettings(panel: HTMLElement, plugin: ScribeAiPlugin
 	renderVideoPicker('link', tr('链接视频解析模型', 'Linked video analysis model'),
 		tr('把公开 HTTPS 视频链接交给专用模型。只收直链的连接打开原链接；其他连接会下载并按需转码。收到回执后才交接结果。',
 			'Analyzes public HTTPS video links. Link-only connections open the URL directly. Other connections download and convert as needed. Results require video confirmation.'));
+	const pdfStatus = pdfGroup.createDiv({ cls: 'scribe-settings-description', attr: { role: 'status' } });
+	const pdfSelection = () => settings.pdfModel ? chatModelKey(settings.pdfModel.providerId, settings.pdfModel.model) : '';
+	const pdfModelLabel = tr('PDF 解析模型', 'PDF analysis model');
+	new Setting(pdfGroup).setName(pdfModelLabel)
+		.setDesc(tr('发送本轮附加的 PDF 原件和当前问题给选定模型，解析结果交给聊天模型。',
+			'Sends the attached PDF and current question to this model, then passes its analysis to the chat model.'))
+		.addDropdown((dropdown) => {
+			const options = new Map<string, NonNullable<typeof settings.pdfModel>>();
+			dropdown.selectEl.setAttribute('aria-label', pdfModelLabel);
+			dropdown.addOption('', tr('未配置', 'Not configured'));
+			for (const [providerId, ids] of Object.entries(settings.providerModels)) {
+				const provider = settings.communication.providerNames[providerId] ?? labels.get(providerId) ?? providerId;
+				for (const model of ids) {
+					const choice = { providerId, model };
+					if (!isPdfAnalysisModelAvailable(settings, choice, models)) continue;
+					const key = chatModelKey(providerId, model);
+					options.set(key, choice);
+					dropdown.addOption(key, provider + ' / ' + model);
+				}
+			}
+			const saved = pdfSelection();
+			if (saved && !options.has(saved)) dropdown.addOption(saved, tr('已选模型不可用', 'Saved model unavailable'));
+			dropdown.setValue(saved).onChange(async (key) => {
+				if (key === pdfSelection() || (key && !options.has(key))) return;
+				dropdown.setDisabled(true);
+				try {
+					await plugin.savePdfModel(options.get(key));
+					pdfStatus.empty();
+				} catch (error) {
+					pdfStatus.setText(errorText(error));
+					dropdown.setValue(pdfSelection());
+				} finally {
+					dropdown.setDisabled(false);
+				}
+			});
+		});
 	const current = () => normalizeWebSearchSettings(settings.webSearch);
 	let probe: AbortController | undefined;
 	let disposed = false;

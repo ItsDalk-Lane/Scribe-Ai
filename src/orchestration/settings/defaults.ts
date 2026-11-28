@@ -6,6 +6,10 @@ import { DEFAULT_SUBAGENT_SETTINGS, normalizeSubagentSettings } from './subagent
 import { chatModelKey, isThinkingLevel } from './thinking';
 import { normalizePresets } from '../../interaction/slashPresets';
 import { isProviderEnabled, reconcileDefaultModel } from './modelAvailability';
+import { mediaFields, mediaOptions } from '../../communication/mediaApi';
+import { modelMediaAdapters } from '../../communication/mediaRegistry';
+import { arkMediaModelType, CONFIGURED_MODEL_TYPES, configuredModelType, normalizeMediaSettings,
+	resolveImageOptions, resolveMediaVoice, resolveSpeechRecognitionOptions, resolveSpeechSynthesisOptions, resolveVideoOptions } from './mediaSettings';
 
 export function normalizeSkillSettings(raw?: Partial<SkillSettings>): SkillSettings {
 	const strings = (items: unknown) => Array.isArray(items) ? [...new Set(items.filter((x): x is string => typeof x === 'string' && Boolean(x.trim())))] : [];
@@ -60,10 +64,11 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 	};
 	const writingRules = legacyRules(stored.writingRules);
 	const writingRulesBackup = legacyRules(stored.writingRulesBackup);
-	const validVideoModel = (selection: ScribeSettings['videoLinkModel']) =>
+	const validAnalysisModel = (selection: ScribeSettings['videoLinkModel']) =>
 		typeof selection?.providerId === 'string' && selection.providerId.trim() && typeof selection.model === 'string' && selection.model.trim()
 			? { providerId: selection.providerId, model: selection.model } : undefined;
-	const videoModel = validVideoModel(stored.videoModel);
+	const videoModel = validAnalysisModel(stored.videoModel);
+	const pdfModel = validAnalysisModel(stored.pdfModel);
 	const providerId = stored.providerId ?? DEFAULT_SETTINGS.providerId;
 	const model = stored.model ?? DEFAULT_SETTINGS.model;
 	const providerModels: Record<string, string[]> = {};
@@ -114,6 +119,36 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 			for (const [modelId, override] of Object.entries(perProvider as Record<string, unknown>)) {
 				if (!override || typeof override !== 'object' || Array.isArray(override)) continue;
 				const modelOverride = { ...override as ModelOverride };
+				const savedMedia = modelOverride.mediaOptions;
+				delete modelOverride.mediaOptions;
+				for (const adapter of modelMediaAdapters(providerId, modelId)) {
+					try {
+						const values = mediaOptions(mediaFields(adapter, modelId), savedMedia?.[adapter.operation], undefined, false);
+						if (Object.keys(values).length) (modelOverride.mediaOptions ??= {})[adapter.operation] = values;
+					} catch { /* 忽略已不适用的媒体参数。 */ }
+				}
+				if (!CONFIGURED_MODEL_TYPES.includes(modelOverride.type ?? 'text')) delete modelOverride.type;
+				const mediaType = arkMediaModelType(providerId, modelId);
+				if (mediaType === 'image' && modelOverride.imageDefaults !== undefined) {
+					try { modelOverride.imageDefaults = resolveImageOptions(modelId, modelOverride.imageDefaults); }
+					catch { delete modelOverride.imageDefaults; }
+				} else delete modelOverride.imageDefaults;
+				if (mediaType === 'video' && modelOverride.videoDefaults !== undefined) {
+					try { modelOverride.videoDefaults = resolveVideoOptions(modelId, modelOverride.videoDefaults); }
+					catch { delete modelOverride.videoDefaults; }
+				} else delete modelOverride.videoDefaults;
+				if (mediaType === 'speech-synthesis' && modelOverride.voice !== undefined) {
+					try { modelOverride.voice = resolveMediaVoice(modelOverride.voice); }
+					catch { delete modelOverride.voice; }
+				} else delete modelOverride.voice;
+				if (mediaType === 'speech-synthesis' && modelOverride.speechSynthesis !== undefined) {
+					try { modelOverride.speechSynthesis = resolveSpeechSynthesisOptions(modelOverride.speechSynthesis); }
+					catch { delete modelOverride.speechSynthesis; }
+				} else delete modelOverride.speechSynthesis;
+				if (mediaType === 'speech-recognition' && modelOverride.speechRecognition !== undefined) {
+					try { modelOverride.speechRecognition = resolveSpeechRecognitionOptions(modelOverride.speechRecognition); }
+					catch { delete modelOverride.speechRecognition; }
+				} else delete modelOverride.speechRecognition;
 				const current = modelOverride.capabilities;
 				if (current && typeof current === 'object' && 'nativeWebSearch' in current) {
 					const { nativeWebSearch: _removed, ...capabilities } = current;
@@ -156,8 +191,10 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 		skillSettings: normalizeSkillSettings(stored.skillSettings),
 		mcp: normalizeMcpSettings(stored.mcp),
 		webSearch: normalizeWebSearchSettings(stored.webSearch),
+		...(stored.media !== undefined && { media: normalizeMediaSettings(stored.media, false, modelOverrides) }),
 		...(videoModel && { videoModel }),
-		videoLinkModel: (stored.videoLinkModel === undefined ? videoModel : validVideoModel(stored.videoLinkModel)) ?? null,
+		videoLinkModel: (stored.videoLinkModel === undefined ? videoModel : validAnalysisModel(stored.videoLinkModel)) ?? null,
+		...(pdfModel && { pdfModel }),
 		...(stored.slashPresets !== undefined ? { slashPresets: normalizePresets(stored.slashPresets) } : {}),
 		...(writingRules ? { writingRules } : {}),
 		...(writingRulesBackup ? { writingRulesBackup } : {}),
@@ -171,6 +208,8 @@ export function normalizeSettings(raw: Partial<ScribeSettings> | null): ScribeSe
 			protocols: strings(stored.communication?.protocols),
 		},
 	};
-	if ((!providerId && !model) || !isProviderEnabled(settings, providerId)) reconcileDefaultModel(settings);
+	if ((!providerId && !model) || !isProviderEnabled(settings, providerId) || configuredModelType(settings, providerId, model) !== 'text') {
+		reconcileDefaultModel(settings);
+	}
 	return settings;
 }

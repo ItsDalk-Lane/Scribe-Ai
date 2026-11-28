@@ -247,7 +247,8 @@ function consumeQueued(entries: ConversationEntry[], queue: Map<string, QueuedMe
 	}
 	for (const message of messages) {
 		const current = findQueued(queue, message.id);
-		if (!sameQueuedDestination(current.destination, message.destination) || JSON.stringify(current.request) !== JSON.stringify(message.request)) {
+		if (!sameQueuedDestination(current.destination, message.destination) || !sameQueuedDestination(current.pdfDestination, message.pdfDestination)
+			|| JSON.stringify(current.request) !== JSON.stringify(message.request)) {
 			throw new Error('排队消息已经变更。');
 		}
 	}

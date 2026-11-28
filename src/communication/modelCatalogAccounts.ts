@@ -1,14 +1,81 @@
 import type { AuthResult, Credential } from '@earendil-works/pi-ai';
-import type { Transport } from '../types';
-import { fetchModelList, ModelCatalogHttpError } from './modelCatalog';
+import type { ModelCatalogResult, Transport } from '../types';
+import { fetchCatalogJson, fetchModelList, ModelCatalogHttpError } from './modelCatalog';
 
 export const ACCOUNT_CATALOGS = new Set([
-	'amazon-bedrock', 'azure', 'cloudflare-ai-gateway', 'cloudflare-workers-ai', 'github-copilot', 'google-vertex', 'openai-codex',
+	'amazon-bedrock', 'azure', 'cloudflare-ai-gateway', 'cloudflare-workers-ai', 'github-copilot', 'google-vertex', 'kimi-coding', 'openai-codex',
 ]);
+
+interface BedrockProfile {
+	inferenceProfileId?: unknown;
+	inferenceProfileArn?: unknown;
+	status?: unknown;
+	type?: unknown;
+	models?: { modelArn?: unknown }[];
+}
+
+async function readBedrockProfiles(fetch: Transport['fetch'], origin: URL, headers: Headers, signal: AbortSignal) {
+	const url = new URL('/inference-profiles', origin);
+	const profiles: BedrockProfile[] = [];
+	const tokens = new Set<string>();
+	for (let page = 0; page < 100; page += 1) {
+		signal.throwIfAborted();
+		const result = await fetchCatalogJson(fetch, url, headers, signal) as {
+			inferenceProfileSummaries?: BedrockProfile[]; nextToken?: unknown;
+		} | null;
+		if (!Array.isArray(result?.inferenceProfileSummaries)) throw new Error('Invalid Bedrock inference profile catalog');
+		profiles.push(...result.inferenceProfileSummaries);
+		const token = result.nextToken;
+		if (!token) return profiles;
+		if (typeof token !== 'string' || tokens.has(token)) throw new Error('Invalid Bedrock inference profile pagination');
+		tokens.add(token);
+		url.searchParams.set('nextToken', token);
+	}
+	throw new Error('Bedrock inference profile catalog has too many pages');
+}
+
+async function fetchBedrockCatalog(fetch: Transport['fetch'], origin: URL, headers: Headers, signal: AbortSignal,
+	nonChat?: ReadonlySet<string>, knownChat?: ReadonlySet<string>): Promise<ModelCatalogResult> {
+	headers.set('user-agent', 'Scribe-Ai');
+	const [foundations, profiles] = await Promise.allSettled([
+		fetchModelList(fetch, new URL('/foundation-models?byOutputModality=TEXT', origin), headers, signal, 'amazon-bedrock', nonChat),
+		readBedrockProfiles(fetch, origin, headers, signal),
+	]);
+	signal.throwIfAborted();
+	const baseCatalog = foundations.status === 'fulfilled' ? foundations.value : undefined;
+	const baseModels = new Set(baseCatalog?.models);
+	const models = new Set(baseModels);
+	const details = new Map(baseCatalog?.details);
+	if (profiles.status === 'fulfilled') {
+		for (const profile of profiles.value) {
+			if (profile?.status !== 'ACTIVE' || !Array.isArray(profile.models) || !profile.models.length) continue;
+			const id = profile.type === 'SYSTEM_DEFINED' && typeof profile.inferenceProfileId === 'string'
+				&& /^[a-z0-9.:-]+$/iu.test(profile.inferenceProfileId) ? profile.inferenceProfileId
+				: profile.type === 'APPLICATION' && typeof profile.inferenceProfileArn === 'string'
+					&& /^arn:aws(?:-[a-z-]+)?:bedrock:[a-z0-9-]+:\d{12}:application-inference-profile\/[a-z0-9.:-]+$/iu.test(profile.inferenceProfileArn)
+					? profile.inferenceProfileArn : undefined;
+			if (!id) continue;
+			const targets = profile.models.map((target) => typeof target?.modelArn === 'string'
+				? /^arn:aws(?:-[a-z-]+)?:bedrock:[a-z0-9-]+::foundation-model\/([a-z0-9.:-]+)$/iu.exec(target.modelArn)?.[1] : undefined);
+			const target = targets[0];
+			// Application profiles can also point at embedding models.
+			if (!target || targets.some((model) => model !== target) || nonChat?.has(target)
+				|| !(baseModels.has(target) || knownChat?.has(target) || knownChat?.has(id))) continue;
+			models.add(id);
+			details.set(id, { ...details.get(target), type: 'text' });
+		}
+	}
+	if (foundations.status === 'rejected' && !models.size) {
+		throw foundations.reason instanceof Error ? foundations.reason : new Error('Bedrock foundation model catalog is unavailable');
+	}
+	return { models: [...models], details, source: 'provider',
+		...((foundations.status === 'rejected' || profiles.status === 'rejected') && { partial: true }),
+	};
+}
 
 export async function fetchAccountModelCatalog(
 	providerId: string, baseUrl: string, credential: Credential | undefined, resolved: AuthResult | undefined,
-	fetch: Transport['fetch'], signal: AbortSignal, nonChat?: ReadonlySet<string>,
+	fetch: Transport['fetch'], signal: AbortSignal, nonChat?: ReadonlySet<string>, knownChat?: ReadonlySet<string>,
 ) {
 	const key = resolved?.auth.apiKey ?? (credential?.type === 'api_key' ? credential.key : undefined);
 	const address = URL.parse(baseUrl);
@@ -17,10 +84,29 @@ export async function fetchAccountModelCatalog(
 
 	switch (providerId) {
 		case 'bailian-payg': {
-			if (!key || address?.protocol !== 'https:' || !/^[a-z0-9-]+\.[a-z0-9-]+\.maas\.aliyuncs\.com$/u.test(address.hostname)
+			if (!key || address?.protocol !== 'https:' || address.username || address.password || address.port
+				|| (address.hostname !== 'dashscope-us.aliyuncs.com' && !/^[a-z0-9-]+\.[a-z0-9-]+\.maas\.aliyuncs\.com$/u.test(address.hostname))
 				|| !/^\/compatible-mode\/v1\/?$/u.test(address.pathname)) return;
 			url = new URL('/api/v1/models?capabilities=TG&page_no=1&page_size=100', address);
-			break;
+			headers.set('authorization', `Bearer ${key}`);
+			try {
+				return await fetchModelList(fetch, url, headers, signal, providerId, nonChat);
+			} catch {
+				signal.throwIfAborted();
+				return; // 当前地址仍可提供兼容目录。
+			}
+		}
+		case 'kimi-coding': {
+			const origin = 'https://api.kimi.com';
+			if (address?.origin !== origin || address.username || address.password
+				|| !/^\/coding\/v1\/?$/u.test(address.pathname)) return;
+			const oauthAuthorization = Object.entries(resolved?.auth.headers ?? {})
+				.find(([name, value]) => name.toLowerCase() === 'authorization' && typeof value === 'string')?.[1];
+			const authorization = credential?.type === 'oauth'
+				? oauthAuthorization : key ? `Bearer ${key}` : null;
+			if (!authorization || !/^Bearer \S+$/iu.test(authorization)) return;
+			headers.set('authorization', authorization);
+			return fetchModelList(fetch, new URL('/coding/v1/models', origin), headers, signal, providerId, nonChat);
 		}
 		case 'azure': {
 			if (!key || address?.protocol !== 'https:' || !/\.(?:openai\.azure|cognitiveservices\.azure|services\.ai\.azure)\.com$/u.test(address.hostname)) return;
@@ -51,10 +137,11 @@ export async function fetchAccountModelCatalog(
 			const regionFromAddress = /^bedrock-runtime\.([a-z0-9-]+)\.amazonaws\.com$/u.exec(address?.hostname ?? '')?.[1];
 			if (baseUrl && (!regionFromAddress || address?.protocol !== 'https:')) return;
 			const region = regionFromAddress
-				?? (credential?.type === 'api_key' ? credential.env?.AWS_REGION : undefined) ?? 'us-east-1';
+				?? resolved?.env?.AWS_REGION ?? resolved?.env?.AWS_DEFAULT_REGION
+				?? (credential?.type === 'api_key' ? credential.env?.AWS_REGION ?? credential.env?.AWS_DEFAULT_REGION : undefined) ?? 'us-east-1';
 			if (!key || !/^[a-z]{2}(?:-gov)?-[a-z]+-\d+$/u.test(region)) return;
-			url = new URL(`https://bedrock.${region}.amazonaws.com/foundation-models?byOutputModality=TEXT`);
-			break;
+			headers.set('authorization', `Bearer ${key}`);
+			return fetchBedrockCatalog(fetch, new URL(`https://bedrock.${region}.amazonaws.com`), headers, signal, nonChat, knownChat);
 		}
 		case 'openai-codex': {
 			if (credential?.type !== 'oauth' || !key || typeof credential.accountId !== 'string' || !credential.accountId) return;

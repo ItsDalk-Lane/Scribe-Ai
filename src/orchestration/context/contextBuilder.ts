@@ -377,6 +377,8 @@ export function createContextBuilder(registry: ToolRegistry, app?: App): Context
 			if (matches?.length) additions.push({ tag: 'reference-material', text: '本轮匹配的记忆索引\n' + JSON.stringify(matches) });
 			const videoAnalysis = await ctx.videoAnalysis?.read();
 			if (videoAnalysis) additions.push({ tag: 'reference-material', text: '视频模型的带时间戳解析\n' + videoAnalysis });
+			const pdfAnalysis = await ctx.pdfAnalysis?.();
+			if (pdfAnalysis) additions.push({ tag: 'reference-material', text: 'PDF 解析模型的资料报告\n' + pdfAnalysis });
 			const plan = !current[0]?.taskPrompt?.approvedPlan && approvedPlanContent(ctx.task.request);
 			if (plan) additions.push({ tag: 'approved-plan', text: plan.markdown });
 			const skilled = skills?.messages ?? current;

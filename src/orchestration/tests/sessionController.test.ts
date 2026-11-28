@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { statSync } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
@@ -126,7 +127,8 @@ async function fixture(t: TestContext) {
 		ruleReads,
 		setActiveNote: (path: string) => { activeNote = path; },
 		connect: (stream: ModelService['stream'], model: Partial<ScribeSettings> = firstModel,
-			thinkingOptions?: ModelService['thinkingOptions'], modelService?: Pick<ModelService, 'send' | 'contextLimits' | 'modelCapabilities' | 'modelOrigin'> & Partial<Pick<ModelService, 'modelConnection'>>, withSkills = false, withPlanTools = false, withGoalTools = false) => {
+			thinkingOptions?: ModelService['thinkingOptions'], modelService?: Pick<ModelService, 'send' | 'contextLimits' | 'modelCapabilities' | 'modelOrigin'
+				| 'modelType' | 'prepareModel' | 'withPreparedModels'> & Partial<Pick<ModelService, 'modelConnection'>>, withSkills = false, withPlanTools = false, withGoalTools = false) => {
 			const settings = normalizeSettings(model);
 			const skills = withSkills ? createSkillRegistry(app, settings, async () => {}, {
 				draft: async () => false, install: async () => false,
@@ -258,6 +260,26 @@ void test('a link-only video model handles HTTPS embeds while local attachments 
 	assert.equal(requests, 1);
 });
 
+void test('a model configured for generation cannot receive chat or video analysis requests', async (t) => {
+	const { connect } = await fixture(t);
+	const sessions = connect(() => assert.fail('unexpected chat request'), {
+		...firstModel, videoLinkModel: secondModel,
+		providerModels: { [firstModel.providerId]: [firstModel.model], [secondModel.providerId]: [secondModel.model] },
+		modelOverrides: { [secondModel.providerId]: { [secondModel.model]: { type: 'video' } } },
+	}, undefined, {
+		modelCapabilities: () => ({ structuredOutput: false, videoAnalysis: 'link' }),
+		modelOrigin: () => 'https://video.example',
+		send: () => assert.fail('unexpected video analysis request'),
+	});
+	t.after(() => sessions.dispose());
+	const conversationId = await sessions.createConversation();
+	const request = { conversationId, instruction: '分析 ![片段](https://media.example.invalid/clip.mp4)', refs: [] };
+	assert.throws(() => sessions.submit(request, {}, undefined, { model: secondModel }), /所选模型已不可用/u);
+	const state = await sessions.submit(request).result;
+	assert.equal(state.status, 'failed');
+	assert.match(state.error ?? '', /视频解析模型已停用或连接已变更/u);
+});
+
 void test('video processing checkpoints each confirmed item and ignores quoted examples and appended plan links', async (t) => {
 	const { directory, connect } = await fixture(t);
 	const serviceModel = { providerId: 'video-fixture', model: 'link-model' };
@@ -318,6 +340,126 @@ void test('video processing checkpoints each confirmed item and ignores quoted e
 	assert.deepEqual(submitted.slice(4), urls);
 });
 
+void test('PDF attachments require a configured PDF connection and fail before sending the chat request', async (t) => {
+	const { cwd, connect } = await fixture(t);
+	const path = 'not-a-pdf.pdf';
+	await writeFile(join(cwd, path), 'file name is not proof of format');
+	const submit = async (selection?: typeof secondModel) => {
+		const sessions = connect(() => assert.fail('PDF failure must stop the chat model'), {
+			...firstModel, pdfModel: selection, providerModels: {
+				[firstModel.providerId]: [firstModel.model], [secondModel.providerId]: [secondModel.model],
+			},
+		}, undefined, {
+			modelOrigin: () => 'https://pdf.example',
+			modelCapabilities: () => ({ structuredOutput: false, pdfAnalysis: true }),
+			send: () => assert.fail('No PDF should leave the vault'),
+		});
+		t.after(() => sessions.dispose());
+		return sessions.submit({ conversationId: await sessions.createConversation(), instruction: '分析资料', refs: [{ path, kind: 'file' }] }).result;
+	};
+	const missing = await submit();
+	assert.equal(missing.status, 'failed');
+	assert.match(missing.error ?? '', /服务 → PDF 解析/u);
+	const invalid = await submit(secondModel);
+	assert.equal(invalid.status, 'failed');
+	assert.match(invalid.error ?? '', /缺少有效的 PDF 文件头/u);
+});
+
+void test('PDF analysis sends originals to the specialist, checkpoints reports, and hands off text on resume', async (t) => {
+	const { cwd, directory, connect } = await fixture(t);
+	const paths = ['one.PDF', 'two.pdf'];
+	const contents = paths.map((path) => Buffer.from('%PDF-1.4\n%specialist bytes for ' + path));
+	for (const [index, path] of paths.entries()) await writeFile(join(cwd, path), contents[index]!);
+	const question = '请汇总两个 PDF 的页码和证据。';
+	const settings = {
+		...firstModel, pdfModel: secondModel, providerModels: {
+			[firstModel.providerId]: [firstModel.model], [secondModel.providerId]: [secondModel.model],
+		},
+	};
+	const calls: string[] = [];
+	let pause: (() => void) | undefined;
+	let destination = 'https://pdf.example/v1/responses';
+	let pdfBase = 'https://pdf.example/v1';
+	let mainCalls = 0;
+	const modelConnection: ModelService['modelConnection'] = (_provider, model) => ({
+		api: 'openai-responses', baseUrl: model === secondModel.model ? pdfBase : 'https://chat.example/v1', source: 'configured',
+	});
+	function reopen() {
+		return connect((request) => {
+			mainCalls++;
+			assert.equal(request.model, firstModel.model);
+			assert.equal(request.pdf, undefined);
+			assert.match(requestText(request), /PDF 解析模型的资料报告/u);
+			assert.match(requestText(request), /第 1 页：one\.PDF/u);
+			assert.match(requestText(request), /第 1 页：two\.pdf/u);
+			return reply('已汇总。');
+		}, settings, undefined, {
+			modelOrigin: () => 'https://pdf.example',
+			modelConnection,
+			modelCapabilities: (_provider, model) => ({ structuredOutput: false, pdfAnalysis: model === secondModel.model }),
+			async send(request) {
+				assert.equal(request.model, secondModel.model);
+				assert.deepEqual(request.tools, []);
+				assert.equal(request.messages[0]?.content, question);
+				const { filename, data } = await request.pdf!.load(request.signal!);
+				assert.deepEqual(Buffer.from(data, 'base64'), contents[paths.indexOf(filename)]);
+				if (filename === paths[1]) pause?.();
+				await request.beforeSend?.(destination);
+				calls.push(filename);
+				await request.onTransmission?.(destination);
+				return reply('第 1 页：' + filename, [], { reportedUsage: { prompt: 31, output: 8 } }).result();
+			},
+		});
+	}
+	let sessions = reopen();
+	const id = await sessions.createConversation();
+	const refs = [...paths.map((path) => ({ path, kind: 'file' as const })), { path: 'folder.pdf', kind: 'folder' as const }];
+	const task = { conversationId: id, instruction: question, refs };
+	const first = sessions.submit(task);
+	pause = () => sessions.pause(first.taskId);
+	assert.equal((await first.result).status, 'interrupted');
+	assert.deepEqual(calls, paths.slice(0, 1));
+	assert.equal(mainCalls, 0);
+	const stored = (await createConversationStore(directory).load(id)).runs[0];
+	assert.equal(stored?.pdfItems?.[0]?.content, '第 1 页：one.PDF');
+	assert.equal(runUsage(stored.state)?.byKind.pdf?.count, 1);
+	sessions.dispose();
+	sessions = reopen();
+	t.after(() => sessions.dispose());
+	pause = undefined;
+	const resumed = await sessions.resume(id, first.taskId).result;
+	assert.equal(resumed.status, 'done', resumed.error);
+	assert.deepEqual(calls, paths);
+	assert.equal(runUsage(resumed)?.byKind.pdf?.count, 2);
+	assert.equal(mainCalls, 1);
+	const completed = (await createConversationStore(directory).load(id)).runs[0];
+	assert.equal(completed?.pdfItems?.length, 2);
+	assert.equal(JSON.stringify(completed).includes(contents[0]!.toString('base64')), false);
+
+	destination = 'https://pdf.example/other/responses';
+	const rejected = await sessions.submit({ ...task, conversationId: await sessions.createConversation() }).result;
+	assert.equal(rejected.status, 'failed');
+	assert.match(rejected.error ?? '', /实际接收地址已变更/u);
+	assert.deepEqual(calls, paths);
+	assert.equal(mainCalls, 1);
+
+	destination = 'https://pdf.example/v1/responses';
+	const queuedId = await sessions.createConversation();
+	const row = { id: 'pdf-queued', request: { ...task, conversationId: queuedId },
+		destination: queuedModelDestination(firstModel, modelConnection), pdfDestination: queuedModelDestination(secondModel, modelConnection) };
+	const store = createConversationStore(directory);
+	await store.enqueue(queuedId, row);
+	pdfBase = 'https://pdf.example/v2';
+	await assert.rejects(sessions.submitQueued(row, {}, () => assert.fail('changed PDF route must leave the task queued')).result, /解析地址已变更/u);
+	assert.deepEqual(await store.getQueued(queuedId), [row]);
+	assert.deepEqual(calls, paths);
+	pdfBase = 'https://pdf.example/v1';
+	assert.equal((await sessions.submitQueued(row, {}, () => {}).result).status, 'done');
+	assert.deepEqual(await store.getQueued(queuedId), []);
+	assert.deepEqual(calls, [...paths, ...paths]);
+	assert.equal(mainCalls, 2);
+});
+
 void test('a catalog tool denial hides tools and prevents an unsolicited model call from reading a file', async (t) => {
 	const { cwd, connect } = await fixture(t);
 	await writeFile(join(cwd, 'fact.md'), 'content-not-sent');
@@ -354,6 +496,65 @@ void test('a catalog route change cannot send the next turn of a running task to
 	assert.equal(state.status, 'failed');
 	assert.match(state.error ?? '', /模型连接设置已变更/u);
 	assert.equal(attempts, 1);
+});
+
+void test('runtime model data is available before tools, thinking, and queued destinations are resolved', async (t) => {
+	const { connect, directory } = await fixture(t);
+	const scope = new AsyncLocalStorage<{ prepared?: true }>();
+	const fallback = 'https://compatible.example/v1';
+	const current = 'https://resolved.example/v1';
+	let preparations = 0;
+	let messages = 0;
+	const modelConnection: ModelService['modelConnection'] = () => ({
+		api: 'openai-completions', source: 'catalog', baseUrl: scope.getStore()?.prepared ? current : fallback,
+	});
+	const sessions = connect((request) => {
+		messages++;
+		assert.equal(modelConnection(firstModel.providerId, firstModel.model).baseUrl, current);
+		assert.equal(request.reasoning, 'high');
+		assert.deepEqual(request.tools, []);
+		return reply('已完成');
+	}, { ...firstModel, thinkingByModel: { [chatModelKey(firstModel.providerId, firstModel.model)]: 'high' } },
+	(_choice, preferred) => scope.getStore()?.prepared ? { levels: ['high'], level: preferred ?? 'high' } : { levels: [] }, {
+		send: async () => assert.fail('Unexpected auxiliary request'), modelConnection,
+		modelCapabilities: () => ({ tools: !scope.getStore()?.prepared, structuredOutput: false, imageInput: false }),
+		async withPreparedModels(work) {
+			await Promise.resolve();
+			return scope.run({}, work);
+		},
+		async prepareModel(selection) {
+			const run = scope.getStore();
+			assert.ok(run);
+			assert.equal(selection.model, firstModel.model);
+			await Promise.resolve();
+			preparations++;
+			run.prepared = true;
+		},
+	});
+	t.after(() => sessions.dispose());
+	const conversationId = await sessions.createConversation();
+	const request = { conversationId, instruction: '完成任务', refs: [] };
+	const state = await sessions.submit(request).result;
+	assert.equal(state.status, 'done', state.error);
+	assert.equal(preparations, 1);
+	assert.equal(messages, 1);
+
+	const row = { id: 'queued-before-update', request, destination: queuedModelDestination(firstModel, modelConnection) };
+	assert.equal(row.destination?.baseUrl, fallback);
+	const store = createConversationStore(directory);
+	await store.enqueue(conversationId, row);
+	await assert.rejects(sessions.submitQueued(row, {}, () => assert.fail('unconfirmed destination consumed the queue row')).result, /接收方已变更/u);
+	assert.deepEqual(await store.getQueued(conversationId), [row]);
+	const side = sessions.createSideChat([]);
+	const run = side.submit({ instruction: '转交', queued: { destination: row.destination } });
+	assert.ok(run.prepared);
+	await assert.rejects(run.prepared, /接收方与排队记录不一致/u);
+	await assert.rejects(run.result, /接收方与排队记录不一致/u);
+	const accepted = side.submit({ instruction: '普通侧聊' });
+	await accepted.prepared;
+	assert.equal((await accepted.result).status, 'done');
+	assert.equal(preparations, 4);
+	assert.equal(messages, 2);
 });
 
 void test('new submissions reject a disabled provider and use the remaining chat default', async (t) => {

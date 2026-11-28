@@ -10,6 +10,8 @@ import { createContextBuilder } from './orchestration/context/contextBuilder';
 import type { SkillReviewActions } from './orchestration/context/skills';
 import { createSkillRegistry } from './orchestration/context/skills';
 import { createSessionController } from './orchestration/sessionController';
+import { isTextModel, reconcileDefaultModel } from './orchestration/settings/modelAvailability';
+import { createRuntimeModelCatalog } from './orchestration/settings/runtimeModelCatalog';
 import type { LocalState } from './orchestration/storage/localState';
 import { createModelCatalogStore } from './orchestration/storage/modelCatalogStore';
 import { createAgentLoop } from './runtime/agentLoop';
@@ -25,6 +27,7 @@ import { createWebSearchService } from './tools/external/webTools';
 import type {
 	CommunicationLayer,
 	ConversationStore,
+	ModelService,
 	OrchestrationLayer,
 	RuntimeLayer,
 	ScribeServices,
@@ -32,10 +35,10 @@ import type {
 } from './types';
 
 /** 根级依赖组装：只负责按层创建服务并把它们连起来，业务留在各层 */
-export async function createServices(app: App, settings: ScribeSettings, manifest: PluginManifest,
-	conversations: ConversationStore, localState: LocalState, cacheDirectory: string, modelCatalogPath: string,
+export function createServices(app: App, settings: ScribeSettings, manifest: PluginManifest,
+	conversations: ConversationStore, localState: LocalState, cacheDirectory: string,
 	saveSettings: () => Promise<void>, skillReview: SkillReviewActions, saveMcp: (settings: McpSettings) => Promise<void>,
-	onConversationDeleted: (id: string) => Promise<void>): Promise<ScribeServices> {
+	onConversationDeleted: (id: string) => Promise<void>): ScribeServices {
 	const cwd = (app.vault.adapter as FileSystemAdapter).getBasePath();
 	const paths = scribeDataPaths(cwd);
 	// 诊断日志写入当前笔记库的数据目录，按对话分文件保存。
@@ -62,12 +65,15 @@ export async function createServices(app: App, settings: ScribeSettings, manifes
 	// 第五层：通信层（仅负责模型服务接入）
 	const credentials = createCredentialStore(app, settings.communication);
 	const transport = createTransport(settings.communication, app.secretStorage);
-	const modelService = createModelService(credentials, transport, {
+	const runtimeCatalog = createRuntimeModelCatalog(settings, () => modelService);
+	const baseModels = createModelService(credentials, transport, {
 		baseUrls: () => settings.communication.baseUrls,
 		protocols: () => settings.communication.protocols,
 		modelOverrides: () => settings.modelOverrides,
-		catalogProtocol: (providerId, model) => modelCatalog.protocol(providerId, model),
-		catalogDetails: (providerId, model, baseUrl) => modelCatalog.details(providerId, model, baseUrl),
+		catalogProtocol: (providerId, model) => runtimeCatalog.active()
+			? runtimeCatalog.protocol(providerId, model) : modelCatalog.protocol(providerId, model),
+		catalogDetails: (providerId, model, baseUrl) => runtimeCatalog.active()
+			? runtimeCatalog.details(providerId, model, baseUrl) : modelCatalog.details(providerId, model, baseUrl),
 		customProviders: () => Object.entries(settings.customProviders).map(([id, entry]) => ({
 			id,
 			label: entry.label,
@@ -76,8 +82,21 @@ export async function createServices(app: App, settings: ScribeSettings, manifes
 			models: settings.providerModels[id] ?? [],
 		})),
 	});
-	const modelCatalog = createModelCatalogStore(modelCatalogPath, settings, modelService, transport.fetch);
-	await modelCatalog.loadProtocols();
+	const modelCatalog = createModelCatalogStore(settings, baseModels);
+	const modelService: ModelService = {
+		...baseModels,
+		withPreparedModels: runtimeCatalog.withPreparedModels,
+		prepareModel: runtimeCatalog.prepareModel,
+		send: (request, onUsage) => runtimeCatalog.withPreparedModels(async () => {
+			await runtimeCatalog.prepareModel(request, request.signal);
+			return baseModels.send(request, onUsage);
+		}),
+	};
+	const reconcileCatalogModel = () => {
+		if (!isTextModel(settings, settings, modelService.modelType)) reconcileDefaultModel(settings, modelService.modelType);
+	};
+	reconcileCatalogModel();
+	modelCatalog.subscribeProtocols(reconcileCatalogModel);
 	const communication: CommunicationLayer = {
 		models: modelService,
 		modelCatalog,

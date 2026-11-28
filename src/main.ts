@@ -9,7 +9,7 @@ import { SubagentView } from './interaction/SubagentView';
 import { ConversationViews } from './interaction/conversationViews';
 import { ScribeAiSettingTab } from './interaction/SettingsTab';
 import { uiText } from './interaction/uiText';
-import { isModelAvailable, reconcileDefaultModel, setProviderEnabled } from './orchestration/settings/modelAvailability';
+import { isModelAvailable, isPdfAnalysisModelAvailable, reconcileDefaultModel, setProviderEnabled } from './orchestration/settings/modelAvailability';
 import { updateChatThinking } from './orchestration/settings/thinking';
 import { initializePluginStorage } from './orchestration/storage/pluginStorage';
 import { storeProxyCredentials } from './communication/proxy';
@@ -31,7 +31,7 @@ export default class ScribeAiPlugin extends Plugin {
 			new Notice('新存储位置打不开，已保留旧数据。');
 			throw error;
 		});
-		const { settings, conversations, localState, cache, modelCatalog } = storage;
+		const { settings, conversations, localState, cache } = storage;
 		this.writeSettings = storage.writeSettings;
 		try {
 			await storage.complete();
@@ -39,7 +39,7 @@ export default class ScribeAiPlugin extends Plugin {
 			console.error('Scribe Ai 无法完成旧数据清理。', error);
 			new Notice('旧数据暂时无法清理，下次启动时会重试。');
 		}
-		this.services = await createServices(this.app, settings, this.manifest, conversations, localState, cache, modelCatalog, () => this.saveSettings(), {
+		this.services = createServices(this.app, settings, this.manifest, conversations, localState, cache, () => this.saveSettings(), {
 			draft: (...args) => openSkillDraftReview(this.app, ...args),
 			install: (...args) => openGithubSkillReview(this.app, ...args),
 		}, (next) => this.saveMcpSettings(next), async (id) => {
@@ -58,7 +58,6 @@ export default class ScribeAiPlugin extends Plugin {
 			});
 		});
 		const catalog = this.services.communication.modelCatalog;
-		this.app.workspace.onLayoutReady(() => { void catalog.refresh().catch(() => {}); });
 		this.register(() => catalog.dispose());
 		queueMicrotask(() => { void sweepRetainedFiles(this); });
 
@@ -140,7 +139,7 @@ export default class ScribeAiPlugin extends Plugin {
 			const { settings, communication } = this.services;
 			const target = selection ?? settings;
 			const current = { providerId: settings.providerId, model: settings.model };
-			const hasModel = () => isModelAvailable(settings, target);
+			const hasModel = () => isModelAvailable(settings, target, communication.models.modelType);
 			if (selection && (!hasModel() || (!selection.keepDefault && selection.thinkingLevel !== undefined
 				&& (selection.providerId !== current.providerId || selection.model !== current.model)))) {
 				throw new Error(uiText().chatModelChanged);
@@ -161,13 +160,13 @@ export default class ScribeAiPlugin extends Plugin {
 
 	async saveProviderAvailability(providerId: string, enabled: boolean): Promise<void> {
 		await this.enqueueSettingsSave(async () => {
-			const { settings } = this.services;
+			const { settings, communication } = this.services;
 			const next = { ...settings };
-			setProviderEnabled(next, providerId, enabled);
+			setProviderEnabled(next, providerId, enabled, communication.models.modelType);
 			if (next.disabledProviderIds === settings.disabledProviderIds) return;
 			await this.writeSettings(next);
 			settings.disabledProviderIds = next.disabledProviderIds;
-			reconcileDefaultModel(settings);
+			reconcileDefaultModel(settings, communication.models.modelType);
 		});
 	}
 
@@ -221,7 +220,7 @@ export default class ScribeAiPlugin extends Plugin {
 			const { settings, communication } = this.services;
 			if (videoModel) {
 				const input = communication.models.modelCapabilities?.(videoModel.providerId, videoModel.model).videoAnalysis;
-				if (!isModelAvailable(settings, videoModel) || !input || (source === 'file' && input !== 'file')) {
+				if (!isModelAvailable(settings, videoModel, communication.models.modelType) || !input || (source === 'file' && input !== 'file')) {
 					throw new Error('此模型连接无法用于所选的视频来源，请重新选择。');
 				}
 			}
@@ -231,13 +230,24 @@ export default class ScribeAiPlugin extends Plugin {
 		});
 	}
 
+	async savePdfModel(pdfModel: ScribeSettings['pdfModel']): Promise<void> {
+		await this.enqueueSettingsSave(async () => {
+			const { settings, communication } = this.services;
+			if (pdfModel && !isPdfAnalysisModelAvailable(settings, pdfModel, communication.models)) {
+				throw new Error('此模型连接无法用于 PDF 解析，请重新选择。');
+			}
+			await this.writeSettings({ ...settings, pdfModel });
+			settings.pdfModel = pdfModel;
+		});
+	}
+
 	private async enqueueSettingsSave(write: () => Promise<void>): Promise<void> {
 		const save = this.settingsSave.then(write);
 		this.settingsSave = save.catch(() => undefined);
 		try {
 			await save;
 		} finally {
-			this.settingsListeners.forEach((listener) => listener());
+			for (const listener of [...this.settingsListeners]) listener();
 		}
 	}
 }

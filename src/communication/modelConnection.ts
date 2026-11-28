@@ -2,6 +2,7 @@ import type { Api, Model, Provider } from '@earendil-works/pi-ai';
 import type { ModelConnection, ModelConnectionIssue, ModelOverride } from '../types';
 import { isOpenCodeProvider, openCodeConfiguredAddress, openCodeConnection } from './openCodeModels';
 import { isSecureServiceUrl } from './serviceAddress';
+import { miniMaxPlanBaseUrl } from './extraProviders';
 
 const responsesAddresses = new Map([
 	['groq', 'https://api.groq.com/openai/v1'],
@@ -45,6 +46,7 @@ export function resolveModelConnection(options: {
 		baseUrl = native?.baseUrl || (official?.api === api ? official.baseUrl : '')
 			|| (provider.id === 'meta' && api === 'openai-completions' && official?.baseUrl === 'https://api.meta.ai/v1' ? official.baseUrl : '')
 			|| compatibleResponses
+			|| miniMaxPlanBaseUrl(provider.id, api)
 			|| onlyValue(known.filter((entry) => entry.api === api).map((entry) => entry.baseUrl));
 	}
 	const addressFromAuth = !baseUrl && provider.id === 'azure' && ['azure-openai-responses', 'openai-completions'].includes(api);

@@ -9,7 +9,7 @@ import { uiText } from './uiText';
 
 const RETENTION_DAYS = [7, 30, 90, 180, 0] as const;
 
-/** 只统计目录；缓存目录根部的模型资料不参与清理提示。 */
+/** 缓存清理统计会话及工具输出子目录。 */
 function directoryBytes(path: string, directoriesOnly = false): number {
 	let entries;
 	try { entries = readdirSync(path, { withFileTypes: true }); }

@@ -1,7 +1,7 @@
 import { getLanguage } from 'obsidian';
 import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 import { isBuiltInThinkingLevel } from '../orchestration/settings/thinking';
-import type { ContextCompaction, ModelConnection, ModelConnectionIssue, ShellStatus, ToolReviewStatus } from '../types';
+import type { ConfiguredModelType, ContextCompaction, ModelConnectionIssue, ShellStatus, ToolReviewStatus } from '../types';
 import type { ModelCapabilityIcon } from './modelCapabilityIcons';
 
 export interface UiText {
@@ -87,7 +87,6 @@ export interface UiText {
 	modelProtocolAutomatic: string;
 	modelAddressUnknown: string;
 	modelAddressFromAuth: string;
-	modelConnectionSources: Record<ModelConnection['source'], string>;
 	modelConnectionIssues: Record<ModelConnectionIssue, string>;
 	baseUrlNone: string;
 	baseUrlRequired: string;
@@ -96,8 +95,12 @@ export interface UiText {
 	fetchModelsDescription: string;
 	modelsFromProvider: string;
 	modelsFromPi: string;
+	modelsFromModelsDev: string;
 	modelsFromBundled: string;
+	modelsFromDocs: string;
+	modelsFromArkPlan: string;
 	modelsStale: string;
+	modelsPartial: string;
 	selectedModels: string;
 	addModel: string;
 	refreshing: string;
@@ -112,7 +115,9 @@ export interface UiText {
 	modelListDescription: string;
 	modelId: string;
 	contextWindow: string;
+	contextWindowPlaceholder: string;
 	maxOutputTokens: string;
+	maxOutputTokensPlaceholder: string;
 	inputModality: string;
 	outputModality: string;
 	capabilities: string;
@@ -134,7 +139,6 @@ export interface UiText {
 	chatChooseModel: string;
 	chatNoModelSelected: string;
 	chatResumeThinkingUnavailable: string;
-	customValue: string;
 	modalityText: string;
 	modalityImage: string;
 	enterModelId: string;
@@ -145,18 +149,18 @@ export interface UiText {
 	loadingModels: string;
 	modelCatalogUnavailable: string;
 	modelCatalogReadFailed: string;
+	modelCatalogFetchFailed: string;
 	back: string;
 	modelConfiguration: string;
+	modelType: string;
+	modelTypeLabels: Record<ConfiguredModelType, string>;
+	modelTypeConfirmed: string;
+	modelTypeManual: string;
+	modelTypeUnavailable: string;
 	defaults: string;
 	modelConfigSaveNote: string;
 	invalidModelConfiguration: string;
 	duplicateModelId: string;
-	refreshModels: string;
-	refreshModelsDescription: string;
-	refreshingModels: string;
-	modelsRefreshed: string;
-	modelsRefreshPartial: string;
-	refreshModelsFailed: string;
 	searchProviders: string;
 	noMatchingProviders: string;
 	configureProvider: string;
@@ -532,12 +536,6 @@ const EN: UiText = {
 	modelProtocolAutomatic: '{protocol} (automatic)',
 	modelAddressUnknown: 'Enter the base URL for this protocol',
 	modelAddressFromAuth: 'Determined by the Azure connection',
-	modelConnectionSources: {
-		catalog: 'Connection from the model catalog.',
-		compatible: 'Using a compatible connection. This model has no explicit catalog entry for the connection.',
-		configured: 'Using your connection settings.',
-		unresolved: 'Connection unconfirmed.',
-	},
 	modelConnectionIssues: {
 		'unknown-provider': 'The model provider is unavailable.',
 		'missing-protocol': 'The model’s API protocol is unconfirmed. Select a protocol to connect.',
@@ -550,11 +548,15 @@ const EN: UiText = {
 	baseUrlRequired: 'Fill in the base URL first',
 	models: 'Models',
 	fetchModels: 'Fetch models',
-	fetchModelsDescription: 'Read the model list from this vault’s saved data.',
-	modelsFromProvider: 'Model list from the provider',
-	modelsFromPi: 'Model list from Pi',
+	fetchModelsDescription: 'Find model candidates for this connection and combine available catalog data.',
+	modelsFromProvider: 'Primary catalog from the provider',
+	modelsFromPi: 'Primary catalog from Pi',
+	modelsFromModelsDev: 'Primary catalog from Models.dev',
 	modelsFromBundled: 'Model list from the bundled catalog',
-	modelsStale: 'Showing the last saved list',
+	modelsFromDocs: 'Primary catalog from the provider’s public documentation',
+	modelsFromArkPlan: 'Public Ark plan catalog. See the Ark console for account access.',
+	modelsStale: 'Latest list could not be confirmed',
+	modelsPartial: 'Partial catalog',
 	selectedModels: 'Selected models',
 	addModel: 'Add model',
 	refreshing: 'Loading…',
@@ -569,7 +571,9 @@ const EN: UiText = {
 	modelListDescription: 'Uncheck a model to remove it from your selection.',
 	modelId: 'Model ID',
 	contextWindow: 'Context window',
-	maxOutputTokens: 'Output limit',
+	contextWindowPlaceholder: 'e.g. 128000',
+	maxOutputTokens: 'Max output tokens',
+	maxOutputTokensPlaceholder: 'e.g. 65536',
 	inputModality: 'Input modality',
 	outputModality: 'Output modality',
 	capabilities: 'Capabilities',
@@ -592,7 +596,6 @@ const EN: UiText = {
 	chatChooseModel: 'Choose a model',
 	chatNoModelSelected: 'No model selected',
 	chatResumeThinkingUnavailable: 'The saved thinking level ({level}) is unavailable.',
-	customValue: 'Custom',
 	modalityText: 'Text',
 	modalityImage: 'Image',
 	enterModelId: 'Enter a model ID',
@@ -601,20 +604,21 @@ const EN: UiText = {
 	noModelsMatch: 'No models match the current filters.',
 	noModelsDiscovered: 'No models in the saved list. Enter a model ID above.',
 	loadingModels: 'Loading models…',
-	modelCatalogUnavailable: 'No saved model data for this connection. Add a model by ID, save, then select Update model data in model settings.',
-	modelCatalogReadFailed: 'Could not read the saved model data.',
+	modelCatalogUnavailable: 'Select Fetch models to find candidates for this connection or add a model by ID.',
+	modelCatalogReadFailed: 'Could not show model candidates. Select Fetch models to try again.',
+	modelCatalogFetchFailed: 'Could not get a model list for this connection. Check the address, protocol, and credential, or add a model by ID.',
 	back: 'Back',
 	modelConfiguration: 'Model configuration',
+	modelType: 'Model type',
+	modelTypeLabels: { text: 'Text', image: 'Image', video: 'Video', 'speech-synthesis': 'Speech synthesis',
+		'speech-recognition': 'Speech recognition', embedding: 'Embedding', rerank: 'Reranking', audio: 'Audio', other: 'Other' },
+	modelTypeConfirmed: 'Determined from the current model data.',
+	modelTypeManual: 'The model type is unconfirmed. Select the matching type.',
+	modelTypeUnavailable: 'Scribe Ai has no integration for this model type on this connection.',
 	defaults: 'Defaults',
 	modelConfigSaveNote: 'Saving updates the model connection and token limits.',
 	invalidModelConfiguration: 'Enter a model ID and valid integer limits.',
 	duplicateModelId: 'This model ID is already in the list.',
-	refreshModels: 'Update model data',
-	refreshModelsDescription: 'Update this vault’s model data from provider catalogs, Pi, and Models.dev.',
-	refreshingModels: 'Updating model data…',
-	modelsRefreshed: 'Model data updated.',
-	modelsRefreshPartial: 'Some model data could not be updated. The previous data is still available.',
-	refreshModelsFailed: 'Could not update model data.',
 	searchProviders: 'Search providers or models',
 	noMatchingProviders: 'No providers or models match your search.',
 	configureProvider: 'Configure provider',
@@ -990,12 +994,6 @@ const ZH_CN: UiText = {
 	modelProtocolAutomatic: '{protocol}（自动）',
 	modelAddressUnknown: '填写此协议对应的 Base URL',
 	modelAddressFromAuth: '由 Azure 连接配置决定',
-	modelConnectionSources: {
-		catalog: '使用模型目录中的连接信息。',
-		compatible: '使用兼容连接，目录没有提供此模型的专属连接信息。',
-		configured: '使用手动配置的连接。',
-		unresolved: '连接未确认。',
-	},
 	modelConnectionIssues: {
 		'unknown-provider': '找不到模型服务商。',
 		'missing-protocol': '无法确认此模型的 API 协议，请选择协议。',
@@ -1008,11 +1006,15 @@ const ZH_CN: UiText = {
 	baseUrlRequired: '请先填写 Base URL',
 	models: '模型',
 	fetchModels: '获取模型',
-	fetchModelsDescription: '从当前笔记库保存的模型数据中读取列表。',
-	modelsFromProvider: '模型列表来自服务商',
-	modelsFromPi: '模型列表来自 Pi',
+	fetchModelsDescription: '查询当前连接的候选模型，并合并可用的目录资料。',
+	modelsFromProvider: '目录主要来自服务商',
+	modelsFromPi: '目录主要来自 Pi',
+	modelsFromModelsDev: '目录主要来自 Models.dev',
 	modelsFromBundled: '模型列表来自插件内置目录',
-	modelsStale: '正在显示上次保存的列表',
+	modelsFromDocs: '目录主要来自服务商公开文档',
+	modelsFromArkPlan: '方舟公开套餐目录，账号可用范围以方舟控制台为准',
+	modelsStale: '本次未能确认目录更新',
+	modelsPartial: '目录部分可用',
 	selectedModels: '已选模型',
 	addModel: '添加模型',
 	refreshing: '加载中…',
@@ -1026,8 +1028,10 @@ const ZH_CN: UiText = {
 	modelList: '模型列表',
 	modelListDescription: '取消勾选可从当前选择中移除模型。',
 	modelId: '模型 ID',
-	contextWindow: '上下文长度',
-	maxOutputTokens: '输出上限',
+	contextWindow: '上下文窗口',
+	contextWindowPlaceholder: '例如 128000',
+	maxOutputTokens: '最大输出 Token',
+	maxOutputTokensPlaceholder: '例如 65536',
 	inputModality: '输入模态',
 	outputModality: '输出模态',
 	capabilities: '能力',
@@ -1050,7 +1054,6 @@ const ZH_CN: UiText = {
 	chatChooseModel: '选择模型',
 	chatNoModelSelected: '未选择模型',
 	chatResumeThinkingUnavailable: '原任务使用的「{level}」推理档位已不可用。',
-	customValue: '自定义',
 	modalityText: '文本',
 	modalityImage: '图片',
 	enterModelId: '输入模型 ID',
@@ -1059,20 +1062,21 @@ const ZH_CN: UiText = {
 	noModelsMatch: '没有符合当前筛选条件的模型。',
 	noModelsDiscovered: '已保存的列表里没有模型，可以在上方输入模型 ID。',
 	loadingModels: '正在加载模型…',
-	modelCatalogUnavailable: '这个连接还没有本地模型数据。可以先手动添加模型并保存，再到模型设置点击「更新模型数据」。',
-	modelCatalogReadFailed: '无法读取本地模型数据。',
+	modelCatalogUnavailable: '请选择「获取模型」查找当前连接的候选模型，或手动添加模型 ID。',
+	modelCatalogReadFailed: '无法显示候选模型。请选择「获取模型」重试。',
+	modelCatalogFetchFailed: '无法获取这个连接的模型列表。请检查地址、协议与凭据，或手动添加模型 ID。',
 	back: '返回',
 	modelConfiguration: '模型配置',
+	modelType: '模型类型',
+	modelTypeLabels: { text: '文本', image: '图片', video: '视频', 'speech-synthesis': '语音合成',
+		'speech-recognition': '语音识别', embedding: '嵌入', rerank: '重排', audio: '音频', other: '其他' },
+	modelTypeConfirmed: '根据当前模型资料确定。',
+	modelTypeManual: '模型类型尚未确认，请选择适用的类型。',
+	modelTypeUnavailable: 'Scribe Ai 尚未接入此连接下的该类型模型。',
 	defaults: '默认值',
 	modelConfigSaveNote: '保存后更新模型连接和令牌限制。',
 	invalidModelConfiguration: '请输入模型 ID 和有效的整数限制。',
 	duplicateModelId: '列表中已存在这个模型 ID。',
-	refreshModels: '更新模型数据',
-	refreshModelsDescription: '从服务商目录、Pi 和 Models.dev 更新当前笔记库的模型数据。',
-	refreshingModels: '正在更新模型数据…',
-	modelsRefreshed: '模型数据已更新。',
-	modelsRefreshPartial: '部分模型数据更新失败，已有资料仍可使用。',
-	refreshModelsFailed: '无法更新模型数据。',
 	searchProviders: '搜索服务商或模型',
 	noMatchingProviders: '没有匹配的服务商或模型。',
 	configureProvider: '配置服务商',
@@ -1448,12 +1452,6 @@ const ZH_TW: UiText = {
 	modelProtocolAutomatic: '{protocol}（自動）',
 	modelAddressUnknown: '填寫此協定對應的 Base URL',
 	modelAddressFromAuth: '由 Azure 連線設定決定',
-	modelConnectionSources: {
-		catalog: '使用模型目錄中的連線資訊。',
-		compatible: '使用相容連線，目錄沒有提供此模型的專屬連線資訊。',
-		configured: '使用手動設定的連線。',
-		unresolved: '連線未確認。',
-	},
 	modelConnectionIssues: {
 		'unknown-provider': '找不到模型服務商。',
 		'missing-protocol': '無法確認此模型的 API 協定，請選擇協定。',
@@ -1466,11 +1464,15 @@ const ZH_TW: UiText = {
 	baseUrlRequired: '請先填寫 Base URL',
 	models: '模型',
 	fetchModels: '取得模型',
-	fetchModelsDescription: '從目前筆記庫已儲存的模型資料讀取清單。',
-	modelsFromProvider: '模型清單來自服務商',
-	modelsFromPi: '模型清單來自 Pi',
+	fetchModelsDescription: '查詢目前連線的候選模型，並合併可用的目錄資料。',
+	modelsFromProvider: '目錄主要來自服務商',
+	modelsFromPi: '目錄主要來自 Pi',
+	modelsFromModelsDev: '目錄主要來自 Models.dev',
 	modelsFromBundled: '模型清單來自外掛內建目錄',
-	modelsStale: '正在顯示上次儲存的清單',
+	modelsFromDocs: '目錄主要來自服務商公開文件',
+	modelsFromArkPlan: '方舟公開方案目錄，帳號可用範圍以方舟控制台為準',
+	modelsStale: '本次未能確認目錄更新',
+	modelsPartial: '目錄部分可用',
 	selectedModels: '已選模型',
 	addModel: '新增模型',
 	refreshing: '載入中…',
@@ -1484,8 +1486,10 @@ const ZH_TW: UiText = {
 	modelList: '模型列表',
 	modelListDescription: '取消勾選可從目前選擇中移除模型。',
 	modelId: '模型 ID',
-	contextWindow: '上下文長度',
-	maxOutputTokens: '輸出上限',
+	contextWindow: '上下文視窗',
+	contextWindowPlaceholder: '例如 128000',
+	maxOutputTokens: '最大輸出 Token',
+	maxOutputTokensPlaceholder: '例如 65536',
 	inputModality: '輸入模態',
 	outputModality: '輸出模態',
 	capabilities: '能力',
@@ -1508,7 +1512,6 @@ const ZH_TW: UiText = {
 	chatChooseModel: '選擇模型',
 	chatNoModelSelected: '未選擇模型',
 	chatResumeThinkingUnavailable: '原任務使用的「{level}」推理檔位已無法使用。',
-	customValue: '自訂',
 	modalityText: '文字',
 	modalityImage: '圖片',
 	enterModelId: '輸入模型 ID',
@@ -1517,20 +1520,21 @@ const ZH_TW: UiText = {
 	noModelsMatch: '沒有符合目前篩選條件的模型。',
 	noModelsDiscovered: '已儲存的清單裡沒有模型，可在上方輸入模型 ID。',
 	loadingModels: '正在載入模型…',
-	modelCatalogUnavailable: '這個連線還沒有本機模型資料。可先手動新增模型並儲存，再到模型設定選取「更新模型資料」。',
-	modelCatalogReadFailed: '無法讀取本機模型資料。',
+	modelCatalogUnavailable: '請選取「取得模型」查詢目前連線的候選模型，或手動新增模型 ID。',
+	modelCatalogReadFailed: '無法顯示候選模型。請選取「取得模型」重試。',
+	modelCatalogFetchFailed: '無法取得這個連線的模型清單。請檢查位址、協定與憑證，或手動新增模型 ID。',
 	back: '返回',
 	modelConfiguration: '模型設定',
+	modelType: '模型類型',
+	modelTypeLabels: { text: '文字', image: '圖片', video: '影片', 'speech-synthesis': '語音合成',
+		'speech-recognition': '語音辨識', embedding: '嵌入', rerank: '重排', audio: '音訊', other: '其他' },
+	modelTypeConfirmed: '根據目前的模型資料確定。',
+	modelTypeManual: '模型類型尚未確認，請選取適用的類型。',
+	modelTypeUnavailable: 'Scribe Ai 尚未整合這個連線下的該類型模型。',
 	defaults: '預設值',
 	modelConfigSaveNote: '儲存後更新模型連線和權杖限制。',
 	invalidModelConfiguration: '請輸入模型 ID 和有效的整數限制。',
 	duplicateModelId: '清單中已存在這個模型 ID。',
-	refreshModels: '更新模型資料',
-	refreshModelsDescription: '從服務商目錄、Pi 和 Models.dev 更新目前筆記庫的模型資料。',
-	refreshingModels: '正在更新模型資料…',
-	modelsRefreshed: '模型資料已更新。',
-	modelsRefreshPartial: '部分模型資料更新失敗，既有資料仍可使用。',
-	refreshModelsFailed: '無法更新模型資料。',
 	searchProviders: '搜尋服務商或模型',
 	noMatchingProviders: '沒有符合的服務商或模型。',
 	configureProvider: '設定服務商',

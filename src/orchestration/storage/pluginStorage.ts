@@ -68,7 +68,7 @@ export async function initializePluginStorage(plugin: Plugin) {
 	const staged = await storage.stageMigration(() => localState.hasLegacy() || readLegacyPresets(app).some(Boolean));
 
 	return {
-		settings, conversations, localState, writeSettings, cache: storage.paths.cache, modelCatalog: storage.paths.modelCatalog,
+		settings, conversations, localState, writeSettings, cache: storage.paths.cache,
 		complete: () => staged ? Promise.resolve() : storage.complete(
 			() => plugin.saveData({ storageVersion: STORAGE_VERSION }),
 			async () => {

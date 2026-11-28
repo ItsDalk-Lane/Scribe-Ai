@@ -1,10 +1,14 @@
 # 模型目录核对
 
-核对日期为 2026 年 11 月 24 日。下表涵盖 Scribe Ai 的 49 个预置连接，包括 Pi 内置的 43 个服务商和 Scribe Ai 预置的 6 个套餐。匿名实测只读取了目录。需要登录的目录依据官方文档、服务商源码或未登录响应核对，实际账户可见的清单仍需用对应账户验证。
+Scribe Ai 在 2026 年 11 月 28 日复核了原有的 49 个预置连接，并新增 MiniMax M Plan 国际和中国两个连接。公开目录只执行读取，必须登录的连接依据官方接口和授权要求核对。自定义服务商使用用户配置的地址、协议及凭据。
 
-插件启动或点击 **更新模型数据** 时，会先查询各服务商的官方目录，按返回的下一页链接、游标或页码继续获取。成功时以官方名称清单为准，用内置 Pi 资料和 Models.dev 补充缺失的能力信息。如果官方目录取不到，会读取共享 Pi 目录，再用对应服务商或套餐的内置资料兜底。同一连接已有更可靠的本地清单时，刷新失败会保留旧清单。点击 **获取模型** 只读本地资料。刷新只读取目录，使用对应连接的访问凭据。模型能否调用仍由服务商、账号权限和现有接入方式决定。[Pi 模型目录](https://docs.pi.dev/latest/models) · [Models.dev](https://models.dev/)
+打开 **添加模型** 时会显示当前连接的内置候选和本次模型设置页已取得的结果。点击 **获取模型** 会按面板当前的地址、协议和已关联凭据查询该服务商，查询完成后打开候选列表。候选按模型类型分标签，搜索在当前标签内进行。官方目录、Pi 和 Models.dev 同次参与查询。已自定义的地址以该连接自己的目录为准。候选和补充字段仅在模型设置页使用，离开时取消查询并清空。插件不再在启动时查询模型目录，旧目录缓存不再参与读取。已添加的模型与显式设置仍保存在笔记库。
+
+官方目录成功时以其名单为准，包括空名单，按下一页链接、游标或页码取齐。火山官方预设也使用方舟公开 Markdown。官方名单不可用时，用确认属于同一连接的 Pi 和 Models.dev 资料补充候选，并按字段合并能力。当前会话内重试失败时可保留同连接较可靠的结果。公开候选的调用权限取决于服务商的账号、地区和产品权益。[Pi 模型目录](https://docs.pi.dev/latest/models) · [Models.dev](https://models.dev/)
 
 目录补充按实际服务地址、兼容协议和原始模型 ID 匹配。Kimi Code 国内、Qwen 个人版国内与国际、智谱 Coding Plan 国内、Together AI 和 Fireworks 的 Chat 连接使用各自对应的公开资料。Fireworks 的 Messages 连接使用独立的能力证据。结构化输出需要 JSON Schema 的接口依据，目录中未细分的 JSON 能力单独保存。同一连接的官方资料冲突时，配置项显示冲突并等待明确设置。打开模型配置可查看能力来源和核对时间。 [Kimi Code 模型表](https://www.kimi.com/code/docs/en/kimi-code/models.html) · [Together 能力表](https://docs.together.ai/docs/serverless/models) · [Fireworks JSON Schema](https://docs.fireworks.ai/structured-responses/structured-response-formatting)
+
+模型类型使用当前连接和官方资料确认。已知的非聊天模型仍可手动添加。模型实际调用时，显式填写的配置优先，能从插件随附资料确认的字段直接解析。需要在线确认的模型会在任务解析目的地、上下文预算和能力之前查当前连接，结果仅随本次任务使用。OpenCode 无法确认动态模型协议时暂停发送，用户可以在模型配置中指定协议。
 
 ## 固定 JSON Schema 和视频输入
 
@@ -24,13 +28,13 @@
 
 ## 已匿名取得的官方目录
 
-下列数量是核对当天的快照。公开目录与账户可用范围可能不同，添加模型时会筛除能确认属于嵌入、语音合成、转录或其他非聊天用途的条目。
+下列数量是核对当天的快照。聊天模型数量排除了已识别的嵌入、语音合成、转录及其他非聊天类型。公开目录与账户可用范围可能不同。
 
 | 预置服务商 | 本次核对结果 |
 | --- | --- |
 | OpenCode Zen（`opencode`）、OpenCode Go（`opencode-go`） | 各自查询 `/inference/v1/models` 和 `/inference/go/v1/models`。匿名取得 Zen 的 82 个和 Go 的 31 个聊天模型。使用对应凭据时返回账户可用范围。[官方模型列表](https://opencode.ai/docs/console/api/models/#inference-model-lists) |
 | OpenRouter（`openrouter`） | 公开 `/api/v1/models` 返回 474 项，已验证下一页链接。有可用凭据时优先查 `/api/v1/models/user`，以账号权限和限制为准。[公开目录](https://openrouter.ai/docs/api/api-reference/models/get-models) · [账号目录官方 SDK](https://github.com/OpenRouterTeam/python-sdk/blob/main/docs/sdks/models/README.mdx#list_for_user) |
-| Vercel AI Gateway（`vercel-ai-gateway`） | 公开 `/v1/models` 返回 518 项，按语言类型查询返回 321 项。[Vercel 官方参考](https://github.com/vercel-labs/open-agents/blob/main/.agents/skills/ai-sdk/references/ai-gateway.md) |
+| Vercel AI Gateway（`vercel-ai-gateway`） | 公开 `/v1/models` 返回 522 项，其中 322 项为语言模型。查询保留服务商明确标记的图片、视频、语音、嵌入和重排候选。[Vercel 模型目录](https://vercel.com/ai-gateway/models) |
 | Hugging Face（`huggingface`） | 官方 Router `/v1/models` 返回 159 项，官方说明该目录面向聊天模型。[官方目录说明](https://huggingface.co/docs/inference-providers/hub-api) |
 | NVIDIA（`nvidia`） | `/v1/models` 匿名返回 32 项。目录混有专用模型，多数条目未标注用途，显示范围取决于已确认的类型资料。[官方模型参考](https://docs.api.nvidia.com/nim/reference/llm-apis) |
 | Cerebras（`cerebras`） | `/public/v1/models` 匿名返回 2 项。已连接密钥时查询 `/v1/models`，账户范围仍需登录核对。[官方公开目录](https://inference-docs.cerebras.ai/api-reference/models/public-models) |
@@ -50,9 +54,10 @@
 | Fireworks（`fireworks`） | 兼容目录 `/inference/v1/models` 要求 Bearer 密钥，无效路径对照返回 404。另有可按 `pageToken` 翻页的账号目录。[官方账号目录](https://docs.fireworks.ai/api-reference/list-models) |
 | Google Gemini（`google`） | `/v1beta/models` 使用 `x-goog-api-key`，按 `nextPageToken` 翻页。读取支持 `generateContent` 的聊天模型。[官方目录](https://ai.google.dev/api/models) |
 | Groq（`groq`） | `/openai/v1/models` 要求认证。目录也包含语音专用型号。[官方模型目录](https://console.groq.com/docs/models) |
-| Kimi For Coding（`kimi-coding`） | `/coding/v1/models` 使用 Kimi Code 的会员密钥。[官方接入说明](https://www.kimi.com/code/docs/en/) |
+| Kimi For Coding（`kimi-coding`） | `/coding/v1/models` 使用 Kimi Code 的会员密钥或已关联的 Kimi Code OAuth 凭据。[官方接入说明](https://www.kimi.com/code/docs/en/) |
 | Meta（`meta`） | `/v1/models` 使用 Bearer 密钥，返回当前团队可用模型。官方模型总览区分聊天、图像生成、转录和分割。[官方目录](https://dev.meta.ai/docs/api-reference/models/list-models) · [模型总览](https://dev.meta.ai/docs/models) |
 | MiniMax 国际（`minimax`）、MiniMax 中国（`minimax-cn`） | 各自的 `/anthropic/v1/models` 使用 `x-api-key` 和版本头。[官方 Anthropic 兼容说明](https://platform.minimax.io/docs/api-reference/text-anthropic-api) |
+| MiniMax M Plan 国际（`minimax-m-plan`）、中国（`minimax-m-plan-cn`） | 使用所在地区的订阅密钥。国际地址为 `api.minimax.io`，中国为 `api.minimax.cn`。套餐已确认文本模型为 `MiniMax-M3.1-Flash`。通用模型目录不能单独证明套餐权益。 [国际套餐](https://platform.minimax.io/docs/m-plan/intro) · [中国套餐](https://platform.minimax.cn/docs/m-plan/intro) |
 | Mistral（`mistral`） | `/v1/models` 使用 Bearer 密钥。目录中的 `completion_chat` 标记可区分聊天模型。[官方目录](https://docs.mistral.ai/api/endpoint/models) |
 | Moonshot AI 国际（`moonshotai`）、Moonshot AI 中国（`moonshotai-cn`） | 各自的 `/v1/models` 使用开放平台密钥，一次返回可用模型。[国际目录](https://platform.kimi.ai/docs/api/list-models) · [中国目录](https://platform.kimi.com/docs/api/list-models) |
 | OpenAI（`openai`） | `/v1/models` 使用账户密钥。目录也返回嵌入、生成图像和音频等型号，会筛除已知专用型号。[官方目录](https://developers.openai.com/api/reference/resources/models/methods/list) |
@@ -60,19 +65,19 @@
 | xAI（`xai`） | `/v1/language-models` 使用 Bearer 密钥，专门提供语言和图像理解模型，也可返回能力和别名。[官方目录](https://docs.x.ai/developers/rest-api-reference/inference/models) |
 | 小米 MiMo 按量（`xiaomi`）、Token Plan 阿姆斯特丹（`xiaomi-token-plan-ams`）、中国（`xiaomi-token-plan-cn`）、新加坡（`xiaomi-token-plan-sgp`） | 分别查询各自域名的 `/v1/models`，需要对应密钥。目录也包含独立的语音识别和合成模型。[官方目录](https://mimo.mi.com/docs/en-US/api/model/list-models-get) · [套餐接入说明](https://mimo.mi.com/docs/en-US/tokenplan/Token%20Plan/quick-access) |
 | 百炼 Token Plan（`bailian-token-plan`）、Qwen Token Plan 国际（`qwen-token-plan`）、中国（`qwen-token-plan-cn`）、国际个人版（`qwen-token-plan-individual`）、中国个人版（`qwen-token-plan-individual-cn`） | 各地区的 `/compatible-mode/v1/models` 用套餐密钥查询。共享同一域名的个人版和团队版仍由密钥决定可用范围。[官方接口示例](https://help.aliyun.com/en/edge-security-acceleration/esa/user-guide/accelerate-token-plan-or-model-studio-api) |
-| 百炼按量（`bailian-payg`） | 默认查按量兼容目录 `/compatible-mode/v1/models`。官方另有工作空间原生目录，支持按文本生成筛选和翻页。[按量地址](https://help.aliyun.com/en/model-studio/base-url) · [原生目录](https://help.aliyun.com/zh/model-studio/list-models) |
-| 火山方舟豆包按量（`volcengine-doubao`） | `/api/v3/models` 使用 Bearer 密钥，返回当前账户可见的模型版本和能力资料。[官方目录](https://docs.volcengine.com/docs/ark/models-api?lang=zh) |
-| 火山方舟 Agent Plan（`volcengine-agent-plan`）、Coding Plan（`volcengine-coding-plan`） | 分别尝试 `/api/plan/v3/models` 和 `/api/coding/v3/models`。未登录时网关统一要求认证，两个套餐的实际目录仍需对应账号核对。[官方套餐接入说明](https://docs.volcengine.com/docs/ark/coding-plan-personal-ai-codex?lang=zh) |
+| 百炼按量（`bailian-payg`） | 美国共享域名和已填写的工作空间域名优先查各自的 `/api/v1/models`，按文本生成筛选并翻页。其余连接使用自己的兼容目录 `/compatible-mode/v1/models`。[按量地址](https://help.aliyun.com/en/model-studio/base-url) · [原生目录](https://help.aliyun.com/zh/model-studio/list-models) |
+| 火山方舟豆包按量（`volcengine-doubao`） | `/api/v3/models` 使用该连接的按量密钥，返回当前账户可见的模型版本和能力资料。账户目录不可用时，读取方舟公开 Markdown，本次复核提取到 18 个文本和 14 个专用候选。[账号目录](https://docs.volcengine.com/docs/ark/models-api?lang=zh) · [公开模型列表](https://ark.volcengine.com/region:cn-beijing/docs/model-list.md) |
+| 火山方舟 Agent Plan（`volcengine-agent-plan`）、Coding Plan（`volcengine-coding-plan`） | 官方预设读取两种个人套餐各自的公开 Markdown。截至 2026 年 11 月 28 日，两种都列出 13 个文本模型及 Auto 路由。离线时使用插件内置候选。官方目录管理 API 使用火山账号的 Access Key 签名，账号可用范围以方舟控制台为准。[Agent Plan 公开目录](https://ark.volcengine.com/region:cn-beijing/docs/agent-plan-personal-plan-overview.md) · [Coding Plan 公开目录](https://ark.volcengine.com/region:cn-beijing/docs/coding-plan-personal-plan-overview.md) |
 | 智谱国际 Z.AI（`zai`）、中国 Coding Plan（`zai-coding-cn`） | 各自尝试 `/api/coding/paas/v4/models`，沿用对应地区的套餐密钥。路径参考 CC Switch，账号实际清单仍需核对。[Z.AI 套餐说明](https://docs.z.ai/devpack/overview) · [CC Switch 实现](https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/services/model_fetch.rs) |
 
 ## 需要额外账户信息或暂无聊天模型
 
 | 预置服务商 | 官方目录可用的条件 |
 | --- | --- |
-| Amazon Bedrock（`amazon-bedrock`） | 用同地区的 Bedrock Bearer 密钥查询 `foundation-models?byOutputModality=TEXT`，密钥需有目录读取权限。此目录列出基础模型，账户的跨区推理配置需在 AWS 单独核对。其他类型的凭证走 Pi 或内置目录回退。[官方目录](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_ListFoundationModels.html) |
+| Amazon Bedrock（`amazon-bedrock`） | 用同地区、具备相应 IAM 权限的 Bedrock Bearer 密钥查询基础模型和推理配置目录。推理配置仅列入已启用且文档或基础模型目录能确认是文本的目标。单个目录失败时保留另一份结果并注明不完整。[基础模型目录](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_ListFoundationModels.html) · [推理配置目录](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_ListInferenceProfiles.html) |
 | Azure OpenAI（`azure`） | 配置 Azure 资源地址和资源密钥后，查询 `/openai/v1/models`。遇到 404 或 405 时尝试旧版目录。目录列出资源可用的模型，自定义部署名称仍以 Azure 资源中的部署为准。[新版目录](https://learn.microsoft.com/en-us/rest/api/microsoft-foundry/azureopenai/models) · [旧版目录](https://learn.microsoft.com/en-us/rest/api/azureopenai/models/list?view=rest-azureopenai-2024-10-21) |
-| Cloudflare AI Gateway（`cloudflare-ai-gateway`）、Cloudflare Workers AI（`cloudflare-workers-ai`） | 需要 Cloudflare 账户编号及具备目录读取权限的 API 令牌。Gateway 和 Workers 分别查询 `/ai/catalog/models` 和 `/ai/models/search`，按页取齐。仅具备 AI Gateway 权限的令牌可能无法读取目录。[统一目录官方实现](https://github.com/cloudflare/cloudflare-docs/blob/production/bin/fetch-catalog-models.ts) · [Workers AI 官方目录](https://developers.cloudflare.com/api/resources/ai/subresources/models/methods/list/) |
+| Cloudflare AI Gateway（`cloudflare-ai-gateway`）、Cloudflare Workers AI（`cloudflare-workers-ai`） | 需要 Cloudflare 账户编号及具备目录读取权限的 API 令牌。Gateway 和 Workers 分别查询 `/ai/catalog/models` 和 `/ai/models/search`，按页取齐，并根据官方任务标记保留专用模型。仅具备 AI Gateway 权限的令牌可能无法读取目录。[统一目录官方实现](https://github.com/cloudflare/cloudflare-docs/blob/production/bin/fetch-catalog-models.ts) · [Workers AI 官方目录](https://developers.cloudflare.com/api/resources/ai/subresources/models/methods/list/) |
 | GitHub Copilot（`github-copilot`） | 通过已关联的 Copilot 凭据查询对应账号的 `/models`。可选范围受订阅计划和组织策略限制。[GitHub 官方模型说明](https://docs.github.com/en/copilot/reference/ai-models/supported-models) · [Pi 连接说明](https://docs.pi.dev/latest/providers) |
 | OpenAI Codex（`openai-codex`） | 通过已关联的 ChatGPT 登录令牌和账号查询 `/backend-api/codex/models`。请求格式参考 CC Switch。[OpenAI Codex 客户端](https://github.com/openai/codex) · [CC Switch 实现](https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/services/codex_oauth_models.rs) |
 | Google Vertex AI（`google-vertex`） | `v1beta1/publishers/google/models` 按 `nextPageToken` 翻页。仅在当前连接可提供 Google Cloud OAuth 凭据时查询。Vertex Express API key 实测无法访问此目录，会使用 Pi 或内置资料。[官方目录](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1beta1/publishers.models/list) |
-| TypeSafe（`typesafe`） | 项目现有接入只提供分类模型，聊天模型清单为空。[Pi 模型说明](https://docs.pi.dev/latest/models) |
+| TypeSafe（`typesafe`） | 使用 Bearer 密钥查询官方 `/v1/models` 分类模型。插件将它们标记为其他类型，聊天模型清单为空。[官方 API 说明](https://api.typesafe.ai/redoc#tag/models/operation/list_models_v1_models_get) |

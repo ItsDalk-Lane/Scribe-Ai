@@ -9,6 +9,8 @@ import { canResumeRun, ResumeThinkingUnavailable } from '../orchestration/runRes
 import { composerShortcut } from './composerKeyboard';
 import { vaultSuggestions } from './vaultSuggestions';
 import { manualConversationSummary } from '../orchestration/context/manualConversationSummary';
+import { pdfAttachmentPath } from '../orchestration/context/pdfAttachments';
+import { isPdfAnalysisModelAvailable } from '../orchestration/settings/modelAvailability';
 import { confirmAction } from './ConfirmModal';
 import { logScope } from '../communication/diagnostics';
 import { approvedPlanRequest, submittedPlan } from './chatPlan';
@@ -94,7 +96,7 @@ function draftRequest(draft: ComposerDraft, conversationId: string, intent?: Tas
 }
 
 function vaultRefs(refs: NoteRef[]): NoteRef[] {
-	return refs.filter(({ path, kind }) => !isAbsolute(path) && (kind === 'folder' || !isImageFile(path)));
+	return refs.filter((ref) => !isAbsolute(ref.path) && !pdfAttachmentPath(ref) && (ref.kind === 'folder' || !isImageFile(ref.path)));
 }
 
 interface ChatPaneProps {
@@ -128,6 +130,10 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 	const subscribeSlashTargets = useCallback((listener: () => void) => services.tools.mcp?.subscribe(listener), [services]);
 	const chatModel = useChatModel(plugin, conversation.runs.at(-1)?.model, true);
 	const [refs, setRefs] = useState(() => vaultRefs(conversation.runs.at(-1)?.request.refs ?? []));
+	const pdfModel = services.settings.pdfModel;
+	const pdfAnalysisModelLabel = pdfModel && refs.some(pdfAttachmentPath)
+		&& isPdfAnalysisModelAvailable(services.settings, pdfModel, services.communication.models)
+		? `${chatModel.groups.find(({ id }) => id === pdfModel.providerId)?.label ?? pdfModel.providerId} / ${pdfModel.model}` : undefined;
 	const [quotes, setQuotes] = useState<string[]>([]);
 	const [history, setHistory] = useState<DisplayedRun[]>(conversation.runs);
 	const [summaryPreview, setSummaryPreview] = useState<{ taskId: string; usage: AuxiliaryUsage }>();
@@ -154,6 +160,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 	const mounted = useRef(false);
 	const navigating = useRef(false);
 	const visible = useRef(selected);
+	const enqueueing = useRef(false);
 	const openingSideChat = useRef(false);
 	const auxiliary = useRef<AbortController>(null);
 	const denials = useRef<AutoReviewDenial[]>([]);
@@ -485,6 +492,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 
 	async function askSideChat(request: TaskRequest, prompt = request.instruction, queued?: Pick<QueuedMessage, 'destination'>) {
 		if (request.selection) throw new SideChatHandoffError(text.queueSelectionUnavailable);
+		if (request.refs.some(pdfAttachmentPath)) throw new SideChatHandoffError(tr('请在普通聊天中发送 PDF。', 'Send PDFs in a regular chat.'));
 		if (request.target) throw new SideChatHandoffError(tr('这条任务已指定服务或子 Agent，请在主聊天中发送。', 'Send this targeted task in the main chat.'));
 		if (navigating.current) throw new SideChatHandoffError(text.sideChatOpenFailed);
 		if (openingSideChat.current) throw new SideChatHandoffError(text.sideChatBusy);
@@ -594,14 +602,14 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		setError('');
 		if (!queued && !queue.rows.length && queue.paused) queue.resume(Promise.resolve(conversationId));
 		const replaceFrom = draft ? editing?.taskId : undefined;
-		let appliedEdit = false;
+		let acceptedDraft = false;
 		let displayed = resume ? restoreExecution(resume) : emptyExecution;
 		const onEvent = (event: RunEvent) => {
 			if (active.current !== submission) return;
 			displayed = updateExecution(displayed, event);
 			setExecution(displayed);
-			if (draft && replaceFrom && !appliedEdit && event.type === 'state' && event.state.messages.some(({ role }) => role === 'user')) {
-				appliedEdit = true;
+			if (draft && !acceptedDraft && event.type === 'state' && event.state.messages.some(({ role }) => role === 'user')) {
+				acceptedDraft = true;
 				clearDraft(draft, true);
 			}
 		};
@@ -660,7 +668,6 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 			if (request.intent === 'plan') planDraftRun.current = run.taskId;
 			setLiveRequest(request);
 			setLiveModel(resume?.model ?? choice);
-			if (draft && !replaceFrom) clearDraft(draft, true);
 			const result = await run.result;
 			onEvent({ type: 'state', state: result });
 			if (active.current !== submission) return;
@@ -697,7 +704,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 			return result;
 		} catch (cause) {
 			if (active.current === submission) {
-				if (resume || replaceFrom || queued) {
+				if (resume || replaceFrom || queued || draft && !acceptedDraft) {
 					setExecution(emptyExecution);
 					setLiveRequest(undefined);
 					setLiveModel(undefined);
@@ -792,14 +799,44 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 			const current = active.current;
 			if (current) {
 				const choice = chatModel.choice;
-				const destination = choice && queuedModelDestination(choice, services.communication.models.modelConnection);
-				if (!destination) {
+				if (enqueueing.current) return;
+				const models = services.communication.models;
+				const hasPdf = refs.some(pdfAttachmentPath);
+				const resolveDestination = async () => {
+					if (!choice) return;
+					await models.prepareModel?.(choice);
+					const destination = queuedModelDestination(choice, models.modelConnection);
+					if (!destination || !hasPdf) return { destination };
+					const missingPdfModel = () => new Error(tr('请先在「服务 → PDF 解析」中选择可用的 PDF 解析模型。',
+						'Select an available PDF analysis model in Services → PDF analysis first.'));
+					if (!pdfModel || services.settings.pdfModel !== pdfModel || !isPdfAnalysisModelAvailable(services.settings, pdfModel, models)) {
+						throw missingPdfModel();
+					}
+					if (choice.providerId !== pdfModel.providerId || choice.model !== pdfModel.model) await models.prepareModel?.(pdfModel);
+					const pdfDestination = queuedModelDestination(pdfModel, models.modelConnection);
+					if (services.settings.pdfModel !== pdfModel || !isPdfAnalysisModelAvailable(services.settings, pdfModel, models) || !pdfDestination) {
+						throw missingPdfModel();
+					}
+					return { destination, pdfDestination };
+				};
+				enqueueing.current = true;
+				let destinations: Awaited<ReturnType<typeof resolveDestination>>;
+				try {
+					destinations = await (models.withPreparedModels ? models.withPreparedModels(resolveDestination) : resolveDestination());
+				} catch (cause) {
+					if (mounted.current && visible.current) setError(cause instanceof Error ? cause.message : text.chatFailed);
+					return;
+				} finally {
+					enqueueing.current = false;
+				}
+				if (!mounted.current || !visible.current || navigating.current) return;
+				if (!destinations?.destination) {
 					setError(tr('请先为当前模型配置明确的接收地址，再添加排队消息。', 'Set an explicit endpoint for this model before queuing a message.'));
 					return;
 				}
 				const request = draftRequest(draft, conversationId, planned ? 'plan' : undefined, planDraftRun.current);
 				request.skillNotePaths = services.orchestration.skills.notePaths(refs);
-				queue.add(request, Promise.resolve(conversationId), destination);
+				queue.add(request, Promise.resolve(conversationId), destinations.destination, destinations.pdfDestination);
 				clearDraft(draft);
 				setError('');
 			} else {
@@ -810,6 +847,7 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 
 	function slashUnavailable(name: SlashCommandName, args: string): string | undefined {
 		if (!selected || navigating.current) return text.chatLoadingHistory;
+		if (name === 'plan' && args && refs.some(pdfAttachmentPath)) return tr('请在普通聊天中发送 PDF。', 'Send PDFs in a regular chat.');
 		const goalAction = name === 'goal' && slashGoalActions.some((action) => action === args.toLowerCase());
 		const switchingDuringWork = (name === 'plan' || (name === 'goal' && !goalAction)) && busy && !active.current?.goal;
 		if (switchingDuringWork || (busy && ['clear', 'review', 'compact', 'recap', 'approve', 'presets', 'export'].includes(name))) {
@@ -864,7 +902,9 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 		setBusy(true);
 		try {
 			// 界面发起的辅助请求也记入当前对话的日志。
-			return await logScope.run(conversationId.toLowerCase(), () => work(controller.signal));
+			const execute = () => logScope.run(conversationId.toLowerCase(), () => work(controller.signal));
+			const models = services.communication.models;
+			return await (models.withPreparedModels ? models.withPreparedModels(execute) : execute());
 		} finally {
 			if (auxiliary.current === controller) {
 				auxiliary.current = null;
@@ -1050,7 +1090,9 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				if (!choice) throw new Error(text.chatModelMissing);
 				const summary = await runAuxiliary(async (signal) => {
 					const store = services.orchestration.conversations;
-					const checkModel = guardModelConnection(services.settings, choice, services.communication.models.modelConnection);
+					const { modelConnection, modelType, prepareModel } = services.communication.models;
+					await prepareModel?.(choice, signal);
+					const checkModel = guardModelConnection(services.settings, choice, modelConnection, modelType);
 					const snapshot = await store.load(conversationId);
 					const output = await manualConversationSummary(snapshot, services.communication.models, choice, name, signal, async (taskId, usage) => {
 						await store.append(conversationId, [{ type: 'auxiliary-usage', taskId, usage }]);
@@ -1205,6 +1247,8 @@ export default function App({ plugin, historyTrigger, conversation, mode, onMode
 				modelValue={chatModel.value}
 				modelSaving={chatModel.saving}
 				modelSelecting={chatModel.selecting}
+				pdfAnalysisSupported={!planned && !history[editIndex]?.request.intent}
+				pdfAnalysisModelLabel={pdfAnalysisModelLabel}
 				thinking={chatModel.thinking}
 				onModelChange={changeModel}
 				onThinkingChange={(level) => void changeThinking(level)}

@@ -3,6 +3,10 @@ import { registerHooks } from 'node:module';
 import test from 'node:test';
 import type { App, Setting } from 'obsidian';
 import type ScribeAiPlugin from '../../main';
+import { normalizeSettings } from '../../orchestration/settings/defaults';
+import { chatModelKey } from '../../orchestration/settings/thinking';
+import { normalizeWebSearchSettings } from '../../tools/external/webSearchSettings';
+import type { ScribeSettings } from '../../types';
 
 void test('native settings search and legacy settings open the same tabs and use the same settings', async (t) => {
 	const hooks = registerHooks({
@@ -11,7 +15,8 @@ void test('native settings search and legacy settings open the same tabs and use
 		load: (url, context, next) => url === 'test:obsidian-settings' ? {
 			shortCircuit: true, format: 'commonjs', source: `
 				class Element {
-					children = []; attrs = {}; listeners = {}; ownerDocument = { defaultView: null };
+					children = []; attrs = {}; listeners = {}; style = {}; ownerDocument = { defaultView: null };
+					createEl(_tag, options) { return this.createDiv(options); }
 					createDiv({ cls, attr } = {}) {
 						const element = new Element();
 						element.parent = this;
@@ -26,11 +31,14 @@ void test('native settings search and legacy settings open the same tabs and use
 					click() { this.listeners.click?.(); }
 					empty() { this.children = []; }
 					toggleClass() {}
+					setText(text) { this.text = text; }
 					setAttribute(key, value) { this.attrs[key] = value; }
 					querySelectorAll() { return []; }
 					remove() { this.parent.children = this.parent.children.filter((child) => child !== this); }
 				}
 				exports.getLanguage = () => 'en';
+				exports.setIcon = () => {};
+				exports.setTooltip = () => {};
 				exports.Platform = { isDesktopApp: true };
 				exports.Modal = class {};
 				exports.Notice = class {};
@@ -48,7 +56,9 @@ void test('native settings search and legacy settings open the same tabs and use
 					setDesc() { return this; }
 					setHeading() { return this; }
 					addDropdown(callback) {
-						const field = { addOption: () => field, setValue: (value) => { this.settingEl.value = value; return field; },
+						const field = { selectEl: new Element(), addOption: (value, label) => {
+							(this.settingEl.options ??= []).push([value, label]); return field;
+						}, setValue: (value) => { this.settingEl.value = value; return field; },
 							setDisabled: (value) => { this.settingEl.disabled = value; return field; },
 							onChange: (change) => { this.settingEl.change = change; return field; } };
 						callback(field);
@@ -56,7 +66,10 @@ void test('native settings search and legacy settings open the same tabs and use
 					}
 					addToggle(callback) { return this.addDropdown(callback); }
 					addText(callback) {
-						const field = { inputEl: new Element(), setValue: () => field };
+						let value = '';
+						const field = { inputEl: new Element(), setPlaceholder: () => field, setDisabled: () => field,
+							setValue: (text) => { value = text; return field; }, getValue: () => value };
+						this.settingEl.textField = field;
 						callback(field);
 						return this;
 					}
@@ -71,16 +84,22 @@ void test('native settings search and legacy settings open the same tabs and use
 	t.after(() => hooks.deregister());
 	const { ScribeAiSettingTab } = await import('../SettingsTab');
 	const { Setting: SettingStub } = await import('obsidian');
-	const settings: { chatLocation: string; confirmChatRemoval: boolean; communication: { proxyUrl: string };
-		confirmFullAccessExternalActions?: boolean } = {
-		chatLocation: 'right-sidebar', confirmChatRemoval: true, communication: { proxyUrl: '' },
-	};
+	const settings = normalizeSettings({
+		webSearch: normalizeWebSearchSettings({ provider: 'exa' }),
+	});
+	settings.communication.providerNames.pc = 'Provider';
 	let saved = 0;
+	let clearedModelCatalogs = 0;
 	let rejectPermissionSave = false;
+	let rejectPdfSave = false;
 	const permissions: boolean[] = [];
 	const plugin = {
 		register() {},
 		saveSettings() { saved++; },
+		async savePdfModel(pdfModel: ScribeSettings['pdfModel']) {
+			if (rejectPdfSave) throw new Error('Save failed');
+			settings.pdfModel = normalizeSettings({ pdfModel }).pdfModel;
+		},
 		async saveFullAccessExternalActions(approved: boolean) {
 			if (rejectPermissionSave) throw new Error('Save failed');
 			permissions.push(approved);
@@ -88,6 +107,10 @@ void test('native settings search and legacy settings open the same tabs and use
 		},
 		manifest: { name: 'Scribe Ai', version: '1.0.2' },
 		services: { settings, paths: { cache: '', data: '', logs: '' }, logs: { size: () => 0 },
+			communication: { models: { providers: () => [],
+				modelCapabilities: (_provider: string, model: string) => ({ pdfAnalysis: model !== 'text-only' }),
+				modelType: (_provider: string, model: string) => model === 'image-model' ? 'image' : 'text' },
+				modelCatalog: { clearSettings: () => { clearedModelCatalogs++; } } },
 			orchestration: { skills: { library: { list: async () => [] } } } },
 	} as unknown as ScribeAiPlugin;
 
@@ -104,6 +127,7 @@ void test('native settings search and legacy settings open the same tabs and use
 			assert.equal(definition.name, 'Scribe Ai');
 			assert.ok(definition.aliases?.includes('Proxy URL'));
 			assert.ok(definition.aliases?.includes('Web search'));
+			assert.ok(definition.aliases?.includes('PDF analysis'));
 			assert.ok(definition.aliases?.includes('Require approval for elevated actions in full access'));
 			const shell = new SettingStub(tab.containerEl);
 			cleanup = definition.render(shell, {} as Parameters<typeof definition.render>[1]);
@@ -124,6 +148,33 @@ void test('native settings search and legacy settings open the same tabs and use
 		};
 		await location.change(native ? 'editor-tab' : 'left-sidebar');
 		assert.equal(settings.chatLocation, native ? 'editor-tab' : 'left-sidebar');
+		const servicesTab = Array.from(tabs.children).find((node) =>
+			(node as typeof tabs).attrs.id === 'scribe-ai-settings-tab-services') as HTMLElement;
+		settings.providerModels = { pc: ['reads-pdf', 'text-only', 'image-model'], disabled: ['reads-pdf'] };
+		settings.disabledProviderIds = ['disabled'];
+		servicesTab.click();
+		const services = Array.from(container.children).find((node) => (node as typeof tabs).attrs.id === 'scribe-ai-settings-services');
+		const pdf = Array.from(services!.children).flatMap((group) => Array.from(group.children))
+			.find((row) => (row as HTMLElement & { name?: string }).name === 'PDF analysis model') as HTMLElement & {
+				value: string; options: [string, string][]; change(value: string): Promise<void>;
+			};
+		const model = chatModelKey('pc', 'reads-pdf');
+		assert.ok(pdf);
+		assert.deepEqual(pdf.options, [['', 'Not configured'], [model, 'Provider / reads-pdf']]);
+		assert.equal(pdf.value, native ? model : '');
+		await pdf.change(chatModelKey('pc', 'text-only'));
+		assert.equal(settings.pdfModel?.model, native ? 'reads-pdf' : undefined);
+		rejectPdfSave = native;
+		await pdf.change(native ? '' : model);
+		assert.deepEqual(settings.pdfModel, { providerId: 'pc', model: 'reads-pdf' });
+		if (native) {
+			assert.equal(pdf.value, model);
+			rejectPdfSave = false;
+			await pdf.change('');
+			assert.equal(settings.pdfModel, undefined);
+		}
+		settings.providerModels = {};
+		settings.disabledProviderIds = [];
 
 		const advancedTab = Array.from(tabs.children).find((node) =>
 			(node as typeof tabs).attrs.id === 'scribe-ai-settings-tab-advanced') as HTMLElement;
@@ -138,15 +189,25 @@ void test('native settings search and legacy settings open the same tabs and use
 		await approval.change(native);
 		assert.equal(settings.confirmFullAccessExternalActions, native);
 		assert.equal(approval.value, native);
-		assert.equal(rows.at(-1)?.name, 'Current plugin version');
+		assert.ok(rows.some((row) => row.name === 'Current plugin version'));
 		if (native) {
 			rejectPermissionSave = true;
 			await approval.change(false);
 			assert.equal(approval.value, true);
 			assert.equal(approval.disabled, false);
 		}
+		const modelTab = Array.from(tabs.children).find((node) =>
+			(node as typeof tabs).attrs.id === 'scribe-ai-settings-tab-models') as HTMLElement;
+		const clearedBefore = clearedModelCatalogs;
+		modelTab.click();
+		assert.equal(clearedModelCatalogs, clearedBefore);
+		advancedTab.click();
+		assert.equal(clearedModelCatalogs, clearedBefore + 1);
+		modelTab.click();
+		if (native) cleanup?.();
+		else tab.hide();
+		assert.equal(clearedModelCatalogs, clearedBefore + 2);
 		tab.hide();
-		cleanup?.();
 	}
 	assert.equal(saved, 2);
 	assert.deepEqual(permissions, [false, true]);

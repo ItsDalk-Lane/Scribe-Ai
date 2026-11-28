@@ -30,7 +30,8 @@ export function useMessageQueue(store: ConversationStore, onSaveError: () => voi
 	function persist(owner: QueueView, row: QueueRow, conversation: Promise<string>) {
 		const operation = owner.saving.then(async () => {
 			const conversationId = await conversation;
-			const message = { id: row.id, request: { ...row.request, conversationId }, destination: row.destination };
+			const message = { id: row.id, request: { ...row.request, conversationId }, destination: row.destination,
+				...(row.pdfDestination && { pdfDestination: row.pdfDestination }) };
 			await store.enqueue(conversationId, message);
 			const saved = await store.getQueued(conversationId).catch(() => [message]);
 			update(owner, owner.rows.flatMap((item) => item.id !== row.id ? [item]
@@ -53,9 +54,9 @@ export function useMessageQueue(store: ConversationStore, onSaveError: () => voi
 		isUpdating: () => updates.current > 0,
 		sentToSide: (id: string) => acceptedSideQuestions.get(store)?.has(id) === true,
 		pause() { setPaused(true); },
-		add(request: TaskRequest, conversation: Promise<string>, destination: QueuedModelDestination) {
+		add(request: TaskRequest, conversation: Promise<string>, destination: QueuedModelDestination, pdfDestination?: QueuedModelDestination) {
 			const owner = view.current;
-			const row = { id: randomUUID(), request, destination, pending: true };
+			const row = { id: randomUUID(), request, destination, ...(pdfDestination && { pdfDestination }), pending: true };
 			update(owner, [...owner.rows, row]);
 			persist(owner, row, conversation);
 		},

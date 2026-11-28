@@ -12,8 +12,8 @@ export interface ProviderGroup {
 const GROUP_SPECS: Array<{ label: string; variants: string[] }> = [
 	{ label: '火山引擎', variants: ['volcengine-agent-plan', 'volcengine-coding-plan', 'volcengine-doubao'] },
 	{ label: 'Moonshot AI', variants: ['moonshotai', 'moonshotai-cn', 'kimi-coding'] },
-	{ label: 'MiniMax', variants: ['minimax', 'minimax-cn'] },
-	{ label: 'Z.AI', variants: ['zai', 'zai-coding-cn'] },
+	{ label: 'MiniMax', variants: ['minimax', 'minimax-cn', 'minimax-m-plan', 'minimax-m-plan-cn'] },
+	{ label: 'Z.AI', variants: ['zai', 'zai-coding-cn', 'zai-payg', 'zai-payg-cn'] },
 	{ label: '阿里云百炼', variants: ['bailian-token-plan', 'bailian-coding-plan', 'bailian-payg', 'qwen-token-plan', 'qwen-token-plan-cn', 'qwen-token-plan-individual', 'qwen-token-plan-individual-cn'] },
 	{ label: 'Xiaomi MiMo', variants: ['xiaomi', 'xiaomi-token-plan-ams', 'xiaomi-token-plan-cn', 'xiaomi-token-plan-sgp'] },
 	{ label: 'OpenAI', variants: ['openai', 'openai-codex'] },
@@ -32,8 +32,6 @@ export function groupProviders(providers: ModelProviderInfo[]): ProviderGroup[] 
 			const provider = byId.get(id);
 			if (!provider) continue;
 			used.add(id);
-			// 同一厂商内 Base URL 完全相同就是同一个端点，只保留先出现的（Qwen 团队/个人套餐即重复）
-			if (provider.baseUrl && variants.some((variant) => variant.baseUrl === provider.baseUrl)) continue;
 			variants.push(provider);
 		}
 		if (variants.length) groups.push({ id: variants[0]?.id ?? spec.label, label: spec.label, providers: variants });

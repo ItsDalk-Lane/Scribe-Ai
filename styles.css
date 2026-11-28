@@ -4253,6 +4253,33 @@ video.scribe-chat-player {
 	padding: 0 8px;
 }
 
+.scribe-model-bar .scribe-model-fetch {
+	display: inline-grid;
+	place-items: center;
+}
+
+.scribe-model-fetch > span {
+	grid-area: 1 / 1;
+}
+
+.scribe-model-fetch[aria-busy="true"] .scribe-model-fetch-label {
+	visibility: hidden;
+}
+
+.scribe-model-fetch-spinner {
+	box-sizing: border-box;
+	width: 16px;
+	height: 16px;
+	border: 2px solid var(--background-modifier-border);
+	border-top-color: var(--text-muted);
+	border-radius: 50%;
+	animation: scribe-chat-spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.scribe-model-fetch-spinner { animation: none; }
+}
+
 .scribe-model-picker {
 	display: flex;
 	min-width: 0;
@@ -4295,7 +4322,7 @@ video.scribe-chat-player {
 	display: flex;
 	box-sizing: border-box;
 	width: min(440px, calc(100% - 16px));
-	max-height: min(320px, calc(100% - 16px));
+	max-height: min(400px, calc(100% - 16px));
 	flex-direction: column;
 	gap: 8px;
 	overflow: auto;
@@ -4310,6 +4337,27 @@ video.scribe-chat-player {
 .scribe-model-panel-title {
 	color: var(--text-muted);
 	font-size: var(--font-ui-smaller);
+}
+
+.scribe-model-type-tabs {
+	display: flex;
+	flex-shrink: 0;
+	overflow-x: auto;
+	gap: 4px;
+	padding: 1px;
+	scrollbar-width: thin;
+}
+
+.scribe-model-type-tabs > button {
+	flex: 0 0 auto;
+	white-space: nowrap;
+}
+
+.scribe-model-type-results {
+	display: flex;
+	min-height: 0;
+	flex: 1;
+	flex-direction: column;
 }
 
 .scribe-model-panel .scribe-model-checklist {
@@ -4481,14 +4529,42 @@ video.scribe-chat-player {
 	height: var(--icon-s, 16px);
 }
 
+/* 数字预设：胶囊按钮一键填充，下方输入框始终可见 */
 .scribe-form-control.scribe-number-control {
-	flex-direction: row;
+	gap: 8px;
+}
+
+.scribe-number-presets {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.scribe-number-preset {
+	display: inline-flex;
+	box-sizing: border-box;
 	align-items: center;
+	justify-content: center;
+	min-width: 44px;
+	min-height: 26px;
+	padding: 0 6px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 999px;
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	cursor: pointer;
+}
+
+.scribe-number-preset:hover {
+	background: var(--background-modifier-hover);
 }
 
 .scribe-custom-number {
-	width: 130px;
-	padding: 4px 8px;
+	box-sizing: border-box;
+	width: 100%;
+	padding: 6px 10px;
 }
 
 .scribe-model-config-header .scribe-connection-status {

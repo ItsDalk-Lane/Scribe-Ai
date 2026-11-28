@@ -7,7 +7,7 @@ import { createRoot } from 'react-dom/client';
 import { SIDE_CHAT_ICON, SIDE_CHAT_VIEW_TYPE } from '../constants';
 import type ScribeAiPlugin from '../main';
 import { isModelAvailable } from '../orchestration/settings/modelAvailability';
-import { chatModelKey } from '../orchestration/settings/thinking';
+import { chatModelKey, chatReasoningForRequest } from '../orchestration/settings/thinking';
 import type { NoteRef, QueuedMessage, RunContext, SavedRun, SideChat, SkillMention } from '../types';
 import { composerShortcut } from './composerKeyboard';
 import { exportSlash, showSlashMcp, showSlashWarnings } from './slashActions';
@@ -38,7 +38,7 @@ export interface SideChatOpening {
 
 interface SideChatHandle {
 	check(opening: SideChatOpening): void;
-	receive(opening: SideChatOpening): void;
+	receive(opening: SideChatOpening): Promise<void>;
 }
 
 export class SideChatHandoffError extends Error {}
@@ -57,8 +57,8 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 	const group = modelOptions.groups.find(({ models }) => models.some((entry) => entry.value === value));
 	const choice = group?.models.find((entry) => entry.value === value);
 	const model = group && choice ? { providerId: group.id, model: choice.id } : undefined;
-	const thinking = model ? communication.models.thinkingOptions(model,
-		(value === localValue ? localEffort : undefined) ?? settings.thinkingByModel[value]) : { levels: [] };
+	const preferredEffort = (value === localValue ? localEffort : undefined) ?? settings.thinkingByModel[value];
+	const thinking = model ? communication.models.thinkingOptions(model, preferredEffort) : { levels: [] };
 	const [draft, setDraft] = useState('');
 	const [skillMentions, setSkillMentions] = useState<SkillMention[]>([]);
 	const [parentScope, setParentScope] = useState(chat.skillScope);
@@ -78,7 +78,7 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 	const mounted = useRef(false);
 	const running = useRef(false);
 	function requireModel() {
-		if (!model || !isModelAvailable(settings, model)) {
+		if (!model || !isModelAvailable(settings, model, communication.models.modelType)) {
 			throw new SideChatHandoffError(text.chatModelMissing);
 		}
 		return model;
@@ -91,7 +91,7 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 		const run = chat.submit({ instruction: question, refs: references, chatQuotes: excerpts,
 			imageSourcePath: imageLinkSource(plugin.app, question, imageSourcePath),
 			skillMentions: mentions, skillScope: scope, skillNotePaths,
-			model: { ...selectedModel, reasoning: thinking.level }, queued }, { onEvent: (event) => {
+			model: { ...selectedModel, reasoning: chatReasoningForRequest(thinking, preferredEffort) }, queued }, { onEvent: (event) => {
 			if (!mounted.current) return;
 			displayed = updateExecution(displayed, event);
 			setExecution(displayed);
@@ -112,6 +112,7 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 				setExecution(emptyExecution);
 			}
 		});
+		return run.prepared;
 	}
 
 	function check({ prompt = '', refs = [], quotes = [] }: SideChatOpening) {
@@ -121,13 +122,13 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 
 	useImperativeHandle(handoff, () => ({
 		check,
-		receive(opening) {
+		async receive(opening) {
 			check(opening);
 			const { prompt = '', refs: incomingRefs = [], quotes: incomingQuotes = [] } = opening;
 			if (opening.skillScope) setParentScope(opening.skillScope);
 			if (prompt.trim()) {
 				try {
-					submit(prompt, incomingRefs, incomingQuotes, opening.skillMentions ?? [], opening.skillScope, opening.skillNotePaths, opening.imageSourcePath, opening.queued);
+					await submit(prompt, incomingRefs, incomingQuotes, opening.skillMentions ?? [], opening.skillScope, opening.skillNotePaths, opening.imageSourcePath, opening.queued);
 				} catch (cause) {
 					if (cause instanceof Error) throw new SideChatHandoffError(cause.message);
 					throw cause;
@@ -193,13 +194,14 @@ function SideChatPanel({ plugin, chat, handoff, onClose, initialModel }: {
 				error={error} instruction={draft} onChange={(value, mentions, scope) => {
 					setDraft(value); setSkillMentions(mentions);
 					if (scope) setParentScope(scope);
-				}} onSubmit={(question, mentions, scope) => {
+				}} onSubmit={async (question, mentions, scope) => {
 					if (!question.trim()) return;
 					try {
-						submit(question, refs, quotes, mentions, scope);
-						setDraft('');
-						setSkillMentions([]);
-						setQuotes([]);
+						await submit(question, refs, quotes, mentions, scope);
+						if (!mounted.current) return;
+						setDraft((previous) => previous === draft ? '' : previous);
+						setSkillMentions((previous) => previous === skillMentions ? [] : previous);
+						setQuotes((previous) => previous === quotes ? [] : previous);
 						setRefs((previous) => previous.filter(({ addedExternal, path, kind }) => !addedExternal && (kind === 'folder' || !isImageFile(path))));
 					} catch (cause) {
 						setError(cause instanceof Error ? cause.message : text.chatFailed);
@@ -236,7 +238,7 @@ export class SideChatView extends ItemView {
 		await this.app.workspace.revealLeaf(this.leaf);
 		const handoff = this.handoff.current;
 		if (!handoff) throw new Error(uiText().sideChatOpenFailed);
-		handoff.receive(opening);
+		await handoff.receive(opening);
 	}
 
 	override async onClose() {

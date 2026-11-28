@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { SIDE_CHAT_ICON } from '../../constants';
 import { retainDraftImages } from '../../orchestration/storage/retainedImages';
 import { userImageReferences } from '../../orchestration/context/imageAttachments';
+import { pdfAttachmentPath } from '../../orchestration/context/pdfAttachments';
 import type { ExecutionMode, SkillInfo, SkillMention, SkillRegistry, TaskTarget } from '../../types';
 import { clipboardImages, saveClipboardImage } from '../composerImages';
 import { isImageFile, MAX_IMAGES } from '../../tools/support/imageData';
@@ -50,6 +51,8 @@ interface TaskInputProps {
 	modelValue: string;
 	modelSaving?: boolean;
 	modelSelecting?: boolean;
+	pdfAnalysisSupported?: boolean;
+	pdfAnalysisModelLabel?: string;
 	thinking: ThinkingSelection;
 	error: string;
 	instruction: string;
@@ -83,7 +86,8 @@ interface TaskInputProps {
 
 export default function TaskInput({
 	inputRef, busy, disabled, conversationId, context, contextMetric, executionMode, composerMode, vaultOnly, placeholder,
-	modelGroups, modelValue, modelSaving = false, modelSelecting = false, thinking, error, instruction, skills, skillScope, skillMentions,
+	modelGroups, modelValue, modelSaving = false, modelSelecting = false, pdfAnalysisSupported = false, pdfAnalysisModelLabel,
+	thinking, error, instruction, skills, skillScope, skillMentions,
 	target, onRemoveTarget, onChange, onModelChange, onThinkingChange, onSubmit, onStop, queueDuringRun = false,
 	onContinueQueue, queueContinuingDisabled, onClose, onResume, slashCommands,
 }: TaskInputProps) {
@@ -138,9 +142,15 @@ export default function TaskInput({
 	const modelTrigger = useRef<HTMLButtonElement>(null);
 	const permissionsTrigger = useRef<HTMLButtonElement>(null);
 	const attachedImages = context.refs.filter(({ kind, lines, path }) => kind !== 'folder' && !lines && isImageFile(path));
+	const hasPdf = context.refs.some(pdfAttachmentPath);
+	const pdfIssue = !hasPdf ? undefined : !pdfAnalysisSupported || isSideCommand
+		? tr('请在普通聊天中发送 PDF。', 'Send PDFs in a regular chat.')
+		: !pdfAnalysisModelLabel ? tr('请先在「服务 → PDF 解析」中选择可用的 PDF 解析模型。',
+			'Select an available PDF analysis model in Services → PDF analysis first.') : undefined;
+	const missingPrompt = !instruction.trim() && (modeKind === 'goal' || (!attachedImages.length && !hasPdf));
 	const blocked = disabled || commandRunning || pasting
-		|| (slashDraft ? draftLocked : !isSideCommand && (contextLocked || (!isSkillMenu && (modelSaving || !modelValue
-			|| (!instruction.trim() && (!attachedImages.length || modeKind === 'goal'))))));
+		|| (slashDraft ? draftLocked : Boolean(pdfIssue && !isSkillMenu)
+			|| (!isSideCommand && (contextLocked || (!isSkillMenu && (modelSaving || !modelValue || missingPrompt)))));
 	const actionLabel = busy ? text.chatStop : isSkillMenu ? skillMenuText().title : isSideCommand ? text.sideChatOpen : slashDraft ? slashText.run : text.submit;
 	const queueHint = busy && queueDuringRun && !slashDraft ? text.queueEnterHint : undefined;
 	const commandDescription = command ? slashText.describe(command.name) : slashDraft ? slashText.label : undefined;
@@ -238,7 +248,10 @@ export default function TaskInput({
 		try {
 			const scope = skillScope ?? skills.scope(context.refs);
 			const mentions = await prepareSkillMentions({ instruction, skillMentions }, skills, scope);
-			if (mounted.current) await onSubmit(instruction.trim() ? instruction : tr('请查看这些图片。', 'Look at these images.'), mentions, scope);
+			const prompt = instruction.trim() ? instruction : hasPdf ? (attachedImages.length
+				? tr('请分析这些附件。', 'Analyze these attachments.') : tr('请分析附件中的 PDF。', 'Analyze the attached PDF.'))
+				: tr('请查看这些图片。', 'Look at these images.');
+			if (mounted.current) await onSubmit(prompt, mentions, scope);
 		} catch (cause) {
 			if (mounted.current) setSkillError(cause instanceof Error ? cause.message : text.chatFailed);
 		} finally {
@@ -319,7 +332,9 @@ export default function TaskInput({
 					}}
 				/>
 				{goalDraft && <div className="setting-item-description">{text.chatGoalReviewDisclosure}</div>}
-				{(skillError || error) && <div className="scribe-chat-error" role="alert">{skillError || error}</div>}
+				{hasPdf && !pdfIssue && <div className="setting-item-description">{tr(`PDF 原件和当前问题将发送给 ${pdfAnalysisModelLabel}。`,
+					`The PDF and your question will be sent to ${pdfAnalysisModelLabel}.`)}</div>}
+				{(pdfIssue || skillError || error) && <div className="scribe-chat-error" role="alert">{pdfIssue || skillError || error}</div>}
 				<div className="scribe-compose-toolbar">
 					<button type="button" className="scribe-compose-action scribe-compose-reference" disabled={referencesDisabled}
 						aria-label={text.chatAddContext} title={text.chatAddContext} aria-expanded={referenceMenuOpen}

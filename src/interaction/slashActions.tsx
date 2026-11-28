@@ -85,14 +85,14 @@ function mcpSlashTarget(view: McpServerView): SlashTargetChoice {
 }
 
 function agentSlashTargets(plugin: ScribeAiPlugin): SlashTargetChoice[] {
-	const { settings } = plugin.services;
+	const { settings, communication } = plugin.services;
 	const { mode, roles: custom } = normalizeSubagentSettings(settings.subagents);
 	const roles = new Map([...BUILTIN_SUBAGENT_ROLES, ...custom].map((role) => [role.name, role]));
 	return [...roles.values()].map(({ name, description, model }) => ({
 		target: { kind: 'agent', id: name, label: name },
 		description,
 		reason: mode === 'off' ? tr('子 Agent 已关闭。', 'Subagents are off.')
-			: model && !isModelAvailable(settings, model)
+			: model && !isModelAvailable(settings, model, communication.models.modelType)
 				? tr('所选模型已不可用。', 'Configured model unavailable.') : undefined,
 	}));
 }

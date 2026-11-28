@@ -48,7 +48,7 @@ export interface UsageTotals extends Partial<Record<UsageMetric, number>> {
 }
 
 export interface UsageBreakdown extends UsageTotals {
-	byKind: Record<'main' | 'review' | 'summary', UsageTotals | undefined> & { video?: UsageTotals };
+	byKind: Record<'main' | 'review' | 'summary', UsageTotals | undefined> & { video?: UsageTotals; pdf?: UsageTotals };
 }
 
 export interface ContextUsage {
@@ -111,14 +111,17 @@ function usageBreakdown(messages: readonly Message[], auxiliary: readonly Auxili
 	const review: RequestUsage[] = [];
 	const summary: RequestUsage[] = [];
 	const video: RequestUsage[] = [];
-	const requests = { review, 'goal-review': review, summary, video, 'main-attempt': main };
+	const pdf: RequestUsage[] = [];
+	const requests = { review, 'goal-review': review, summary, video, pdf, 'main-attempt': main };
 	for (const { kind, reportedUsage, estimatedUsage, cost, usageStatus } of auxiliary) {
 		const provisional = usageStatus === 'provisional' || (kind === 'main-attempt' && usageStatus === undefined);
 		requests[kind].push({ ...normalizeUsage(reportedUsage, cost, estimatedUsage), provisional });
 	}
-	const total = usageTotals([...main, ...review, ...summary, ...video]);
+	const total = usageTotals([...main, ...review, ...summary, ...video, ...pdf]);
 	const videoUsage = usageTotals(video);
-	return total && { ...total, byKind: { main: usageTotals(main), review: usageTotals(review), summary: usageTotals(summary), ...(videoUsage && { video: videoUsage }) } };
+	const pdfUsage = usageTotals(pdf);
+	return total && { ...total, byKind: { main: usageTotals(main), review: usageTotals(review), summary: usageTotals(summary),
+		...(videoUsage && { video: videoUsage }), ...(pdfUsage && { pdf: pdfUsage }) } };
 }
 
 export function runUsage(state: RunState): UsageBreakdown | undefined {
